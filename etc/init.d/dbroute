@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+# START=20: 在 firewall(19) 之後載入，避免被 fw4 table 重建覆蓋
+# ip rule/route 由 hotplug 或 dbroute-setup.sh 在 WG 介面起來後設定
+START=20
+STOP=10
+
+NFT_FILE="/etc/myscript/dbroute.nft"
+
+start() {
+    # 載入 nft 規則（追加到 firewall 已建立的 inet fw4 table）
+    if [ -f "$NFT_FILE" ]; then
+        nft -f "$NFT_FILE" && logger -t dbroute "nft rules loaded" || logger -t dbroute "nft rules load failed"
+    fi
+
+    # 背景等 dnsmasq ready 後填充 nft set
+    ( sleep 30 && /etc/myscript/dbroute-refresh.sh && logger -t dbroute "nft sets refreshed" ) &
+}
+
+stop() {
+    # 移除所有 priority 100 的 fwmark 規則
+    ip rule show | grep "priority 100" | while read -r line; do
+        fwmark=$(echo "$line" | sed -n 's/.*fwmark \(0x[0-9a-f]*\).*/\1/p')
+        table=$(echo "$line" | sed -n 's/.*lookup \([0-9]*\).*/\1/p')
+        if [ -n "$fwmark" ] && [ -n "$table" ]; then
+            ip rule del fwmark "$fwmark" lookup "$table" 2>/dev/null
+        fi
+    done
+
+    # 動態移除 dbroute 的 chain 和所有 route_*_v4 set
+    nft delete chain inet fw4 domain_prerouting 2>/dev/null
+    for _set in $(nft list sets inet fw4 2>/dev/null | grep -o 'route_.*_v4'); do
+        nft delete set inet fw4 "$_set" 2>/dev/null
+    done
+
+    logger -t dbroute "All domain routing rules removed"
+}

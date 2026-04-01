@@ -1,0 +1,70 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# 引入通知器
+. /etc/myscript/push_notify.inc
+PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
+
+
+mkdir -p /tmp/config_ram
+
+cp -a /etc/config/* /tmp/config_ram/
+
+mount --bind /tmp/config_ram /etc/config
+
+mkdir -p /tmp/crontabs_ram
+
+cp -a /etc/crontabs/* /tmp/crontabs_ram/
+
+mount --bind /tmp/crontabs_ram /etc/crontabs
+
+# 防止 reboot cron 造成開機循環
+sed -i '/^[^#].*reboot/d' /etc/crontabs/root
+
+# LED 關閉 (依機型)
+case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+    cmcc,rax3000m)
+        # CMCC 白燈: GPIO 546 toggle 關閉
+        echo 546 > /sys/class/gpio/export 2>/dev/null
+        echo out > /sys/class/gpio/gpio546/direction 2>/dev/null
+        echo 0 > /sys/class/gpio/gpio546/value 2>/dev/null
+        sleep 1
+        echo 1 > /sys/class/gpio/gpio546/value 2>/dev/null
+        echo 546 > /sys/class/gpio/unexport 2>/dev/null
+        ;;
+esac
+
+/etc/myscript/check-custpkgs.sh &
+
+
+
+# 確保 LuCI 緩存被清除 (即使它可能不存在)
+rm -f /tmp/luci-indexcache
+
+# 延遲重啟 uhttpd 服務，確保 LuCI 正確載入 dockerman.lua
+(sleep 30 && /etc/init.d/uhttpd restart) & 
+
+
+sleep 60
+
+for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+  hs=$(wg show $iface latest-handshakes | awk '{if($2>max) max=$2} END{print max}')
+  hs=${hs:-0}  # 保險，空值設為0
+
+  now=$(date +%s)
+  diff=$((now - hs))
+
+  if [ "$hs" -eq 0 ] || [ "$diff" -gt 180 ]; then
+    logger -t rc.local "$iface handshake stale ($diff sec), restarting..."
+    ifdown $iface
+    sleep 2
+    ifup $iface
+    push_notify "ifup-$iface"
+  else
+    logger -t rc.local "$iface handshake OK ($diff sec)"
+  fi
+done
+
+
+exit 0
+

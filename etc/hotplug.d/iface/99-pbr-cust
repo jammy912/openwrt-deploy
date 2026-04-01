@@ -1,0 +1,47 @@
+#!/bin/sh
+# 處理所有以 wg 開頭的介面 (wg0, wg1, wg2...)
+
+LOG_TAG="pbr-cust"
+LOG_FILE="/var/log/pbr-cust.log"
+
+log() {
+    MSG="$1"
+    # 寫到系統 log
+    logger -t $LOG_TAG "$MSG"
+    # 另外寫到自訂檔案
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $MSG" >> $LOG_FILE
+}
+
+case "$INTERFACE" in
+    wg_*)
+        case "$ACTION" in
+            ifup)
+                # 檢查此介面是否有域名路由規則
+                if grep -q "route_${INTERFACE}_v4" /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null; then
+                    log "$INTERFACE up → 執行 dbroute-setup"
+                    /etc/myscript/dbroute-setup.sh
+                fi
+                ;;
+        esac
+        ;;
+esac
+
+case "$INTERFACE" in
+    wg*)
+        case "$ACTION" in
+            ifup)
+                 # 判斷是否已經有 pbr-cust 跑著，避免重複 start
+		 if ! pgrep -f pbr-cust >/dev/null; then
+		    log "$INTERFACE up → 執行 pbr-cust start"
+		    /etc/init.d/pbr-cust start
+		 else
+		    log "$INTERFACE up → pbr-cust 已在執行中，略過"
+		 fi
+                ;;
+            ifdown)
+                log "$INTERFACE down → 執行 pbr-cust stop"
+                /etc/init.d/pbr-cust stop
+                ;;
+        esac
+        ;;
+esac

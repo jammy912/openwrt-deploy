@@ -1,0 +1,170 @@
+#!/bin/sh /etc/rc.common
+# CustRule PBR 自動套用腳本，保證開機及 wg2 ready 後執行
+
+START=99
+STOP=10
+
+LOG_FILE="/tmp/pbr-cust.log"
+
+log() {
+    UTC_TS=$(date -u +%s)
+    TW_TS=$((UTC_TS + 8*3600))
+    TW_DATE=$(date -u -d "@$TW_TS" +"%Y-%m-%d %H:%M:%S")
+    echo "$TW_DATE - $1" >> $LOG_FILE
+}
+
+wait_for_wg2() {
+    # 等 wg2 interface up
+    for i in $(seq 1 30); do
+        ip link show wg2 >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
+cleanup_old() {
+    log "Cleaning up CustRule PBR..."
+    for tbl in $(seq 1000 4000); do
+        ip route flush table $tbl 2>/dev/null
+        ip rule | grep "lookup $tbl" | while IFS= read -r line; do
+            idx=$(echo "$line" | awk -F: '{print $1}' | tr -d ' ')
+            [ -n "$idx" ] && ip rule del pref $idx 2>/dev/null
+            log "Deleted ip rule #$idx for table $tbl"
+        done
+    done
+    log "CustRule PBR cleanup complete."
+}
+
+
+cleanup() {
+    log "Cleaning up CustRule PBR..."
+    
+    # 步驟 1: 一次性解析所有需要刪除的規則，並刪除 ip rule
+    # 運行一次 ip rule，並讓 awk 處理所有邏輯，避免數千次 grep/awk/tr 呼叫
+    ip rule | awk -F: '
+        /lookup/ { 
+            # 檢查 lookup table 是否在 1000 到 4000 之間
+            split($0, arr, "lookup "); 
+            table_id = arr[2];
+            
+            if (table_id >= 1000 && table_id <= 4000) {
+                # 提取規則編號 (例如：0: from all)
+                idx = $1;
+                
+                # 執行刪除指令 (使用 system() 執行外部命令)
+                # 使用絕對路徑確保 Crontab 環境兼容
+                system("/sbin/ip rule del pref " idx " 2>/dev/null");
+                
+                # 記錄日誌
+                # system("/usr/bin/logger -t pbr_cleanup \"Deleted ip rule #" idx " for table " table_id "\"");
+                
+                # 記錄到 stdout (用於 Crontab 日誌)
+                print "Deleted ip rule #" idx " for table " table_id
+            }
+        }
+    '
+
+    # 步驟 2: 清空路由表
+    # 雖然仍需 4100 次呼叫，但這是 ip route flush 的最低要求
+    for tbl in $(/usr/bin/seq 1000 4000); do
+        /sbin/ip route flush table $tbl 2>/dev/null
+    done
+    
+    log "CustRule PBR cleanup complete."
+}
+
+
+apply_rules() {
+    log "Applying CustRule PBR..."
+
+    # 清除舊規則
+    cleanup
+
+    # 依 /etc/config/pbr 生成 CustRule
+    uci show pbr | grep "=policy" | while IFS= read -r line; do
+        idx=$(echo "$line" | cut -d'=' -f1)
+        name=$(uci get "$idx.name" 2>/dev/null)
+
+        # 检查 enabled 选项，如果为 '0' 则跳过
+        enabled=$(uci get "$idx.enabled" 2>/dev/null)
+        if [ "$enabled" = "0" ]; then
+            log "Rule disabled: $name, skip"
+            continue
+        fi
+
+
+
+            case "$name" in
+        CustRule*)
+            src=$(uci get "$idx.src_addr" 2>/dev/null)
+            dev=$(uci get "$idx.dest_addr" 2>/dev/null)
+            [ -z "$src" ] || [ -z "$dev" ] && { log "Warning: src_addr or dest_addr empty for $name, skip"; continue; }
+
+            table_id=$(echo "$name" | tr -dc '0-9')
+            ! echo "$table_id" | grep -q '^[0-9]*$' && { log "Warning: invalid table_id for $name, skip"; continue; }
+
+            # 刪掉舊規則避免重複
+            ip rule del from $src lookup $table_id 2>/dev/null
+            ip route flush table $table_id 2>/dev/null
+
+            # 建立規則
+            ip rule add from $src lookup $table_id priority 200 2>/dev/null
+
+            # 根據設備決定 route
+            case "$dev" in
+                wan)
+                    ip route add default via $WAN_GW dev wan table $table_id 2>/dev/null
+                    ;;
+                wg*)
+                    ip route add default dev $dev table $table_id 2>/dev/null
+                    ;;
+                *)
+                    log "Warning: unknown device $dev for $name, skip"
+                    continue
+                    ;;
+            esac
+
+            log "Added rule: $src -> $dev (table $table_id)"
+            ;;
+        esac
+    done
+
+    ip route flush cache
+
+    log "CustRule PBR applied successfully."
+}
+
+start() {
+    log "Starting CustRule PBR auto..."
+
+    # ..................
+    #cp /etc/init.d/pbr-cust /etc/myscript/pbr-cust
+    #cp /etc/hotplug.d/iface/99-pbr-cust /etc/myscript/99-pbr-cust
+    #log "Copied script to /etc/config/pbr-cust  /etc/myscript/99-pbr-cust"
+
+    
+
+    if wait_for_wg2; then
+        apply_rules
+    else
+        log "Warning: wg2 interface not found, skipped apply"
+    fi
+}
+
+stop() {
+    log "Stopping CustRule PBR auto..."
+    cleanup
+}
+
+
+
+
+
+
+
+# chmod +x /etc/init.d/pbr-cust
+# /etc/init.d/pbr-cust start
+# /etc/init.d/pbr-cust enable
+
+# chmod +x /etc/hotplug.d/iface/99-pbr-cust
+

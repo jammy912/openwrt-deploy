@@ -1,0 +1,15 @@
+config interface template
+	option name wan
+	option disabled 0
+	option bandwidth_up 20mbit
+	option bandwidth_down 60mbit
+	option overhead_type none
+	option ingress 1
+	option egress 1
+	option mode diffserv4
+	option nat 1
+	option host_isolate 1
+	option autorate_ingress 0
+	option ingress_options "nat dual-dsthost ingress mpu 84"
+	option egress_options "nat dual-srchost mpu 84"
+	option options ""

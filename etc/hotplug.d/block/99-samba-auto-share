@@ -1,0 +1,162 @@
+#!/bin/sh
+# 檔名: 99-samba-auto-share-hotplug
+# 功能: USB/外接硬碟熱插拔自動掛載，NTFS 使用 ntfs3，失敗自動 fallback ntfs-3g
+#       掛載前檢查檔案系統，並自動管理 Samba share 配置。
+
+# 引入通知器
+. /etc/myscript/push_notify.inc
+PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
+
+
+SAMBA_SERVICE="samba4"
+SAMBA_CONFIG="samba4"
+TARGET_BASE="/srv/share/USB"
+
+# 確保基礎目錄存在
+mkdir -p "$TARGET_BASE"
+
+# 僅處理區塊裝置的分區事件
+[ "$SUBSYSTEM" = "block" ] || exit 0
+[ "$DEVTYPE" = "partition" ] || exit 0
+
+# --- 保留原本抓 metadata 方式 ---
+if [ -z "$LABEL" ] || [ -z "$UUID" ] || [ -z "$FSTYPE" ]; then
+    METADATA=$(block info | grep "/dev/$DEVICENAME:")
+    LABEL=$(echo "$METADATA" | awk -F'LABEL=' '{print $2}' | cut -d'"' -f2)
+    FSTYPE=$(echo "$METADATA" | awk -F'TYPE=' '{print $2}' | cut -d'"' -f2)
+    UUID=$(echo "$METADATA" | awk -F'UUID=' '{print $2}' | cut -d'"' -f2)
+fi
+
+# LABEL 可能為空（尤其是 ext4），使用 DEVICENAME 作為替代
+if [ -z "$LABEL" ]; then
+    LABEL="$DEVICENAME"
+    logger "Samba Hotplug (WARN): No LABEL found for $DEVICENAME, using device name as label."
+fi
+
+if [ -z "$UUID" ]; then
+    logger "Samba Hotplug (ERROR): Device $DEVICENAME skipped. Could not determine UUID."
+    exit 0
+fi
+
+# 清理 Label 名稱
+SHARE_NAME_SAFE=$(echo "$LABEL" | sed 's/[^a-zA-Z0-9_-]/_/g')
+SHARE_PATH="$TARGET_BASE/$SHARE_NAME_SAFE"
+
+# =========================================================
+# 輔助函式: 清理所有不活動的 share
+# =========================================================
+cleanup_all_stale_shares() {
+    logger "Samba Hotplug (CLEANUP): Starting full UCI cleanup."
+    CLEANUP_REQUIRED=0
+
+    uci show $SAMBA_CONFIG | grep "@sambashare" | cut -d'=' -f1 | while read -r FULL_PATH; do
+        SHARE_NODE=$(echo "$FULL_PATH" | cut -d'.' -f2)
+        SHARE_PATH_IN_CONFIG=$(uci get $SAMBA_CONFIG.$SHARE_NODE.path 2>/dev/null)
+        if [ ! -z "$SHARE_PATH_IN_CONFIG" ] && ! grep -q "$SHARE_PATH_IN_CONFIG" /proc/mounts; then
+            logger "Samba Hotplug (CLEANUP): Deleting stale share on $SHARE_PATH_IN_CONFIG."
+            uci delete $SAMBA_CONFIG.$SHARE_NODE 2>/dev/null
+            CLEANUP_REQUIRED=1
+        fi
+    done
+
+    if [ "$CLEANUP_REQUIRED" -eq 1 ]; then
+        uci commit $SAMBA_CONFIG
+        /etc/init.d/$SAMBA_SERVICE restart
+        logger "Samba Hotplug (CLEANUP): Cleanup complete and Samba service restarted."
+    else
+        logger "Samba Hotplug (CLEANUP): No stale shares found."
+    fi
+}
+
+# =========================================================
+# ADD 事件
+# =========================================================
+if [ "$ACTION" = "add" ]; then
+    logger "Samba Hotplug (ADD): Processing device $DEVICENAME, Label $LABEL, Target $SHARE_PATH."
+
+    # 建立掛載點
+    mkdir -p "$SHARE_PATH"
+
+    # 掛載前檢查檔案系統
+    if [ "$FSTYPE" = "ntfs" ]; then
+        logger "Samba Hotplug (ADD): Running ntfsfix on /dev/$DEVICENAME"
+        ntfsfix /dev/$DEVICENAME
+    elif [ "$FSTYPE" = "ext4" ] || [ "$FSTYPE" = "ext3" ] || [ "$FSTYPE" = "ext2" ]; then
+        logger "Samba Hotplug (ADD): Running e2fsck on /dev/$DEVICENAME"
+        e2fsck -y /dev/$DEVICENAME 2>&1 | logger
+    else
+        logger "Samba Hotplug (ADD): Running fsck on /dev/$DEVICENAME"
+        fsck -y /dev/$DEVICENAME
+    fi
+
+    # 掛載檔案系統
+    MOUNT_OK=0
+    if [ "$FSTYPE" = "ntfs" ]; then
+        logger "Samba Hotplug (ADD): Mounting NTFS with kernel ntfs3."
+        if mount -t ntfs3 /dev/$DEVICENAME "$SHARE_PATH"; then
+            push_notify "快USB_mnt_ntfs3_succeed"
+            MOUNT_OK=1
+        else
+            logger "Samba Hotplug (ADD): ntfs3 failed, fallback to ntfs-3g."
+            if mount -t ntfs-3g /dev/$DEVICENAME "$SHARE_PATH"; then
+               push_notify "慢USB_mnt_ntfs-3g_succeed"
+               MOUNT_OK=1
+            fi
+        fi
+    elif [ "$FSTYPE" = "ext4" ] || [ "$FSTYPE" = "ext3" ] || [ "$FSTYPE" = "ext2" ]; then
+        # ext4/ext3/ext2: 強制 rw + errors=continue 避免唯讀掛載
+        logger "Samba Hotplug (ADD): Mounting $FSTYPE on /dev/$DEVICENAME with rw."
+        if mount -t "$FSTYPE" -o rw,noatime,errors=continue /dev/$DEVICENAME "$SHARE_PATH"; then
+            # ext4 會保留 Unix 權限，必須設定讓 Samba guest 可寫入
+            chmod 777 "$SHARE_PATH"
+            chown nobody:nogroup "$SHARE_PATH" 2>/dev/null || chown nobody:nobody "$SHARE_PATH"
+            logger "Samba Hotplug (ADD): Set permissions 777 on $SHARE_PATH for Samba access."
+            push_notify "USB_mnt_${FSTYPE}_succeed"
+            MOUNT_OK=1
+        fi
+    else
+        # 掛載其他 FS (vfat, exfat ...)
+        logger "Samba Hotplug (ADD): Mounting $FSTYPE on /dev/$DEVICENAME."
+        if mount -t "$FSTYPE" /dev/$DEVICENAME "$SHARE_PATH"; then
+            push_notify "USB_mnt_${FSTYPE}_succeed"
+            MOUNT_OK=1
+        fi
+    fi
+
+    if [ "$MOUNT_OK" -ne 1 ]; then
+        push_notify "USB_mnt_Error"
+        logger "Samba Hotplug (ERROR): Failed to mount /dev/$DEVICENAME ($FSTYPE). Exiting."
+        rmdir "$SHARE_PATH" 2>/dev/null
+        exit 1
+    fi
+
+    # 清理舊配置
+    cleanup_all_stale_shares
+
+    # 防止重複新增
+    if uci show $SAMBA_CONFIG | grep -q "path='$SHARE_PATH'"; then
+        logger "Samba Hotplug (ADD): Share already exists. Skipping add."
+        exit 0
+    fi
+
+    # 新增 Samba share
+    uci add $SAMBA_CONFIG sambashare
+    uci set $SAMBA_CONFIG.@sambashare[-1].name="$SHARE_NAME_SAFE"
+    uci set $SAMBA_CONFIG.@sambashare[-1].path="$SHARE_PATH"
+    uci set $SAMBA_CONFIG.@sambashare[-1].read_only='no'
+    uci set $SAMBA_CONFIG.@sambashare[-1].guest_ok='yes'
+    uci set $SAMBA_CONFIG.@sambashare[-1].create_mask='0777'
+    uci set $SAMBA_CONFIG.@sambashare[-1].dir_mask='0777'
+    uci commit $SAMBA_CONFIG
+
+    /etc/init.d/$SAMBA_SERVICE restart
+    logger "Samba Hotplug (ADD): Created share and service restarted."
+fi
+
+# =========================================================
+# REMOVE 事件
+# =========================================================
+if [ "$ACTION" = "remove" ]; then
+    logger "Samba Hotplug (REMOVE): Device $DEVICENAME removed. Cleanup deferred."
+    exit 0
+fi

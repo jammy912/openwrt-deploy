@@ -1,0 +1,16 @@
+# 域名路由 nft — 由 sync-googleconfig 自動生成，請勿手動修改
+table inet fw4 {
+
+    # === wg2 (table 262, fwmark 0x106) ===
+    set route_wg2_v4 {
+        type ipv4_addr
+        flags interval,timeout
+        timeout 3h
+        auto-merge
+    }
+
+    chain domain_prerouting {
+        type filter hook prerouting priority -150; policy accept;
+        ip daddr @route_wg2_v4 meta mark set 0x106
+    }
+}
