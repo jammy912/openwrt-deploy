@@ -6,7 +6,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # 基礎套件 (所有節點都裝)
-REQUIRED_PKGS="coreutils-base64 openssl-util curl rsync zram-swap kmod-zram luci-i18n-base-zh-tw luci-i18n-firewall-zh-tw luci-theme-material usteer luci-app-usteer luci-i18n-usteer-zh-tw"
+REQUIRED_PKGS="coreutils-base64 openssl-util curl rsync zram-swap kmod-zram luci-i18n-base-zh-tw luci-i18n-firewall-zh-tw luci-theme-material usteer luci-app-usteer luci-i18n-usteer-zh-tw iperf3"
 
 # gateway 額外套件 (必須明確為 gateway 才裝，未設定角色時不裝)
 MESH_ROLE=$(cat /etc/myscript/.mesh_role 2>/dev/null)

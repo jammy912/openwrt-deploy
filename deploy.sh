@@ -258,7 +258,7 @@ MODULES_FILE="/etc/myscript/.modules"
 
 # --- 基礎套件 (所有節點) ---
 pkg_install coreutils-base64 openssl-util curl rsync \
-    zram-swap kmod-zram \
+    zram-swap kmod-zram iperf3 \
     luci-i18n-base-zh-tw luci-i18n-firewall-zh-tw \
     luci-theme-material 2>/dev/null
 echo "base" >> "$MODULES_FILE"

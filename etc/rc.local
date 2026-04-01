@@ -36,6 +36,9 @@ esac
 
 /etc/myscript/check-custpkgs.sh &
 
+# iperf3 server
+iperf3 -s -D
+
 
 
 # 確保 LuCI 緩存被清除 (即使它可能不存在)
