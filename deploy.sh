@@ -209,6 +209,9 @@ echo "  hostname: $ROUTER_NAME"
 echo ""
 echo "  請選擇這台路由器的角色："
 echo ""
+echo "  hybrid  = 雙模式，安裝完整套件 (預設)"
+echo "            自動偵測 WAN 決定 gateway/client 角色"
+echo ""
 echo "  gateway = 主路由器，網路線直接接數據機/光纖"
 echo "            會安裝完整套件 (PBR/DDNS/QoS/DNS 等)"
 echo ""
@@ -216,14 +219,14 @@ echo "  client  = 延伸節點，透過 mesh 連回 gateway"
 echo "            只安裝基礎套件，設定由 gateway 管理"
 echo ""
 if [ "$AUTO_MODE" = "1" ]; then
-    MESH_ROLE="${ARG_MODE:-gateway}"
+    MESH_ROLE="${ARG_MODE:-hybrid}"
 else
-    printf "${C_PROMPT}  角色 (gateway/client) [gateway]: ${C_RESET}"
+    printf "${C_PROMPT}  角色 (hybrid/gateway/client) [hybrid]: ${C_RESET}"
     read -r MESH_ROLE < /dev/tty
-    MESH_ROLE="${MESH_ROLE:-gateway}"
+    MESH_ROLE="${MESH_ROLE:-hybrid}"
 fi
 case "$MESH_ROLE" in
-    gateway|client) ;;
+    gateway|client|hybrid) ;;
     *) echo "❌ 無效角色: $MESH_ROLE"; exit 1 ;;
 esac
 mkdir -p /etc/myscript
@@ -738,17 +741,7 @@ mkdir -p /tmp/config_ram /tmp/crontabs_ram
 cp -a /etc/config/* /tmp/config_ram/
 cp -a /etc/crontabs/* /tmp/crontabs_ram/ 2>/dev/null
 
-# 加入預設的 sync crontab (每天 12:00 同步)
-if [ "$MESH_ROLE" = "client" ]; then
-    SYNC_CRON="0 12 * * * /etc/myscript/sync-googleconfig-v3.3.sh --apply --satellite      # Google Sheet 同步 (衛星模式)"
-else
-    SYNC_CRON="0 12 * * * /etc/myscript/sync-googleconfig-v3.3.sh --apply      # Google Sheet 同步"
-fi
 CRONTAB_FILE="/etc/crontabs/root"
-if ! grep -q "sync-googleconfig" "$CRONTAB_FILE" 2>/dev/null; then
-    echo "$SYNC_CRON" >> "$CRONTAB_FILE"
-    echo "  ✅ 已加入每天 12:00 Google Sheet 同步排程"
-fi
 # 建立 SyncArea 區塊 (sync-googleconfig 會在此區塊內更新排程)
 if ! grep -q "#SyncAreaStart" "$CRONTAB_FILE" 2>/dev/null; then
     echo "#SyncAreaStart" >> "$CRONTAB_FILE"
@@ -820,9 +813,7 @@ if [ "$AUTO_MODE" = "1" ]; then
     # 測試同步 (dry-run)
     echo ""
     echo "🧪 測試同步 (dry-run)..."
-    SYNC_ARGS=""
-    [ "$MESH_ROLE" = "client" ] && SYNC_ARGS="$SYNC_ARGS --satellite"
-    if /etc/myscript/sync-googleconfig-v3.3.sh $SYNC_ARGS; then
+    if /etc/myscript/sync-googleconfig-v3.3.sh; then
         echo "  ✅ 測試同步成功，密鑰正確"
     else
         echo "  ❌ 測試同步失敗！請檢查 --url / --key / --iv"
@@ -847,9 +838,7 @@ else
         # 測試同步 (dry-run)：下載並解密，確認密鑰正確
         echo ""
         echo "🧪 測試同步 (dry-run)..."
-        SYNC_ARGS=""
-        [ "$MESH_ROLE" = "client" ] && SYNC_ARGS="$SYNC_ARGS --satellite"
-        if /etc/myscript/sync-googleconfig-v3.3.sh $SYNC_ARGS; then
+        if /etc/myscript/sync-googleconfig-v3.3.sh; then
             echo "  ✅ 測試同步成功，密鑰正確"
             break
         else
@@ -933,9 +922,7 @@ if [ -f /etc/myscript/.secrets/secret.url ] && [ -f /etc/myscript/.secrets/secre
     echo ""
     # 首次部署：清除 state 和 MD5 快取，確保完整套用
     rm -rf /tmp/sync-state /tmp/config_base64.md5
-    SYNC_ARGS="--apply --no-network-check"
-    [ "$MESH_ROLE" = "client" ] && SYNC_ARGS="$SYNC_ARGS --satellite"
-    /etc/myscript/sync-googleconfig-v3.3.sh $SYNC_ARGS
+    /etc/myscript/sync-googleconfig-v3.3.sh --apply --no-network-check
     echo ""
     echo "✅ 首次同步完成"
 else

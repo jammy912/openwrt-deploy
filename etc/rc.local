@@ -36,6 +36,9 @@ esac
 
 /etc/myscript/check-custpkgs.sh &
 
+# hybrid 模式: 開機自動偵測角色
+[ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" = "hybrid" ] && /etc/myscript/auto-role.sh
+
 # iperf3 server
 iperf3 -s -D
 
@@ -68,6 +71,8 @@ for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 
   fi
 done
 
+# 開機同步 Google Sheet 設定 (自動依 .mesh_role_active 判斷身份)
+/etc/myscript/sync-googleconfig-v3.3.sh --apply &
 
 exit 0
 
