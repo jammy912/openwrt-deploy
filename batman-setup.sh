@@ -41,13 +41,15 @@ else
     echo ""
     echo "偵測到多個 5GHz radio: $RADIOS_5G"
     if [ "$AUTO_MODE" = "1" ]; then
-        # auto mode 選第一個 5G radio
-        RADIO_5G=$(echo "$RADIOS_5G" | awk '{print $1}')
-        echo "  自動選擇: $RADIO_5G"
+        # auto mode 選最後一個 5G radio 做純 mesh backhaul
+        RADIO_5G=$(echo "$RADIOS_5G" | awk '{print $NF}')
+        echo "  自動選擇: $RADIO_5G (純 mesh backhaul)"
     else
-        echo "  Mesh 建議使用其中一個 5G radio，另一個留給用戶連線"
-        printf "${C_PROMPT}選擇用於 Mesh 的 radio [$RADIOS_5G]: ${C_RESET}"
+        LAST_5G=$(echo "$RADIOS_5G" | awk '{print $NF}')
+        echo "  Mesh 建議使用其中一個 5G radio 做純 backhaul，另一個留給用戶連線"
+        printf "${C_PROMPT}選擇用於 Mesh 的 radio [$LAST_5G]: ${C_RESET}"
         read -r RADIO_5G < /dev/tty
+        RADIO_5G="${RADIO_5G:-$LAST_5G}"
         # 驗證輸入
         if ! echo "$RADIOS_5G" | grep -qw "$RADIO_5G"; then
             echo "❌ 無效選擇: $RADIO_5G"
@@ -141,6 +143,26 @@ done
 if [ -z "$MESH_IFACE" ]; then
     MESH_IFACE="mesh0"
     uci set wireless.$MESH_IFACE=wifi-iface
+fi
+
+# 三頻機：刪掉 mesh radio 上的 AP，讓它做純 mesh backhaul
+if [ "$RADIO_COUNT" -gt 1 ]; then
+    for iface in $(uci show wireless | grep "=wifi-iface" | cut -d'=' -f1 | cut -d'.' -f2); do
+        iface_device=$(uci get wireless.$iface.device 2>/dev/null)
+        iface_mode=$(uci get wireless.$iface.mode 2>/dev/null)
+        if [ "$iface_device" = "$RADIO_5G" ] && [ "$iface_mode" = "ap" ]; then
+            uci delete wireless.$iface
+            echo "  🗑️ 已移除 $iface ($RADIO_5G)，改為純 mesh"
+        fi
+    done
+    # mesh radio 固定 149，其他 5G radio 改 auto
+    uci set wireless.$RADIO_5G.channel='149'
+    for other_5g in $RADIOS_5G; do
+        [ "$other_5g" = "$RADIO_5G" ] && continue
+        uci set wireless.$other_5g.channel='auto'
+        echo "  📡 $other_5g 頻道改為 auto (用戶 WiFi)"
+    done
+    echo "  📡 $RADIO_5G 頻道固定 149 (mesh backhaul)"
 fi
 
 uci set wireless.$MESH_IFACE.device="$RADIO_5G"
