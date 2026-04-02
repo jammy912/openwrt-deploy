@@ -18,6 +18,21 @@ ACTIVE_FILE="/etc/myscript/.mesh_role_active"
 CURRENT_ROLE=$(cat "$ACTIVE_FILE" 2>/dev/null)
 
 # =====================
+# 0. 等待網路就緒 (WAN 有 IP 或 mesh 有鄰居)
+# =====================
+i=0
+while [ $i -lt 120 ]; do
+    # WAN 已拿到 IP → 單機 gateway
+    ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | grep -q '.' && break
+    # mesh 有鄰居 → 多機模式
+    batctl n 2>/dev/null | grep -q ':' && break
+    [ $i -eq 0 ] && log "等待網路就緒..."
+    sleep 5
+    i=$((i + 5))
+done
+[ $i -ge 120 ] && log "⚠️ 等待超時 (120s)，繼續偵測"
+
+# =====================
 # 1. 檢查 WAN 狀態
 # =====================
 WAN_IF=$(uci get network.wan.device 2>/dev/null || echo "wan")
