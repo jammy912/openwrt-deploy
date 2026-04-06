@@ -3,9 +3,9 @@
 # 觸發時機: rc.local 開機、hotplug WAN 變化、cron 定時
 #
 # 邏輯:
-#   1. 有 WAN + 沒其他 DHCP → gateway (IP=.1, 開 DHCP, gw_mode=server)
-#   2. 有 WAN + 有其他 DHCP → gateway (LAN DHCP client, 不開 DHCP, gw_mode=server)
-#   3. 沒 WAN → client (LAN DHCP client, 關 DHCP, gw_mode=client)
+#   1. 有 WAN + 沒其他 DHCP → gateway (IP=.1, 開 DHCP server, gw_mode=server)
+#   2. 有 WAN + 有其他 DHCP → gateway (保持 IP, DHCP relay→.1, gw_mode=server)
+#   3. 沒 WAN → client (保持 IP, DHCP relay→.1, gw_mode=client)
 
 . /etc/myscript/push_notify.inc 2>/dev/null
 PUSH_NAMES="jammy"
@@ -72,23 +72,23 @@ check_other_dhcp() {
     return 1  # 沒有
 }
 
-DHCP_ACTION=""
-LAN_MODE=""  # static 或 dhcp
+DHCP_ACTION=""  # server, relay, 或空
+LAN_MODE=""     # static 或 keep
 if [ "$NEW_ROLE" = "gateway" ]; then
     if check_other_dhcp; then
-        # 有其他 DHCP server，自己不開，LAN 用 DHCP client
-        DHCP_ACTION="disable"
-        LAN_MODE="dhcp"
-        log "已有其他 DHCP server，LAN 改為 DHCP client"
+        # 有其他 DHCP server，用 relay 轉發
+        DHCP_ACTION="relay"
+        LAN_MODE="keep"
+        log "已有其他 DHCP server，改用 DHCP relay"
     else
-        # 唯一 gateway，固定 .1 開 DHCP
-        DHCP_ACTION="enable"
+        # 唯一 gateway，固定 .1 開 DHCP server
+        DHCP_ACTION="server"
         LAN_MODE="static"
     fi
 else
-    # client: 關 DHCP，LAN 用 DHCP client
-    DHCP_ACTION="disable"
-    LAN_MODE="dhcp"
+    # client: DHCP relay 轉發給 gateway
+    DHCP_ACTION="relay"
+    LAN_MODE="keep"
 fi
 
 # =====================
@@ -111,9 +111,10 @@ fi
 
 # LAN IP 模式
 CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
+CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
-    if [ "$CUR_LAN_PROTO" != "static" ]; then
+    if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr='192.168.1.1'
         uci set network.lan.netmask='255.255.255.0'
@@ -121,34 +122,55 @@ if [ "$LAN_MODE" = "static" ]; then
         NEED_RESTART_NET=1
         CHANGED=1
     fi
-elif [ "$LAN_MODE" = "dhcp" ]; then
-    if [ "$CUR_LAN_PROTO" != "dhcp" ]; then
-        uci set network.lan.proto='dhcp'
-        uci delete network.lan.ipaddr 2>/dev/null
-        uci delete network.lan.netmask 2>/dev/null
-        log "LAN 改為 DHCP client"
-        NEED_RESTART_NET=1
-        CHANGED=1
-    fi
 fi
+# LAN_MODE=keep 時不動 IP
 uci commit network
 
-# DHCP
+# DHCP server / relay
 CUR_DHCP_IGNORE=$(uci get dhcp.lan.ignore 2>/dev/null)
-if [ "$DHCP_ACTION" = "enable" ]; then
-    if [ "$CUR_DHCP_IGNORE" = "1" ]; then
-        uci delete dhcp.lan.ignore
+HAS_RELAY=$(uci show dhcp 2>/dev/null | grep -c "=relay")
+
+setup_relay() {
+    # 取得 DHCP server 的 IP (從 udhcpc 結果取得，或預設 .1)
+    RELAY_SERVER="192.168.1.1"
+    MY_IP=$(uci get network.lan.ipaddr 2>/dev/null)
+    [ -z "$MY_IP" ] && MY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    # 清除舊 relay 設定
+    while uci show dhcp 2>/dev/null | grep -q "=relay"; do
+        uci delete dhcp.@relay[0] 2>/dev/null || break
+    done
+    # 建立 relay
+    uci add dhcp relay >/dev/null
+    uci set dhcp.@relay[-1].local_addr="$MY_IP"
+    uci set dhcp.@relay[-1].server_addr="$RELAY_SERVER"
+    uci set dhcp.@relay[-1].interface='lan'
+    # 關閉 DHCP server
+    uci set dhcp.lan.ignore='1'
+    uci set dhcp.lan.dhcpv4='disabled'
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart
+    log "DHCP relay 已設定 ($MY_IP → $RELAY_SERVER)"
+}
+
+remove_relay() {
+    while uci show dhcp 2>/dev/null | grep -q "=relay"; do
+        uci delete dhcp.@relay[0] 2>/dev/null || break
+    done
+}
+
+if [ "$DHCP_ACTION" = "server" ]; then
+    if [ "$CUR_DHCP_IGNORE" = "1" ] || [ "$HAS_RELAY" -gt 0 ]; then
+        remove_relay
+        uci delete dhcp.lan.ignore 2>/dev/null
+        uci set dhcp.lan.dhcpv4='server'
         uci commit dhcp
         /etc/init.d/dnsmasq restart
         log "DHCP server 已開啟"
         CHANGED=1
     fi
-elif [ "$DHCP_ACTION" = "disable" ]; then
-    if [ "$CUR_DHCP_IGNORE" != "1" ]; then
-        uci set dhcp.lan.ignore='1'
-        uci commit dhcp
-        /etc/init.d/dnsmasq restart
-        log "DHCP server 已關閉"
+elif [ "$DHCP_ACTION" = "relay" ]; then
+    if [ "$HAS_RELAY" -eq 0 ] || [ "$CUR_DHCP_IGNORE" != "1" ]; then
+        setup_relay
         CHANGED=1
     fi
 fi
@@ -186,6 +208,32 @@ else
         ifdown "$wg_if" 2>/dev/null
     done
     log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
+fi
+
+# =====================
+# 6. 有線 mesh 時停用無線 mesh
+# =====================
+WIRE_DEV=$(uci get network.batmesh_wire.device 2>/dev/null)
+if [ -n "$WIRE_DEV" ] && [ "$(cat /sys/class/net/$WIRE_DEV/carrier 2>/dev/null)" = "1" ]; then
+    # 有線 mesh 連線中 → 停無線 mesh
+    CUR_MESH_DISABLED=$(uci get wireless.mesh0.disabled 2>/dev/null)
+    if [ "$CUR_MESH_DISABLED" != "1" ]; then
+        uci set wireless.mesh0.disabled='1'
+        uci commit wireless
+        wifi reload
+        log "有線 mesh ($WIRE_DEV) 連線中，停用無線 mesh"
+        CHANGED=1
+    fi
+else
+    # 無有線 mesh → 啟用無線 mesh
+    CUR_MESH_DISABLED=$(uci get wireless.mesh0.disabled 2>/dev/null)
+    if [ "$CUR_MESH_DISABLED" = "1" ]; then
+        uci delete wireless.mesh0.disabled
+        uci commit wireless
+        wifi reload
+        log "有線 mesh 未連線，啟用無線 mesh"
+        CHANGED=1
+    fi
 fi
 
 # 更新當前身份
