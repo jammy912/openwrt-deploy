@@ -209,15 +209,33 @@ else
 fi
 uci commit network
 
+# 如果 LAN proto 改了，先重啟網路拿到新 IP，再設 relay
+if [ "$NEED_RESTART_NET" = "1" ]; then
+    log "重啟網路 (LAN proto 變更)..."
+    /etc/init.d/network restart
+    NEED_RESTART_NET=0
+    # 等 DHCP 拿到 IP (最多 30 秒)
+    if [ "$LAN_MODE" != "static" ]; then
+        j=0
+        while [ $j -lt 30 ]; do
+            NEW_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+            [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ] && break
+            sleep 2
+            j=$((j + 2))
+        done
+        log "DHCP 取得 IP: ${NEW_IP:-timeout}"
+    fi
+fi
+
 # DHCP server / relay
 CUR_DHCP_IGNORE=$(uci get dhcp.lan.ignore 2>/dev/null)
 HAS_RELAY=$(uci show dhcp 2>/dev/null | grep -c "=relay")
 
 setup_relay() {
-    # 取得 DHCP server 的 IP (從 udhcpc 結果取得，或預設 .1)
     RELAY_SERVER="192.168.1.1"
-    MY_IP=$(uci get network.lan.ipaddr 2>/dev/null)
-    [ -z "$MY_IP" ] && MY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    # 用實際 br-lan IP (network restart 後的新 IP)
+    MY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    [ -z "$MY_IP" ] && MY_IP="0.0.0.0"
     # 清除舊 relay 設定
     while uci show dhcp 2>/dev/null | grep -q "=relay"; do
         uci delete dhcp.@relay[0] 2>/dev/null || break
