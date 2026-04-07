@@ -263,9 +263,9 @@ fi
 # =====================
 # 5. 服務啟停 (只在狀態不一致時才動)
 # =====================
-svc_is_running() { /etc/init.d/$1 running 2>/dev/null; }
-svc_ensure_on()  { svc_is_running $1 || { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; log "服務啟動: $1"; }; }
-svc_ensure_off() { svc_is_running $1 && { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; log "服務停止: $1"; }; }
+svc_is_enabled() { /etc/init.d/$1 enabled 2>/dev/null; }
+svc_ensure_on()  { svc_is_enabled $1 || { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; log "服務啟動: $1"; }; }
+svc_ensure_off() { svc_is_enabled $1 && { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; log "服務停止: $1"; }; }
 wg_is_up() { uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg' | while read wg_if; do ifstatus "$wg_if" 2>/dev/null | grep -q '"up": true' && return 0; done; return 1; }
 wg_stop() {
     for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
