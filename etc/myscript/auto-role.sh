@@ -358,4 +358,13 @@ fi
 if [ "$CHANGED" = "0" ]; then
     log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
 fi
+# debug 網路診斷
+if [ "$DEBUG" = "1" ]; then
+    BAT0_MASTER=$(ip link show bat0 2>/dev/null | grep -o 'master [^ ]*')
+    BR_BAT0=$(brctl show br-lan 2>/dev/null | grep bat0 | head -1)
+    MY_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
+    MESH_NEIGHBORS=$(batctl n 2>/dev/null | grep -c ':')
+    TL_COUNT=$(batctl tl 2>/dev/null | grep -c ':')
+    dbg "diag: bat0=${BAT0_MASTER:-NONE} br-lan_has_bat0=${BR_BAT0:+YES} LAN_IP=$MY_LAN_IP neighbors=$MESH_NEIGHBORS tl_entries=$TL_COUNT"
+fi
 dbg "完成: role=$NEW_ROLE DHCP=$DHCP_ACTION LAN=$LAN_MODE changed=$CHANGED"
