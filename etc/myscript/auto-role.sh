@@ -224,6 +224,7 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
             j=$((j + 2))
         done
         log "DHCP 取得 IP: ${NEW_IP:-timeout}"
+        push_notify "DHCP IP: ${NEW_IP:-timeout}"
     fi
 fi
 
