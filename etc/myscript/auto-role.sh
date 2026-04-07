@@ -182,11 +182,12 @@ if [ "$CUR_GW" != "$WANT_GW" ]; then
     log "bat0 gw_mode: $CUR_GW -> $WANT_GW"
     CHANGED=1
 fi
-dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE"
-
-# LAN IP 模式
 CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
 CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
+[ -z "$CUR_LAN_IP" ] && CUR_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CUR_LAN_PROTO"
+
+# LAN IP 模式
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
     if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
@@ -358,7 +359,6 @@ fi
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
     echo -n "$NEW_ROLE" > "$ACTIVE_FILE"
     log "角色切換: $CURRENT_ROLE -> $NEW_ROLE"
-    push_notify "AutoRole: $CURRENT_ROLE -> $NEW_ROLE"
     CHANGED=1
 fi
 
@@ -372,8 +372,23 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     batctl gw server ${MY_PRI}MBit 2>/dev/null
 fi
 
+# 取得最新 IP (network restart 後可能改變)
+FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+if [ "$IS_PRIMARY" = "1" ] && [ "$NEW_ROLE" = "gateway" ]; then
+    GW_TYPE="主gw"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    GW_TYPE="副gw"
+else
+    GW_TYPE="client"
+fi
+
+# 角色變更時推播 (含 IP 和主/副)
+if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
+    push_notify "AutoRole: ${CURRENT_ROLE:-none}→${NEW_ROLE} ${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+fi
+
 if [ "$CHANGED" = "0" ]; then
-    log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
+    log "角色: $NEW_ROLE ($GW_TYPE), IP=$FINAL_IP, DHCP=$DHCP_ACTION (無變更)"
 fi
 # debug 網路診斷
 if [ "$DEBUG" = "1" ]; then
