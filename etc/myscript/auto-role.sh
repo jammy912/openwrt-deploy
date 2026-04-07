@@ -261,10 +261,12 @@ elif [ "$DHCP_ACTION" = "relay" ]; then
 fi
 
 # =====================
-# 5. 服務啟停 (每次確認服務狀態跟角色一致)
+# 5. 服務啟停 (只在狀態不一致時才動)
 # =====================
-svc_enable()  { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; }
-svc_disable() { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; }
+svc_is_running() { /etc/init.d/$1 running 2>/dev/null; }
+svc_ensure_on()  { svc_is_running $1 || { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; log "服務啟動: $1"; }; }
+svc_ensure_off() { svc_is_running $1 && { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; log "服務停止: $1"; }; }
+wg_is_up() { uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg' | while read wg_if; do ifstatus "$wg_if" 2>/dev/null | grep -q '"up": true' && return 0; done; return 1; }
 wg_stop() {
     for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
         ifdown "$wg_if" 2>/dev/null
@@ -272,29 +274,25 @@ wg_stop() {
 }
 
 if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
-    # 唯一 gateway (.1): 全開
-    svc_enable wireguard 2>/dev/null
-    svc_enable ddns
-    svc_enable adguardhome
-    svc_enable pbr
-    svc_enable qosify
-    log "服務: 全開 (唯一 gateway)"
-    dbg "5.服務全開 (主gateway)"
+    # 唯一 gateway (.1): 確保全開
+    svc_ensure_on ddns
+    svc_ensure_on adguardhome
+    svc_ensure_on pbr
+    svc_ensure_on qosify
+    dbg "5.服務確認 (主gateway)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: 停 WireGuard、DDNS
-    svc_disable ddns
-    wg_stop
-    log "服務: 停 WG/DDNS (非主 gateway)"
-    dbg "5.停WG/DDNS (非主gateway)"
+    # 非主 gateway: 確保停 WireGuard、DDNS
+    svc_ensure_off ddns
+    wg_is_up && { wg_stop; log "服務停止: WireGuard"; }
+    dbg "5.服務確認 (非主gateway)"
 else
-    # client: 停所有 gateway 專屬服務
-    svc_disable ddns
-    svc_disable adguardhome
-    svc_disable pbr
-    svc_disable qosify
-    wg_stop
-    log "服務: 停 WG/DDNS/AdGuard/PBR/qosify (client)"
-    dbg "5.停全部服務 (client)"
+    # client: 確保停所有 gateway 專屬服務
+    svc_ensure_off ddns
+    svc_ensure_off adguardhome
+    svc_ensure_off pbr
+    svc_ensure_off qosify
+    wg_is_up && { wg_stop; log "服務停止: WireGuard"; }
+    dbg "5.服務確認 (client)"
 fi
 
 # =====================
