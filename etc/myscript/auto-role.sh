@@ -29,7 +29,7 @@ dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
 if apk list -I 2>/dev/null | grep -q "^firewall-[0-9]"; then
     log "偵測到 fw3，開始遷移至 fw4..."
     apk del firewall 2>/dev/null
-    apk add firewall4 2>/dev/null
+    apk add firewall4 uhttpd uhttpd-mod-ubus 2>/dev/null
     # 移除不存在的 firewall.user include
     uci show firewall 2>/dev/null | grep -q "@include\[0\].path='/etc/firewall.user'" && \
         uci delete firewall.@include[0] 2>/dev/null
@@ -112,14 +112,25 @@ MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
 # 檢查 mesh 裡有沒有比自己優先的 gateway
 IS_PRIMARY=1
 if [ "$NEW_ROLE" = "gateway" ]; then
-    # 從 batctl gwl 讀其他 gateway 的 bandwidth(=priority) 和 MAC
-    # gwl 格式: [B.A.T.M.A.N...] 或 "  MAC (bandwidth) ..."
-    HIGHER=$(batctl gwl 2>/dev/null | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
+    GWL_RAW=$(batctl gwl 2>/dev/null)
+    GWL_COUNT=$(echo "$GWL_RAW" | grep -c 'MBit')
+    MY_GWMODE=$(batctl gw 2>/dev/null)
+    NEIGHBOR_COUNT=$(batctl n 2>/dev/null | grep -c ':')
+    dbg "3.gwl_raw: count=$GWL_COUNT my_gw=$MY_GWMODE neighbors=$NEIGHBOR_COUNT"
+    [ "$DEBUG" = "1" ] && {
+        GWL_LINES=$(echo "$GWL_RAW" | grep 'MBit' | head -5)
+        [ -n "$GWL_LINES" ] && dbg "3.gwl_entries: $GWL_LINES"
+        [ -z "$GWL_LINES" ] && dbg "3.gwl_entries: (empty)"
+    }
+
+    # 格式: "95.0/2.0 MBit" → 取 "/" 前的整數部分
+    HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
         /MBit/ {
             mac = $1; gsub(/[^0-9a-f:]/, "", mac)
-            # 取得 bandwidth 數字
             for (i=1; i<=NF; i++) {
-                if ($i ~ /MBit/) { pri = $i; gsub(/[^0-9]/, "", pri); break }
+                if ($i ~ /\/.*MBit/ || (i<NF && $(i+1)=="MBit")) {
+                    split($i, bw, "/"); split(bw[1], dec, "."); pri=dec[1]; break
+                }
             }
             if (mac == me_mac) next
             if (pri+0 > me_pri+0) { found=1; exit }
@@ -169,11 +180,12 @@ if [ "$CUR_GW" != "$WANT_GW" ]; then
     log "bat0 gw_mode: $CUR_GW -> $WANT_GW"
     CHANGED=1
 fi
-dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE"
-
-# LAN IP 模式
 CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
 CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
+[ -z "$CUR_LAN_IP" ] && CUR_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CUR_LAN_PROTO"
+
+# LAN IP 模式
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
     if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
@@ -184,8 +196,17 @@ if [ "$LAN_MODE" = "static" ]; then
         NEED_RESTART_NET=1
         CHANGED=1
     fi
+else
+    # 非主 gateway / client: 用 DHCP 取得 IP，避免跟主 gateway 撞
+    if [ "$CUR_LAN_PROTO" != "dhcp" ]; then
+        uci set network.lan.proto='dhcp'
+        uci delete network.lan.ipaddr 2>/dev/null
+        uci delete network.lan.netmask 2>/dev/null
+        log "LAN 改為 DHCP (非主 gateway)"
+        NEED_RESTART_NET=1
+        CHANGED=1
+    fi
 fi
-# LAN_MODE=keep 時不動 IP
 uci commit network
 
 # DHCP server / relay
