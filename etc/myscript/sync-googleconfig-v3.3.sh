@@ -565,6 +565,28 @@ main() {
     # routerconfig 不分模式，兩邊都提取
     sed -n '/^config routerconfig/,/^$/p' "$TMP_DECRYPTED" | sed '/^$/d' >> "$TMP_ROUTERCONFIG"
 
+    # mesh_priority: 比對 hostname，更新 .mesh_priority
+    MY_HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
+    if [ -n "$MY_HOSTNAME" ]; then
+        NEW_PRI=$(awk -v host="$MY_HOSTNAME" '
+            BEGIN { RS=""; FS="\n" }
+            /^config mesh_priority/ {
+                h=""; p=""
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /option hostname/) { gsub(/.*'"'"'|'"'"'.*/, "", $i); h=$i }
+                    if ($i ~ /option priority/) { gsub(/.*'"'"'|'"'"'.*/, "", $i); p=$i }
+                }
+                if (h == host) { print p; exit }
+            }
+        ' "$TMP_DECRYPTED")
+        [ -z "$NEW_PRI" ] && NEW_PRI=50
+        CUR_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
+        if [ "$NEW_PRI" != "$CUR_PRI" ]; then
+            echo -n "$NEW_PRI" > /etc/myscript/.mesh_priority
+            log "🔧 mesh_priority: $CUR_PRI → $NEW_PRI (hostname=$MY_HOSTNAME)"
+        fi
+    fi
+
     # =====================================================
     # 各組件欄位驗證 (防呆 - 逐筆檢查必要欄位)
     # =====================================================

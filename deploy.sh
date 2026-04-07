@@ -45,6 +45,7 @@ ARG_COUNTRY=""
 ARG_ENCRYPTION=""
 ARG_TDX_ID=""
 ARG_TDX_KEY=""
+ARG_PRIORITY=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -63,6 +64,7 @@ while [ $# -gt 0 ]; do
         --encryption) ARG_ENCRYPTION="$2"; shift ;;
         --tdx-id)     ARG_TDX_ID="$2"; shift ;;
         --tdx-key)    ARG_TDX_KEY="$2"; shift ;;
+        --priority)   ARG_PRIORITY="$2"; shift ;;
     esac
     shift
 done
@@ -232,6 +234,22 @@ esac
 mkdir -p /etc/myscript
 echo -n "$MESH_ROLE" > /etc/myscript/.mesh_role
 echo "  角色: $MESH_ROLE"
+
+# Mesh 優先權 (hybrid/gateway 才需要)
+if [ "$MESH_ROLE" != "client" ]; then
+    echo ""
+    echo "  Mesh 優先權: 數字大的優先當主 gateway (開 DHCP, IP=.1)"
+    echo "  相同時 MAC 小的優先。可由 Google Sheet 遠端更新。"
+    if [ "$AUTO_MODE" = "1" ]; then
+        MESH_PRIORITY="${ARG_PRIORITY:-100}"
+    else
+        printf "${C_PROMPT}  優先權 [100]: ${C_RESET}"
+        read -r MESH_PRIORITY < /dev/tty
+        MESH_PRIORITY="${MESH_PRIORITY:-100}"
+    fi
+    echo -n "$MESH_PRIORITY" > /etc/myscript/.mesh_priority
+    echo "  優先權: $MESH_PRIORITY"
+fi
 
 # =====================
 # 1. 安裝必要套件

@@ -68,35 +68,53 @@ else
 fi
 
 # =====================
-# 3. 檢查 DHCP
+# 3. 判斷主 gateway (priority + MAC)
 # =====================
-# 用 udhcpc 測試 LAN 上有沒有其他 DHCP server
-check_other_dhcp() {
-    LAN_IF=$(uci get network.lan.device 2>/dev/null)
-    [ -z "$LAN_IF" ] && LAN_IF="br-lan"
-    # 嘗試取得 DHCP，timeout 5 秒
-    DHCP_RESULT=$(udhcpc -i "$LAN_IF" -n -q -t 3 -T 2 -s /bin/true 2>&1)
-    if echo "$DHCP_RESULT" | grep -q "obtained"; then
-        return 0  # 有其他 DHCP server
+# 邏輯: priority 大的優先，相同時 MAC 小的優先
+MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
+[ -z "$MY_PRI" ] && MY_PRI=50
+MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
+
+# 設定自己的 gw_bandwidth = priority (讓 batctl gwl 看到)
+[ "$NEW_ROLE" = "gateway" ] && batctl gw server ${MY_PRI}MBit 2>/dev/null
+
+# 檢查 mesh 裡有沒有比自己優先的 gateway
+IS_PRIMARY=1
+if [ "$NEW_ROLE" = "gateway" ]; then
+    # 從 batctl gwl 讀其他 gateway 的 bandwidth(=priority) 和 MAC
+    # gwl 格式: [B.A.T.M.A.N...] 或 "  MAC (bandwidth) ..."
+    HIGHER=$(batctl gwl 2>/dev/null | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
+        /MBit/ {
+            mac = $1; gsub(/[^0-9a-f:]/, "", mac)
+            # 取得 bandwidth 數字
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /MBit/) { pri = $i; gsub(/[^0-9]/, "", pri); break }
+            }
+            if (mac == me_mac) next
+            if (pri+0 > me_pri+0) { found=1; exit }
+            if (pri+0 == me_pri+0 && mac < me_mac) { found=1; exit }
+        }
+        END { if (found) print "yes" }
+    ')
+    if [ "$HIGHER" = "yes" ]; then
+        IS_PRIMARY=0
+        log "mesh 有更高優先的 gateway (my_pri=$MY_PRI, my_mac=$MY_MAC)"
     fi
-    return 1  # 沒有
-}
+fi
 
 DHCP_ACTION=""  # server, relay, 或空
 LAN_MODE=""     # static 或 keep
-if [ "$NEW_ROLE" = "gateway" ]; then
-    if check_other_dhcp; then
-        # 有其他 DHCP server，用 relay 轉發
-        DHCP_ACTION="relay"
-        LAN_MODE="keep"
-        log "已有其他 DHCP server，改用 DHCP relay"
-    else
-        # 唯一 gateway，固定 .1 開 DHCP server
-        DHCP_ACTION="server"
-        LAN_MODE="static"
-    fi
+if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
+    # 主 gateway: 固定 .1 開 DHCP server
+    DHCP_ACTION="server"
+    LAN_MODE="static"
+    log "主 gateway (priority=$MY_PRI)"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    # 非主 gateway: relay 轉發
+    DHCP_ACTION="relay"
+    LAN_MODE="keep"
 else
-    # client: DHCP relay 轉發給 gateway
+    # client: relay 轉發
     DHCP_ACTION="relay"
     LAN_MODE="keep"
 fi
