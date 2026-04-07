@@ -238,41 +238,45 @@ elif [ "$DHCP_ACTION" = "relay" ]; then
 fi
 
 # =====================
-# 5. 服務啟停
+# 5. 服務啟停 (僅在角色/設定變更時執行)
 # =====================
 svc_enable()  { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; }
 svc_disable() { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; }
 
-if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
-    # 唯一 gateway (.1): 全開
-    svc_enable wireguard 2>/dev/null  # WG 由 network 管理，這裡確保 interface up
-    svc_enable ddns
-    svc_enable adguardhome
-    svc_enable pbr
-    svc_enable qosify
-    log "服務: 全開 (唯一 gateway)"
-    dbg "5.服務全開 (主gateway)"
-elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非唯一 gateway: 停 WireGuard、DDNS
-    svc_disable ddns
-    log "服務: 停 DDNS (非唯一 gateway)"
-    # 停 WireGuard interfaces
-    for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
-        ifdown "$wg_if" 2>/dev/null
-    done
-    log "服務: 停 WireGuard (非唯一 gateway)"
-    dbg "5.停WG/DDNS (非主gateway)"
+if [ "$CHANGED" = "1" ]; then
+    if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
+        # 唯一 gateway (.1): 全開
+        svc_enable wireguard 2>/dev/null  # WG 由 network 管理，這裡確保 interface up
+        svc_enable ddns
+        svc_enable adguardhome
+        svc_enable pbr
+        svc_enable qosify
+        log "服務: 全開 (唯一 gateway)"
+        dbg "5.服務全開 (主gateway)"
+    elif [ "$NEW_ROLE" = "gateway" ]; then
+        # 非唯一 gateway: 停 WireGuard、DDNS
+        svc_disable ddns
+        log "服務: 停 DDNS (非唯一 gateway)"
+        # 停 WireGuard interfaces
+        for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+            ifdown "$wg_if" 2>/dev/null
+        done
+        log "服務: 停 WireGuard (非唯一 gateway)"
+        dbg "5.停WG/DDNS (非主gateway)"
+    else
+        # client: 停所有 gateway 專屬服務
+        svc_disable ddns
+        svc_disable adguardhome
+        svc_disable pbr
+        svc_disable qosify
+        for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+            ifdown "$wg_if" 2>/dev/null
+        done
+        log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
+        dbg "5.停全部服務 (client)"
+    fi
 else
-    # client: 停所有 gateway 專屬服務
-    svc_disable ddns
-    svc_disable adguardhome
-    svc_disable pbr
-    svc_disable qosify
-    for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
-        ifdown "$wg_if" 2>/dev/null
-    done
-    log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
-    dbg "5.停全部服務 (client)"
+    dbg "5.無變更，跳過服務啟停"
 fi
 
 # =====================
