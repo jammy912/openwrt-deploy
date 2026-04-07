@@ -197,52 +197,27 @@ if [ "$LAN_MODE" = "static" ]; then
         CHANGED=1
     fi
 else
-    # 非主 gateway / client: 先設臨時 static IP 避免撞 .1，再改 DHCP
-    if [ "$CUR_LAN_PROTO" != "dhcp" ] || [ "$CUR_LAN_IP" = "192.168.1.1" ]; then
-        # 用 MAC 最後一字節算臨時 IP (192.168.1.200-254)
-        MAC_LAST=$(cat /sys/class/net/br-lan/address 2>/dev/null | awk -F: '{print $NF}')
-        TEMP_IP="192.168.1.$((0x${MAC_LAST:-c8} % 55 + 200))"
-        # 先設臨時 static IP
+    # 非主 gateway / client: 用 MAC 算 static IP，避免跟 .1 撞
+    MAC_LAST=$(cat /sys/class/net/br-lan/address 2>/dev/null | awk -F: '{print $NF}')
+    SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
+    if [ "$CUR_LAN_IP" = "192.168.1.1" ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
         uci set network.lan.proto='static'
-        uci set network.lan.ipaddr="$TEMP_IP"
+        uci set network.lan.ipaddr="$SELF_IP"
         uci set network.lan.netmask='255.255.255.0'
-        uci commit network
-        log "臨時 IP: $TEMP_IP"
-        /etc/init.d/network restart
-        sleep 2
-        # 再改 DHCP
-        uci set network.lan.proto='dhcp'
-        uci delete network.lan.ipaddr 2>/dev/null
-        uci delete network.lan.netmask 2>/dev/null
-        log "LAN 改為 DHCP (非主 gateway)"
+        uci set network.lan.gateway='192.168.1.1'
+        uci set network.lan.dns='192.168.1.1'
+        log "LAN IP: $SELF_IP (非主 gateway)"
+        push_notify "LAN IP: $SELF_IP"
         NEED_RESTART_NET=1
         CHANGED=1
     fi
 fi
 uci commit network
 
-# 如果 LAN proto 改了，重啟網路拿新 IP，再設 relay
 if [ "$NEED_RESTART_NET" = "1" ]; then
-    log "重啟網路 (DHCP)..."
+    log "重啟網路..."
     /etc/init.d/network restart
     NEED_RESTART_NET=0
-    # 等 DHCP 拿到 IP (最多 30 秒)
-    if [ "$LAN_MODE" != "static" ]; then
-        j=0
-        while [ $j -lt 30 ]; do
-            NEW_IP=$(ip -4 addr show br-lan 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-            [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ] && [ "$NEW_IP" != "" ] && break
-            sleep 2
-            j=$((j + 2))
-        done
-        if [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ]; then
-            log "DHCP 取得 IP: $NEW_IP"
-            push_notify "DHCP IP: $NEW_IP"
-        else
-            log "⚠️ DHCP 取得 IP 失敗 (30s timeout)"
-            push_notify "DHCP IP: 失敗 (timeout)"
-        fi
-    fi
 fi
 
 # DHCP server / relay
