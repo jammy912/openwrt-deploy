@@ -568,22 +568,39 @@ main() {
     # mesh_priority: 比對 hostname，更新 .mesh_priority
     MY_HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
     if [ -n "$MY_HOSTNAME" ]; then
-        NEW_PRI=$(awk -v host="$MY_HOSTNAME" '
+        eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
             /^config mesh_priority/ {
-                h=""; p=""
+                h=""; p=""; wl=""; wr=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
+                    if ($i ~ /option wireless_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wl=a[n] }
+                    if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                 }
-                if (h == host) { print p; exit }
+                if (h == host) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr; exit }
             }
         ' "$TMP_DECRYPTED")
         [ -z "$NEW_PRI" ] && NEW_PRI=50
+        [ -z "$NEW_WIRELESS" ] && NEW_WIRELESS=Y
+        [ -z "$NEW_WIRED" ] && NEW_WIRED=N
+        # 更新 .mesh_priority
         CUR_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
         if [ "$NEW_PRI" != "$CUR_PRI" ]; then
             echo -n "$NEW_PRI" > /etc/myscript/.mesh_priority
             log "🔧 mesh_priority: $CUR_PRI → $NEW_PRI (hostname=$MY_HOSTNAME)"
+        fi
+        # 更新 .mesh_wireless
+        CUR_WL=$(cat /etc/myscript/.mesh_wireless 2>/dev/null)
+        if [ "$NEW_WIRELESS" != "$CUR_WL" ]; then
+            echo -n "$NEW_WIRELESS" > /etc/myscript/.mesh_wireless
+            log "🔧 mesh_wireless: $CUR_WL → $NEW_WIRELESS (hostname=$MY_HOSTNAME)"
+        fi
+        # 更新 .mesh_wired
+        CUR_WR=$(cat /etc/myscript/.mesh_wired 2>/dev/null)
+        if [ "$NEW_WIRED" != "$CUR_WR" ]; then
+            echo -n "$NEW_WIRED" > /etc/myscript/.mesh_wired
+            log "🔧 mesh_wired: $CUR_WR → $NEW_WIRED (hostname=$MY_HOSTNAME)"
         fi
     fi
 

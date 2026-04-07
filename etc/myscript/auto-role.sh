@@ -7,18 +7,13 @@
 #   2. 有 WAN + 有其他 DHCP → gateway (保持 IP, DHCP relay→.1, gw_mode=server)
 #   3. 沒 WAN → client (保持 IP, DHCP relay→.1, gw_mode=client)
 #
-# 參數:
-#   --wire-only  有線 mesh 連線時停用無線 mesh
+# mesh 設定由 Google Sheet 同步到:
+#   .mesh_priority  - 優先權 (數字大=優先當主 gateway)
+#   .mesh_wireless  - 無線 mesh (Y/N)
+#   .mesh_wired     - 有線 mesh (Y/N)
 
 . /etc/myscript/push_notify.inc 2>/dev/null
 PUSH_NAMES="jammy"
-
-WIRE_ONLY=0
-for arg in "$@"; do
-    case "$arg" in
-        --wire-only) WIRE_ONLY=1 ;;
-    esac
-done
 
 LOG_TAG="auto-role"
 log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
@@ -251,32 +246,50 @@ if [ "$LAN_MODE" != "static" ]; then
 fi
 
 # =====================
-# 7. 有線 mesh 時停用無線 mesh (需 --wire-only 參數)
+# 7. Mesh 介面啟停 (由 .mesh_wireless / .mesh_wired 控制)
 # =====================
-if [ "$WIRE_ONLY" = "1" ]; then
-WIRE_DEV=$(uci get network.batmesh_wire.device 2>/dev/null)
-if [ -n "$WIRE_DEV" ] && [ "$(cat /sys/class/net/$WIRE_DEV/carrier 2>/dev/null)" = "1" ]; then
-    # 有線 mesh 連線中 → 停無線 mesh
+WANT_WIRELESS=$(cat /etc/myscript/.mesh_wireless 2>/dev/null)
+WANT_WIRED=$(cat /etc/myscript/.mesh_wired 2>/dev/null)
+NEED_WIFI_RELOAD=0
+
+# 無線 mesh
+if [ -n "$WANT_WIRELESS" ]; then
     CUR_MESH_DISABLED=$(uci get wireless.mesh0.disabled 2>/dev/null)
-    if [ "$CUR_MESH_DISABLED" != "1" ]; then
+    if [ "$WANT_WIRELESS" = "N" ] && [ "$CUR_MESH_DISABLED" != "1" ]; then
         uci set wireless.mesh0.disabled='1'
         uci commit wireless
-        wifi reload
-        log "有線 mesh ($WIRE_DEV) 連線中，停用無線 mesh"
+        NEED_WIFI_RELOAD=1
+        log "無線 mesh 已停用 (設定=N)"
         CHANGED=1
-    fi
-else
-    # 無有線 mesh → 啟用無線 mesh
-    CUR_MESH_DISABLED=$(uci get wireless.mesh0.disabled 2>/dev/null)
-    if [ "$CUR_MESH_DISABLED" = "1" ]; then
+    elif [ "$WANT_WIRELESS" = "Y" ] && [ "$CUR_MESH_DISABLED" = "1" ]; then
         uci delete wireless.mesh0.disabled
         uci commit wireless
-        wifi reload
-        log "有線 mesh 未連線，啟用無線 mesh"
+        NEED_WIFI_RELOAD=1
+        log "無線 mesh 已啟用 (設定=Y)"
         CHANGED=1
     fi
 fi
-fi  # WIRE_ONLY
+
+# 有線 mesh
+WIRE_DEV=$(uci get network.batmesh_wire.device 2>/dev/null)
+if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
+    CUR_WIRE_DISABLED=$(uci get network.batmesh_wire.disabled 2>/dev/null)
+    if [ "$WANT_WIRED" = "N" ] && [ "$CUR_WIRE_DISABLED" != "1" ]; then
+        uci set network.batmesh_wire.disabled='1'
+        uci commit network
+        NEED_RESTART_NET=1
+        log "有線 mesh ($WIRE_DEV) 已停用 (設定=N)"
+        CHANGED=1
+    elif [ "$WANT_WIRED" = "Y" ] && [ "$CUR_WIRE_DISABLED" = "1" ]; then
+        uci delete network.batmesh_wire.disabled
+        uci commit network
+        NEED_RESTART_NET=1
+        log "有線 mesh ($WIRE_DEV) 已啟用 (設定=Y)"
+        CHANGED=1
+    fi
+fi
+
+[ "$NEED_WIFI_RELOAD" = "1" ] && wifi reload
 
 # 更新當前身份
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
