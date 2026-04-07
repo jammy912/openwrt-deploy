@@ -672,6 +672,22 @@ main() {
         [ "$DHCP_NO_NAME" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: ${DHCP_NO_NAME}/${DHCP_BLOCKS} 筆缺少 name"
         [ "$DHCP_NO_MAC" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: ${DHCP_NO_MAC}/${DHCP_BLOCKS} 筆缺少 mac"
         [ "$DHCP_NO_IP" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: ${DHCP_NO_IP}/${DHCP_BLOCKS} 筆缺少 ip"
+        # 檢查重複 IP
+        DUP_IPS=$(awk '/option ip/{gsub(/'\''/,"",$3); print $3}' "$TMP_DHCP" | sort | uniq -d)
+        if [ -n "$DUP_IPS" ]; then
+            for dip in $DUP_IPS; do
+                DUP_NAMES=$(awk -v ip="$dip" 'BEGIN{RS=""; FS="\n"} {found_ip=0; name=""; for(i=1;i<=NF;i++){if($i~"option ip.*"ip) found_ip=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found_ip && name{print name}' "$TMP_DHCP" | paste -sd, -)
+                COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: IP ${dip} 重複 (${DUP_NAMES})"
+            done
+        fi
+        # 檢查重複 MAC
+        DUP_MACS=$(awk '/option mac/{gsub(/'\''/,"",$3); print toupper($3)}' "$TMP_DHCP" | sort | uniq -d)
+        if [ -n "$DUP_MACS" ]; then
+            for dmac in $DUP_MACS; do
+                DUP_NAMES=$(awk -v mac="$dmac" 'BEGIN{RS=""; FS="\n"} {found=0; name=""; for(i=1;i<=NF;i++){if($i~"option mac" && toupper($i)~mac) found=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found && name{print name}' "$TMP_DHCP" | paste -sd, -)
+                COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: MAC ${dmac} 重複 (${DUP_NAMES})"
+            done
+        fi
     fi
 
     # --- QoS interface: 每筆需要 name, bandwidth_up, bandwidth_down ---
