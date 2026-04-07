@@ -101,10 +101,15 @@ for arg in "$@"; do
     esac
 done
 
-# 自動偵測身份: 讀 .mesh_role_active (auto-role.sh 寫入)，fallback 讀 .mesh_role
+# 自動偵測身份: override 優先，再看 .mesh_role_active，最後 fallback .mesh_role
 if [ "$SATELLITE_MODE" = "0" ]; then
-    _active_role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
-    [ -z "$_active_role" ] && _active_role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
+    _override=$(cat /etc/myscript/.mesh_role_override 2>/dev/null | tr 'A-Z' 'a-z')
+    if [ "$_override" = "gateway" ] || [ "$_override" = "client" ]; then
+        _active_role="$_override"
+    else
+        _active_role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
+        [ -z "$_active_role" ] && _active_role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
+    fi
     if [ "$_active_role" = "client" ]; then
         SATELLITE_MODE=1
         log "📡 自動偵測: client 角色，啟用衛星模式"
