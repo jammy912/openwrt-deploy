@@ -742,11 +742,6 @@ cp -a /etc/config/* /tmp/config_ram/
 cp -a /etc/crontabs/* /tmp/crontabs_ram/ 2>/dev/null
 
 CRONTAB_FILE="/etc/crontabs/root"
-# hybrid 模式: 每 5 分鐘偵測角色
-if [ "$MESH_ROLE" = "hybrid" ] && ! grep -q "auto-role" "$CRONTAB_FILE" 2>/dev/null; then
-    echo "*/5 * * * * /etc/myscript/auto-role.sh      # hybrid 自動偵測角色" >> "$CRONTAB_FILE"
-    echo "  ✅ 已加入 hybrid 角色偵測排程 (每 5 分鐘)"
-fi
 # 建立 SyncArea 區塊 (sync-googleconfig 會在此區塊內更新排程)
 if ! grep -q "#SyncAreaStart" "$CRONTAB_FILE" 2>/dev/null; then
     echo "#SyncAreaStart" >> "$CRONTAB_FILE"

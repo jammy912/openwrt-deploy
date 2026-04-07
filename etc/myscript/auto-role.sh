@@ -6,9 +6,19 @@
 #   1. 有 WAN + 沒其他 DHCP → gateway (IP=.1, 開 DHCP server, gw_mode=server)
 #   2. 有 WAN + 有其他 DHCP → gateway (保持 IP, DHCP relay→.1, gw_mode=server)
 #   3. 沒 WAN → client (保持 IP, DHCP relay→.1, gw_mode=client)
+#
+# 參數:
+#   --wire-only  有線 mesh 連線時停用無線 mesh
 
 . /etc/myscript/push_notify.inc 2>/dev/null
 PUSH_NAMES="jammy"
+
+WIRE_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --wire-only) WIRE_ONLY=1 ;;
+    esac
+done
 
 LOG_TAG="auto-role"
 log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
@@ -211,8 +221,21 @@ else
 fi
 
 # =====================
-# 6. 有線 mesh 時停用無線 mesh
+# 6. VPN 子網路由 (非唯一 gateway/client → 路由到 .1)
 # =====================
+if [ "$LAN_MODE" != "static" ]; then
+    # 從自己的 WG 設定取得所有 VPN 子網，路由到 .1
+    for addr in $(uci show network | grep 'wg.*\.addresses=' | cut -d"'" -f2); do
+        subnet=$(echo "$addr" | cut -d/ -f1 | sed 's/\.[0-9]*$/.0/')
+        ip route add "$subnet/24" via 192.168.1.1 2>/dev/null && \
+            log "VPN 路由: $subnet/24 via 192.168.1.1"
+    done
+fi
+
+# =====================
+# 7. 有線 mesh 時停用無線 mesh (需 --wire-only 參數)
+# =====================
+if [ "$WIRE_ONLY" = "1" ]; then
 WIRE_DEV=$(uci get network.batmesh_wire.device 2>/dev/null)
 if [ -n "$WIRE_DEV" ] && [ "$(cat /sys/class/net/$WIRE_DEV/carrier 2>/dev/null)" = "1" ]; then
     # 有線 mesh 連線中 → 停無線 mesh
@@ -235,6 +258,7 @@ else
         CHANGED=1
     fi
 fi
+fi  # WIRE_ONLY
 
 # 更新當前身份
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
