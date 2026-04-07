@@ -263,37 +263,35 @@ fi
 # =====================
 svc_enable()  { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; }
 svc_disable() { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; }
-
-if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
-    # 唯一 gateway (.1): 全開
-    svc_enable wireguard 2>/dev/null  # WG 由 network 管理，這裡確保 interface up
-    svc_enable ddns
-    svc_enable adguardhome
-    svc_enable pbr
-    svc_enable qosify
-    log "服務: 全開 (唯一 gateway)"
-    dbg "5.服務全開 (主gateway)"
-elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非唯一 gateway: 停 WireGuard、DDNS
-    svc_disable ddns
-    log "服務: 停 DDNS (非唯一 gateway)"
-    # 停 WireGuard interfaces
+wg_stop() {
     for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
         ifdown "$wg_if" 2>/dev/null
     done
-    log "服務: 停 WireGuard (非唯一 gateway)"
-    dbg "5.停WG/DDNS (非主gateway)"
+}
+
+if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
+    # 主 gateway: 只在有變更時啟動服務
+    if [ "$CHANGED" = "1" ]; then
+        svc_enable ddns
+        svc_enable adguardhome
+        svc_enable pbr
+        svc_enable qosify
+        log "服務: 全開 (主 gateway)"
+    fi
+    dbg "5.主gateway (changed=$CHANGED)"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    # 非主 gateway: 每次確保 WG/DDNS 停掉
+    svc_disable ddns
+    wg_stop
+    dbg "5.非主gateway: 停WG/DDNS"
 else
-    # client: 停所有 gateway 專屬服務
+    # client: 每次確保全停
     svc_disable ddns
     svc_disable adguardhome
     svc_disable pbr
     svc_disable qosify
-    for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
-        ifdown "$wg_if" 2>/dev/null
-    done
-    log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
-    dbg "5.停全部服務 (client)"
+    wg_stop
+    dbg "5.client: 停全部服務"
 fi
 
 # =====================
@@ -358,7 +356,6 @@ fi
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
     echo -n "$NEW_ROLE" > "$ACTIVE_FILE"
     log "角色切換: $CURRENT_ROLE -> $NEW_ROLE"
-    push_notify "AutoRole: $CURRENT_ROLE -> $NEW_ROLE"
     CHANGED=1
 fi
 
@@ -372,7 +369,30 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     batctl gw server ${MY_PRI}MBit 2>/dev/null
 fi
 
-if [ "$CHANGED" = "0" ]; then
-    log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
+# 取得最新 IP (network restart 後可能改變)
+FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+if [ "$IS_PRIMARY" = "1" ] && [ "$NEW_ROLE" = "gateway" ]; then
+    GW_TYPE="主gw"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    GW_TYPE="副gw"
+else
+    GW_TYPE="client"
 fi
-dbg "完成: role=$NEW_ROLE DHCP=$DHCP_ACTION LAN=$LAN_MODE changed=$CHANGED"
+
+# 角色變更時推播 (含 IP 和主/副)
+if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
+    push_notify "AutoRole: ${CURRENT_ROLE:-none}→${NEW_ROLE} ${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+fi
+
+if [ "$CHANGED" = "0" ]; then
+    log "角色: $NEW_ROLE ($GW_TYPE), IP=$FINAL_IP, DHCP=$DHCP_ACTION (無變更)"
+fi
+# debug 網路診斷
+if [ "$DEBUG" = "1" ]; then
+    BAT0_MASTER=$(ip link show bat0 2>/dev/null | grep -o 'master [^ ]*')
+    BR_BAT0=$(brctl show br-lan 2>/dev/null | grep bat0 | head -1)
+    MESH_NEIGHBORS=$(batctl n 2>/dev/null | grep -c ':')
+    TL_COUNT=$(batctl tl 2>/dev/null | grep -c ':')
+    dbg "diag: bat0=${BAT0_MASTER:-NONE} br-lan_has_bat0=${BR_BAT0:+YES} LAN_IP=$FINAL_IP neighbors=$MESH_NEIGHBORS tl_entries=$TL_COUNT"
+fi
+dbg "完成: role=$NEW_ROLE $GW_TYPE IP=$FINAL_IP DHCP=$DHCP_ACTION changed=$CHANGED"
