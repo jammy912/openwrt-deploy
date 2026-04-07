@@ -571,14 +571,15 @@ main() {
         eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
-                h=""; p=""; wl=""; wr=""
+                h=""; p=""; wl=""; wr=""; gw=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
                     if ($i ~ /option wireless_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wl=a[n] }
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
+                    if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                 }
-                if (h == host) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr; exit }
+                if (h == host) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw; exit }
             }
         ' "$TMP_DECRYPTED")
         [ -z "$NEW_PRI" ] && NEW_PRI=50
@@ -601,6 +602,16 @@ main() {
         if [ "$NEW_WIRED" != "$CUR_WR" ]; then
             echo -n "$NEW_WIRED" > /etc/myscript/.mesh_wired
             log "🔧 mesh_wired: $CUR_WR → $NEW_WIRED (hostname=$MY_HOSTNAME)"
+        fi
+        # 更新 .mesh_role_override (GW Mode 強制覆蓋)
+        CUR_OVERRIDE=$(cat /etc/myscript/.mesh_role_override 2>/dev/null)
+        if [ "$NEW_GWMODE" != "$CUR_OVERRIDE" ]; then
+            echo -n "$NEW_GWMODE" > /etc/myscript/.mesh_role_override
+            if [ -n "$NEW_GWMODE" ]; then
+                log "🔧 mesh_role_override: $CUR_OVERRIDE → $NEW_GWMODE (hostname=$MY_HOSTNAME)"
+            else
+                log "🔧 mesh_role_override: 已清除 (hostname=$MY_HOSTNAME)"
+            fi
         fi
     fi
 

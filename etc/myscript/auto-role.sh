@@ -38,28 +38,39 @@ done
 [ $i -ge 120 ] && log "⚠️ 等待超時 (120s)，繼續偵測"
 
 # =====================
-# 1. 檢查 WAN 狀態
+# 1. 檢查 override (Google Sheet GW Mode)
 # =====================
-WAN_IF=$(uci get network.wan.device 2>/dev/null || echo "wan")
-WAN_IP=$(uci get network.wan.ipaddr 2>/dev/null)
-# 動態取得 WAN IP（DHCP 模式）
-[ -z "$WAN_IP" ] && WAN_IP=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+OVERRIDE=$(cat /etc/myscript/.mesh_role_override 2>/dev/null)
+OVERRIDE_LOWER=$(echo "$OVERRIDE" | tr 'A-Z' 'a-z')
 
-HAS_WAN=0
-if [ -n "$WAN_IP" ] && [ "$WAN_IP" != "0.0.0.0" ]; then
-    # 確認能上網
-    if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-        HAS_WAN=1
-    fi
-fi
-
-# =====================
-# 2. 決定角色
-# =====================
-if [ "$HAS_WAN" = "1" ]; then
-    NEW_ROLE="gateway"
+if [ "$OVERRIDE_LOWER" = "gateway" ] || [ "$OVERRIDE_LOWER" = "client" ]; then
+    NEW_ROLE="$OVERRIDE_LOWER"
+    log "override 強制角色: $NEW_ROLE (來自 .mesh_role_override)"
 else
-    NEW_ROLE="client"
+    # =====================
+    # 1b. 檢查 WAN 狀態 (自動偵測)
+    # =====================
+    WAN_IF=$(uci get network.wan.device 2>/dev/null || echo "wan")
+    WAN_IP=$(uci get network.wan.ipaddr 2>/dev/null)
+    # 動態取得 WAN IP（DHCP 模式）
+    [ -z "$WAN_IP" ] && WAN_IP=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+
+    HAS_WAN=0
+    if [ -n "$WAN_IP" ] && [ "$WAN_IP" != "0.0.0.0" ]; then
+        # 確認能上網
+        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            HAS_WAN=1
+        fi
+    fi
+
+    # =====================
+    # 2. 決定角色
+    # =====================
+    if [ "$HAS_WAN" = "1" ]; then
+        NEW_ROLE="gateway"
+    else
+        NEW_ROLE="client"
+    fi
 fi
 
 # =====================
