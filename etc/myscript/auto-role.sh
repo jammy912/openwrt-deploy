@@ -112,12 +112,22 @@ MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
 # 檢查 mesh 裡有沒有比自己優先的 gateway
 IS_PRIMARY=1
 if [ "$NEW_ROLE" = "gateway" ]; then
+    # debug: 記錄完整 gwl 和 mesh 狀態
+    GWL_RAW=$(batctl gwl 2>/dev/null)
+    GWL_COUNT=$(echo "$GWL_RAW" | grep -c 'MBit')
+    MY_GWMODE=$(batctl gw 2>/dev/null)
+    NEIGHBOR_COUNT=$(batctl n 2>/dev/null | grep -c ':')
+    dbg "3.gwl_raw: count=$GWL_COUNT my_gw=$MY_GWMODE neighbors=$NEIGHBOR_COUNT"
+    [ "$DEBUG" = "1" ] && {
+        GWL_LINES=$(echo "$GWL_RAW" | grep 'MBit' | head -5)
+        [ -n "$GWL_LINES" ] && dbg "3.gwl_entries: $GWL_LINES"
+        [ -z "$GWL_LINES" ] && dbg "3.gwl_entries: (empty)"
+    }
+
     # 從 batctl gwl 讀其他 gateway 的 bandwidth(=priority) 和 MAC
-    # gwl 格式: [B.A.T.M.A.N...] 或 "  MAC (bandwidth) ..."
-    HIGHER=$(batctl gwl 2>/dev/null | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
+    HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
         /MBit/ {
             mac = $1; gsub(/[^0-9a-f:]/, "", mac)
-            # 取得 bandwidth 數字
             for (i=1; i<=NF; i++) {
                 if ($i ~ /MBit/) { pri = $i; gsub(/[^0-9]/, "", pri); break }
             }
