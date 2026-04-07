@@ -304,6 +304,11 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     /etc/init.d/network restart
 fi
 
+# 確保 gw_mode + bandwidth(=priority) 在 network restart 後生效
+if [ "$NEW_ROLE" = "gateway" ]; then
+    batctl gw server ${MY_PRI}MBit 2>/dev/null
+fi
+
 if [ "$CHANGED" = "0" ]; then
     log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
 fi
