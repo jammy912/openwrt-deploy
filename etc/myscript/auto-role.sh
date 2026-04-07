@@ -29,7 +29,7 @@ dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
 if apk list -I 2>/dev/null | grep -q "^firewall-[0-9]"; then
     log "偵測到 fw3，開始遷移至 fw4..."
     apk del firewall 2>/dev/null
-    apk add firewall4 uhttpd uhttpd-mod-ubus 2>/dev/null
+    apk add firewall4 uhttpd uhttpd-mod-ubus luci luci-ssl 2>/dev/null
     # 移除不存在的 firewall.user include
     uci show firewall 2>/dev/null | grep -q "@include\[0\].path='/etc/firewall.user'" && \
         uci delete firewall.@include[0] 2>/dev/null
