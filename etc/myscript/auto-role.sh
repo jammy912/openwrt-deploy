@@ -197,8 +197,20 @@ if [ "$LAN_MODE" = "static" ]; then
         CHANGED=1
     fi
 else
-    # 非主 gateway / client: 用 DHCP 取得 IP，避免跟主 gateway 撞
-    if [ "$CUR_LAN_PROTO" != "dhcp" ]; then
+    # 非主 gateway / client: 先設臨時 static IP 避免撞 .1，再改 DHCP
+    if [ "$CUR_LAN_PROTO" != "dhcp" ] || [ "$CUR_LAN_IP" = "192.168.1.1" ]; then
+        # 用 MAC 最後一字節算臨時 IP (192.168.1.200-254)
+        MAC_LAST=$(cat /sys/class/net/br-lan/address 2>/dev/null | awk -F: '{print $NF}')
+        TEMP_IP="192.168.1.$((0x${MAC_LAST:-c8} % 55 + 200))"
+        # 先設臨時 static IP
+        uci set network.lan.proto='static'
+        uci set network.lan.ipaddr="$TEMP_IP"
+        uci set network.lan.netmask='255.255.255.0'
+        uci commit network
+        log "臨時 IP: $TEMP_IP"
+        /etc/init.d/network restart
+        sleep 2
+        # 再改 DHCP
         uci set network.lan.proto='dhcp'
         uci delete network.lan.ipaddr 2>/dev/null
         uci delete network.lan.netmask 2>/dev/null
@@ -209,9 +221,9 @@ else
 fi
 uci commit network
 
-# 如果 LAN proto 改了，先重啟網路拿到新 IP，再設 relay
+# 如果 LAN proto 改了，重啟網路拿新 IP，再設 relay
 if [ "$NEED_RESTART_NET" = "1" ]; then
-    log "重啟網路 (LAN proto 變更)..."
+    log "重啟網路 (DHCP)..."
     /etc/init.d/network restart
     NEED_RESTART_NET=0
     # 等 DHCP 拿到 IP (最多 30 秒)
