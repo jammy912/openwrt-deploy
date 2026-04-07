@@ -588,8 +588,17 @@ main() {
             }
         ' "$TMP_DECRYPTED")
         [ -z "$NEW_PRI" ] && NEW_PRI=50
-        [ -z "$NEW_WIRELESS" ] && NEW_WIRELESS=Y
-        [ -z "$NEW_WIRED" ] && NEW_WIRED=N
+        # TRUE/FALSE → Y/N 轉換 (Google Sheet checkbox)
+        case "$NEW_WIRELESS" in
+            TRUE|true|1|Y|y) NEW_WIRELESS=Y ;;
+            FALSE|false|0|N|n) NEW_WIRELESS=N ;;
+            "") NEW_WIRELESS=Y ;;
+        esac
+        case "$NEW_WIRED" in
+            TRUE|true|1|Y|y) NEW_WIRED=Y ;;
+            FALSE|false|0|N|n) NEW_WIRED=N ;;
+            "") NEW_WIRED=N ;;
+        esac
         # 更新 .mesh_priority
         CUR_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
         if [ "$NEW_PRI" != "$CUR_PRI" ]; then
