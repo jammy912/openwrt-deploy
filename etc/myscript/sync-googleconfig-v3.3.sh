@@ -428,7 +428,7 @@ main() {
     fi
 
     # 3. 檢查空的 option 值 (option name 後面沒有值或只有引號)
-    EMPTY_OPTIONS=$(grep -nE "^\s*option\s+\S+\s*(''|\"\"|\s*)$" "$TMP_DECRYPTED" 2>/dev/null)
+    EMPTY_OPTIONS=$(grep -nE "^\s*option\s+\S+\s*(''|\"\"|\s*)$" "$TMP_DECRYPTED" 2>/dev/null | grep -v 'option gw_mode')
     if [ -n "$EMPTY_OPTIONS" ]; then
         EMPTY_COUNT=$(echo "$EMPTY_OPTIONS" | wc -l)
         EMPTY_SAMPLE=$(echo "$EMPTY_OPTIONS" | head -5 | sed 's/^/    L/')
@@ -604,6 +604,9 @@ main() {
             log "🔧 mesh_wired: $CUR_WR → $NEW_WIRED (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_role_override (GW Mode 強制覆蓋)
+        # Auto 或空白 = 清除 override，回到自動偵測
+        GWMODE_LOWER=$(echo "$NEW_GWMODE" | tr 'A-Z' 'a-z')
+        [ "$GWMODE_LOWER" = "auto" ] && NEW_GWMODE=""
         CUR_OVERRIDE=$(cat /etc/myscript/.mesh_role_override 2>/dev/null)
         if [ "$NEW_GWMODE" != "$CUR_OVERRIDE" ]; then
             echo -n "$NEW_GWMODE" > /etc/myscript/.mesh_role_override
