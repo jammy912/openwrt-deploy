@@ -128,8 +128,11 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
         /MBit/ {
             mac = $1; gsub(/[^0-9a-f:]/, "", mac)
+            # 格式: "95.0/2.0 MBit" → 取 "/" 前的整數部分
             for (i=1; i<=NF; i++) {
-                if ($i ~ /MBit/) { pri = $i; gsub(/[^0-9]/, "", pri); break }
+                if ($i ~ /\/.*MBit/ || (i<NF && $(i+1)=="MBit")) {
+                    split($i, bw, "/"); split(bw[1], dec, "."); pri=dec[1]; break
+                }
             }
             if (mac == me_mac) next
             if (pri+0 > me_pri+0) { found=1; exit }
