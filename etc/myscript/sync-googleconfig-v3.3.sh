@@ -573,8 +573,8 @@ main() {
             /^config mesh_priority/ {
                 h=""; p=""
                 for (i=1; i<=NF; i++) {
-                    if ($i ~ /option hostname/) { gsub(/.*'"'"'|'"'"'.*/, "", $i); h=$i }
-                    if ($i ~ /option priority/) { gsub(/.*'"'"'|'"'"'.*/, "", $i); p=$i }
+                    if ($i ~ /option hostname/) { n=split($i, a); gsub(/'"'"'/, "", a[n]); h=a[n] }
+                    if ($i ~ /option priority/) { n=split($i, a); gsub(/'"'"'/, "", a[n]); p=a[n] }
                 }
                 if (h == host) { print p; exit }
             }
