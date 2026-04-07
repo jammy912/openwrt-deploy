@@ -112,27 +112,14 @@ MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
 # 檢查 mesh 裡有沒有比自己優先的 gateway
 IS_PRIMARY=1
 if [ "$NEW_ROLE" = "gateway" ]; then
-    # debug: 記錄完整 gwl 和 mesh 狀態
-    GWL_RAW=$(batctl gwl 2>/dev/null)
-    GWL_COUNT=$(echo "$GWL_RAW" | grep -c 'MBit')
-    MY_GWMODE=$(batctl gw 2>/dev/null)
-    NEIGHBOR_COUNT=$(batctl n 2>/dev/null | grep -c ':')
-    dbg "3.gwl_raw: count=$GWL_COUNT my_gw=$MY_GWMODE neighbors=$NEIGHBOR_COUNT"
-    [ "$DEBUG" = "1" ] && {
-        GWL_LINES=$(echo "$GWL_RAW" | grep 'MBit' | head -5)
-        [ -n "$GWL_LINES" ] && dbg "3.gwl_entries: $GWL_LINES"
-        [ -z "$GWL_LINES" ] && dbg "3.gwl_entries: (empty)"
-    }
-
     # 從 batctl gwl 讀其他 gateway 的 bandwidth(=priority) 和 MAC
-    HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
+    # gwl 格式: [B.A.T.M.A.N...] 或 "  MAC (bandwidth) ..."
+    HIGHER=$(batctl gwl 2>/dev/null | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
         /MBit/ {
             mac = $1; gsub(/[^0-9a-f:]/, "", mac)
-            # 格式: "95.0/2.0 MBit" → 取 "/" 前的整數部分
+            # 取得 bandwidth 數字
             for (i=1; i<=NF; i++) {
-                if ($i ~ /\/.*MBit/ || (i<NF && $(i+1)=="MBit")) {
-                    split($i, bw, "/"); split(bw[1], dec, "."); pri=dec[1]; break
-                }
+                if ($i ~ /MBit/) { pri = $i; gsub(/[^0-9]/, "", pri); break }
             }
             if (mac == me_mac) next
             if (pri+0 > me_pri+0) { found=1; exit }
@@ -182,12 +169,11 @@ if [ "$CUR_GW" != "$WANT_GW" ]; then
     log "bat0 gw_mode: $CUR_GW -> $WANT_GW"
     CHANGED=1
 fi
-CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
-CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
-[ -z "$CUR_LAN_IP" ] && CUR_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
-dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CUR_LAN_PROTO"
+dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE"
 
 # LAN IP 模式
+CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
+CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
     if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
@@ -198,17 +184,8 @@ if [ "$LAN_MODE" = "static" ]; then
         NEED_RESTART_NET=1
         CHANGED=1
     fi
-else
-    # 非主 gateway / client: 用 DHCP 取得 IP，避免跟主 gateway 撞
-    if [ "$CUR_LAN_PROTO" != "dhcp" ]; then
-        uci set network.lan.proto='dhcp'
-        uci delete network.lan.ipaddr 2>/dev/null
-        uci delete network.lan.netmask 2>/dev/null
-        log "LAN 改為 DHCP (非主 gateway)"
-        NEED_RESTART_NET=1
-        CHANGED=1
-    fi
 fi
+# LAN_MODE=keep 時不動 IP
 uci commit network
 
 # DHCP server / relay
@@ -261,38 +238,41 @@ elif [ "$DHCP_ACTION" = "relay" ]; then
 fi
 
 # =====================
-# 5. 服務啟停 (只在狀態不一致時才動)
+# 5. 服務啟停
 # =====================
-svc_is_enabled() { /etc/init.d/$1 enabled 2>/dev/null; }
-svc_ensure_on()  { svc_is_enabled $1 || { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; log "服務啟動: $1"; }; }
-svc_ensure_off() { svc_is_enabled $1 && { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; log "服務停止: $1"; }; }
-wg_is_up() { uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg' | while read wg_if; do ifstatus "$wg_if" 2>/dev/null | grep -q '"up": true' && return 0; done; return 1; }
-wg_stop() {
+svc_enable()  { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; }
+svc_disable() { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; }
+
+if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
+    # 唯一 gateway (.1): 全開
+    svc_enable wireguard 2>/dev/null  # WG 由 network 管理，這裡確保 interface up
+    svc_enable ddns
+    svc_enable adguardhome
+    svc_enable pbr
+    svc_enable qosify
+    log "服務: 全開 (唯一 gateway)"
+    dbg "5.服務全開 (主gateway)"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    # 非唯一 gateway: 停 WireGuard、DDNS
+    svc_disable ddns
+    log "服務: 停 DDNS (非唯一 gateway)"
+    # 停 WireGuard interfaces
     for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
         ifdown "$wg_if" 2>/dev/null
     done
-}
-
-if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
-    # 唯一 gateway (.1): 確保全開
-    svc_ensure_on ddns
-    svc_ensure_on adguardhome
-    svc_ensure_on pbr
-    svc_ensure_on qosify
-    dbg "5.服務確認 (主gateway)"
-elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: 確保停 WireGuard、DDNS
-    svc_ensure_off ddns
-    wg_is_up && { wg_stop; log "服務停止: WireGuard"; }
-    dbg "5.服務確認 (非主gateway)"
+    log "服務: 停 WireGuard (非唯一 gateway)"
+    dbg "5.停WG/DDNS (非主gateway)"
 else
-    # client: 確保停所有 gateway 專屬服務
-    svc_ensure_off ddns
-    svc_ensure_off adguardhome
-    svc_ensure_off pbr
-    svc_ensure_off qosify
-    wg_is_up && { wg_stop; log "服務停止: WireGuard"; }
-    dbg "5.服務確認 (client)"
+    # client: 停所有 gateway 專屬服務
+    svc_disable ddns
+    svc_disable adguardhome
+    svc_disable pbr
+    svc_disable qosify
+    for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+        ifdown "$wg_if" 2>/dev/null
+    done
+    log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
+    dbg "5.停全部服務 (client)"
 fi
 
 # =====================
@@ -357,6 +337,7 @@ fi
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
     echo -n "$NEW_ROLE" > "$ACTIVE_FILE"
     log "角色切換: $CURRENT_ROLE -> $NEW_ROLE"
+    push_notify "AutoRole: $CURRENT_ROLE -> $NEW_ROLE"
     CHANGED=1
 fi
 
@@ -370,31 +351,7 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     batctl gw server ${MY_PRI}MBit 2>/dev/null
 fi
 
-# 取得最新 IP (network restart 後可能改變)
-FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
-if [ "$IS_PRIMARY" = "1" ] && [ "$NEW_ROLE" = "gateway" ]; then
-    GW_TYPE="主gw"
-elif [ "$NEW_ROLE" = "gateway" ]; then
-    GW_TYPE="副gw"
-else
-    GW_TYPE="client"
-fi
-
-# 角色變更時推播 (含 IP 和主/副)
-if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
-    push_notify "AutoRole: ${CURRENT_ROLE:-none}→${NEW_ROLE} ${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
-fi
-
 if [ "$CHANGED" = "0" ]; then
-    log "角色: $NEW_ROLE ($GW_TYPE), IP=$FINAL_IP, DHCP=$DHCP_ACTION (無變更)"
-fi
-# debug 網路診斷
-if [ "$DEBUG" = "1" ]; then
-    BAT0_MASTER=$(ip link show bat0 2>/dev/null | grep -o 'master [^ ]*')
-    BR_BAT0=$(brctl show br-lan 2>/dev/null | grep bat0 | head -1)
-    MY_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
-    MESH_NEIGHBORS=$(batctl n 2>/dev/null | grep -c ':')
-    TL_COUNT=$(batctl tl 2>/dev/null | grep -c ':')
-    dbg "diag: bat0=${BAT0_MASTER:-NONE} br-lan_has_bat0=${BR_BAT0:+YES} LAN_IP=$MY_LAN_IP neighbors=$MESH_NEIGHBORS tl_entries=$TL_COUNT"
+    log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
 fi
 dbg "完成: role=$NEW_ROLE DHCP=$DHCP_ACTION LAN=$LAN_MODE changed=$CHANGED"
