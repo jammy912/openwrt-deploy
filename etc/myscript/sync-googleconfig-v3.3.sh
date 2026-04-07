@@ -454,7 +454,7 @@ main() {
     # 6. 檢查非法 config type (解密金鑰錯誤時會產生亂碼如 0config, 0onfig)
     #    合法前綴: policy, interface, wireguard_wg, host, qosrule, qosinterface,
     #    crontab, dbroute, pushkey (後面可接任意後綴如 _tw, _satellite 等)
-    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|routerconfig|mesh_priority)")
+    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|routerconfig|batmanmesh)")
     if [ -n "$BAD_CONFIG" ]; then
         BAD_COUNT=$(echo "$BAD_CONFIG" | wc -l)
         BAD_SAMPLE=$(echo "$BAD_CONFIG" | head -3 | tr '\n' '; ')
@@ -565,12 +565,12 @@ main() {
     # routerconfig 不分模式，兩邊都提取
     sed -n '/^config routerconfig/,/^$/p' "$TMP_DECRYPTED" | sed '/^$/d' >> "$TMP_ROUTERCONFIG"
 
-    # mesh_priority: 比對 hostname，更新 .mesh_priority
+    # batmanmesh: 比對 hostname，更新 .batmanmesh
     MY_HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
     if [ -n "$MY_HOSTNAME" ]; then
         eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
-            /^config mesh_priority/ {
+            /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
