@@ -18,6 +18,11 @@ PUSH_NAMES="jammy"
 LOG_TAG="auto-role"
 log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
 
+# --debug 模式: 每步推播
+DEBUG=0
+[ "$1" = "--debug" ] && DEBUG=1
+dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
+
 # =====================
 # 一次性 fw3→fw4 遷移
 # =====================
@@ -53,6 +58,7 @@ while [ $i -lt 120 ]; do
     i=$((i + 5))
 done
 [ $i -ge 120 ] && log "⚠️ 等待超時 (120s)，繼續偵測"
+dbg "0.網路就緒 (等待${i}s)"
 
 # =====================
 # 1. 檢查 override (Google Sheet GW Mode)
@@ -63,6 +69,7 @@ OVERRIDE_LOWER=$(echo "$OVERRIDE" | tr 'A-Z' 'a-z')
 if [ "$OVERRIDE_LOWER" = "gateway" ] || [ "$OVERRIDE_LOWER" = "client" ]; then
     NEW_ROLE="$OVERRIDE_LOWER"
     log "override 強制角色: $NEW_ROLE (來自 .mesh_role_override)"
+    dbg "1.override=$NEW_ROLE"
 else
     # =====================
     # 1b. 檢查 WAN 狀態 (自動偵測)
@@ -88,6 +95,7 @@ else
     else
         NEW_ROLE="client"
     fi
+    dbg "1.自動偵測 WAN_IP=$WAN_IP HAS_WAN=$HAS_WAN → $NEW_ROLE"
 fi
 
 # =====================
@@ -125,6 +133,8 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     fi
 fi
 
+dbg "3.priority=$MY_PRI MAC=$MY_MAC IS_PRIMARY=$IS_PRIMARY"
+
 DHCP_ACTION=""  # server, relay, 或空
 LAN_MODE=""     # static 或 keep
 if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
@@ -159,6 +169,7 @@ if [ "$CUR_GW" != "$WANT_GW" ]; then
     log "bat0 gw_mode: $CUR_GW -> $WANT_GW"
     CHANGED=1
 fi
+dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE"
 
 # LAN IP 模式
 CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
@@ -240,6 +251,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     svc_enable pbr
     svc_enable qosify
     log "服務: 全開 (唯一 gateway)"
+    dbg "5.服務全開 (主gateway)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非唯一 gateway: 停 WireGuard、DDNS
     svc_disable ddns
@@ -249,6 +261,7 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
         ifdown "$wg_if" 2>/dev/null
     done
     log "服務: 停 WireGuard (非唯一 gateway)"
+    dbg "5.停WG/DDNS (非主gateway)"
 else
     # client: 停所有 gateway 專屬服務
     svc_disable ddns
@@ -259,6 +272,7 @@ else
         ifdown "$wg_if" 2>/dev/null
     done
     log "服務: 停 WireGuard/DDNS/AdGuard/PBR/qosify (client)"
+    dbg "5.停全部服務 (client)"
 fi
 
 # =====================
@@ -340,3 +354,4 @@ fi
 if [ "$CHANGED" = "0" ]; then
     log "角色: $NEW_ROLE, DHCP: $DHCP_ACTION, LAN: $LAN_MODE (無變更)"
 fi
+dbg "完成: role=$NEW_ROLE DHCP=$DHCP_ACTION LAN=$LAN_MODE changed=$CHANGED"
