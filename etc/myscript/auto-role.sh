@@ -218,13 +218,18 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     if [ "$LAN_MODE" != "static" ]; then
         j=0
         while [ $j -lt 30 ]; do
-            NEW_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
-            [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ] && break
+            NEW_IP=$(ip -4 addr show br-lan 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+            [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ] && [ "$NEW_IP" != "" ] && break
             sleep 2
             j=$((j + 2))
         done
-        log "DHCP 取得 IP: ${NEW_IP:-timeout}"
-        push_notify "DHCP IP: ${NEW_IP:-timeout}"
+        if [ -n "$NEW_IP" ] && [ "$NEW_IP" != "192.168.1.1" ]; then
+            log "DHCP 取得 IP: $NEW_IP"
+            push_notify "DHCP IP: $NEW_IP"
+        else
+            log "⚠️ DHCP 取得 IP 失敗 (30s timeout)"
+            push_notify "DHCP IP: 失敗 (timeout)"
+        fi
     fi
 fi
 
