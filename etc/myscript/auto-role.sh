@@ -197,9 +197,21 @@ if [ "$LAN_MODE" = "static" ]; then
         CHANGED=1
     fi
 else
-    # 非主 gateway / client: 用 MAC 算 static IP，避免跟 .1 撞
-    MAC_LAST=$(cat /sys/class/net/br-lan/address 2>/dev/null | awk -F: '{print $NF}')
-    SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
+    # 非主 gateway / client: 查 DHCP 靜態對應，沒有則用 MAC 算 IP
+    MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
+    # 從本地 /etc/config/dhcp 找自己 MAC 的靜態 IP
+    SELF_IP=""
+    if [ -n "$MY_BR_MAC" ]; then
+        SELF_IP=$(uci show dhcp 2>/dev/null | grep -i "mac='$MY_BR_MAC'" | while read line; do
+            idx=$(echo "$line" | sed "s/\.mac=.*//")
+            uci get "${idx}.ip" 2>/dev/null
+        done | head -1)
+    fi
+    # 沒找到靜態對應，用 MAC 最後字節算
+    if [ -z "$SELF_IP" ]; then
+        MAC_LAST=$(echo "$MY_BR_MAC" | awk -F: '{print $NF}')
+        SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
+    fi
     if [ "$CUR_LAN_IP" = "192.168.1.1" ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr="$SELF_IP"
