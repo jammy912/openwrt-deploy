@@ -18,6 +18,23 @@ PUSH_NAMES="jammy"
 LOG_TAG="auto-role"
 log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
 
+# =====================
+# 一次性 fw3→fw4 遷移
+# =====================
+if apk list -I 2>/dev/null | grep -q "^firewall-[0-9]"; then
+    log "偵測到 fw3，開始遷移至 fw4..."
+    apk del firewall 2>/dev/null
+    apk add firewall4 2>/dev/null
+    # 移除不存在的 firewall.user include
+    uci show firewall 2>/dev/null | grep -q "@include\[0\].path='/etc/firewall.user'" && \
+        uci delete firewall.@include[0] 2>/dev/null
+    # dbroute include 標記 fw4 相容
+    uci set firewall.dbroute.fw4_compatible='1' 2>/dev/null
+    uci commit firewall 2>/dev/null
+    /etc/init.d/firewall restart 2>/dev/null
+    log "fw3 → fw4 遷移完成"
+fi
+
 ROLE_FILE="/etc/myscript/.mesh_role"
 ACTIVE_FILE="/etc/myscript/.mesh_role_active"
 CURRENT_ROLE=$(cat "$ACTIVE_FILE" 2>/dev/null)
