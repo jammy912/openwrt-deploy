@@ -184,8 +184,17 @@ if [ "$LAN_MODE" = "static" ]; then
         NEED_RESTART_NET=1
         CHANGED=1
     fi
+else
+    # 非主 gateway / client: 用 DHCP 取得 IP，避免跟主 gateway 撞
+    if [ "$CUR_LAN_PROTO" != "dhcp" ]; then
+        uci set network.lan.proto='dhcp'
+        uci delete network.lan.ipaddr 2>/dev/null
+        uci delete network.lan.netmask 2>/dev/null
+        log "LAN 改為 DHCP (非主 gateway)"
+        NEED_RESTART_NET=1
+        CHANGED=1
+    fi
 fi
-# LAN_MODE=keep 時不動 IP
 uci commit network
 
 # DHCP server / relay
