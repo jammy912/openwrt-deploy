@@ -3,9 +3,9 @@
 # 觸發時機: rc.local 開機、hotplug WAN 變化、cron 定時
 #
 # 邏輯:
-#   1. 有 WAN + 沒其他 DHCP → gateway (IP=.1, 開 DHCP server, gw_mode=server)
-#   2. 有 WAN + 有其他 DHCP → gateway (保持 IP, DHCP relay→.1, gw_mode=server)
-#   3. 沒 WAN → client (保持 IP, DHCP relay→.1, gw_mode=client)
+#   1. 有 WAN + 最高優先 → 主 gateway (IP=.1, 開 DHCP server, gw_mode=server)
+#   2. 有 WAN + 非最高優先 → 副 gateway (靜態 IP, 關 DHCP, gw_mode=server)
+#   3. 沒 WAN → client (靜態 IP, 關 DHCP, gw_mode=client)
 #
 # mesh 設定由 Google Sheet 同步到:
 #   .mesh_priority  - 優先權 (數字大=優先當主 gateway)
@@ -17,6 +17,19 @@ PUSH_NAMES="jammy"
 
 LOG_TAG="auto-role"
 log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
+
+# 併發鎖 (防止 cron 重疊執行)
+LOCKFILE="/tmp/auto-role.lock"
+if [ -f "$LOCKFILE" ]; then
+    LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null)
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+        log "另一個 auto-role (PID=$LOCK_PID) 正在執行，跳過"
+        exit 0
+    fi
+    rm -f "$LOCKFILE"
+fi
+echo $$ > "$LOCKFILE"
+trap 'rm -f "$LOCKFILE"' EXIT
 
 # --debug 模式: 每步推播
 DEBUG=0
@@ -148,7 +161,7 @@ fi
 
 dbg "3.priority=$MY_PRI MAC=$MY_MAC IS_PRIMARY=$IS_PRIMARY"
 
-DHCP_ACTION=""  # server, relay, 或空
+DHCP_ACTION=""  # server 或 off
 LAN_MODE=""     # static 或 keep
 if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
     # 主 gateway: 固定 .1 開 DHCP server
@@ -156,12 +169,12 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
     LAN_MODE="static"
     log "主 gateway (priority=$MY_PRI)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: relay 轉發
-    DHCP_ACTION="relay"
+    # 非主 gateway: 關閉 DHCP (client 透過 bat0/br-lan 直接拿主 gw 的 DHCP)
+    DHCP_ACTION="off"
     LAN_MODE="keep"
 else
-    # client: relay 轉發
-    DHCP_ACTION="relay"
+    # client: 關閉 DHCP
+    DHCP_ACTION="off"
     LAN_MODE="keep"
 fi
 
@@ -204,10 +217,8 @@ else
     # 從本地 /etc/config/dhcp 找自己 MAC 的靜態 IP
     SELF_IP=""
     if [ -n "$MY_BR_MAC" ]; then
-        SELF_IP=$(uci show dhcp 2>/dev/null | grep -i "mac='$MY_BR_MAC'" | while read line; do
-            idx=$(echo "$line" | sed "s/\.mac=.*//")
-            uci get "${idx}.ip" 2>/dev/null
-        done | head -1)
+        MATCH_IDX=$(uci show dhcp 2>/dev/null | grep -i "mac='$MY_BR_MAC'" | head -1 | sed "s/\.mac=.*//")
+        [ -n "$MATCH_IDX" ] && SELF_IP=$(uci get "${MATCH_IDX}.ip" 2>/dev/null)
     fi
     # 沒找到靜態對應，用 MAC 最後字節算
     if [ -z "$SELF_IP" ]; then
@@ -238,41 +249,25 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     done
 fi
 
-# DHCP server / relay
+# DHCP server / off
 CUR_DHCP_IGNORE=$(uci get dhcp.lan.ignore 2>/dev/null)
 HAS_RELAY=$(uci show dhcp 2>/dev/null | grep -c "=relay")
 
-setup_relay() {
-    RELAY_SERVER="192.168.1.1"
-    # 用實際 br-lan IP (network restart 後的新 IP)
-    MY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
-    [ -z "$MY_IP" ] && MY_IP="0.0.0.0"
-    # 清除舊 relay 設定
+# 清除歷史遺留的 relay 設定
+if [ "$HAS_RELAY" -gt 0 ]; then
     while uci show dhcp 2>/dev/null | grep -q "=relay"; do
         uci delete dhcp.@relay[0] 2>/dev/null || break
     done
-    # 建立 relay
-    uci add dhcp relay >/dev/null
-    uci set dhcp.@relay[-1].local_addr="$MY_IP"
-    uci set dhcp.@relay[-1].server_addr="$RELAY_SERVER"
-    uci set dhcp.@relay[-1].interface='lan'
-    # 關閉 DHCP server
-    uci set dhcp.lan.ignore='1'
-    uci set dhcp.lan.dhcpv4='disabled'
     uci commit dhcp
-    /etc/init.d/dnsmasq restart
-    log "DHCP relay 已設定 ($MY_IP → $RELAY_SERVER)"
-}
-
-remove_relay() {
-    while uci show dhcp 2>/dev/null | grep -q "=relay"; do
-        uci delete dhcp.@relay[0] 2>/dev/null || break
-    done
-}
+    log "清除舊 DHCP relay 設定"
+fi
 
 if [ "$DHCP_ACTION" = "server" ]; then
-    if [ "$CUR_DHCP_IGNORE" = "1" ] || [ "$HAS_RELAY" -gt 0 ]; then
-        remove_relay
+    # 確保 dnsmasq 在跑
+    DNSMASQ_OK=1
+    [ "$CUR_DHCP_IGNORE" = "1" ] && DNSMASQ_OK=0
+    pgrep -x dnsmasq >/dev/null 2>&1 || DNSMASQ_OK=0
+    if [ "$DNSMASQ_OK" = "0" ]; then
         uci delete dhcp.lan.ignore 2>/dev/null
         uci set dhcp.lan.dhcpv4='server'
         uci commit dhcp
@@ -280,9 +275,13 @@ if [ "$DHCP_ACTION" = "server" ]; then
         log "DHCP server 已開啟"
         CHANGED=1
     fi
-elif [ "$DHCP_ACTION" = "relay" ]; then
-    if [ "$HAS_RELAY" -eq 0 ] || [ "$CUR_DHCP_IGNORE" != "1" ]; then
-        setup_relay
+elif [ "$DHCP_ACTION" = "off" ]; then
+    if [ "$CUR_DHCP_IGNORE" != "1" ]; then
+        uci set dhcp.lan.ignore='1'
+        uci set dhcp.lan.dhcpv4='disabled'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+        log "DHCP server 已關閉 (非主 gateway)"
         CHANGED=1
     fi
 fi
@@ -397,8 +396,12 @@ if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
 fi
 
 if [ "$NEED_RESTART_NET" = "1" ]; then
-    log "重啟網路..."
+    log "重啟網路 (mesh 介面變更)..."
     /etc/init.d/network restart
+    for i in 1 2 3 4 5; do
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
+        sleep 2
+    done
 fi
 
 # 確保 gw_mode + bandwidth(=priority) 在 network restart 後生效
