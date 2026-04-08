@@ -121,6 +121,15 @@ MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 [ -z "$MY_PRI" ] && MY_PRI=50
 MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
 
+# 開機延遲: priority 越低等越久，讓高 priority 的先搶主 gw
+BOOT_DELAY=$(( (600 - MY_PRI) / 10 ))
+[ "$BOOT_DELAY" -lt 0 ] && BOOT_DELAY=0
+UPTIME=$(awk -F. '{print $1}' /proc/uptime)
+if [ "$UPTIME" -lt 120 ] && [ "$BOOT_DELAY" -gt 0 ]; then
+    log "開機延遲 ${BOOT_DELAY}s (pri=${MY_PRI}, uptime=${UPTIME}s)"
+    sleep "$BOOT_DELAY"
+fi
+
 # 設定自己的 gw_bandwidth = priority (讓 batctl gwl 看到)
 [ "$NEW_ROLE" = "gateway" ] && batctl gw server ${MY_PRI}MBit 2>/dev/null
 
