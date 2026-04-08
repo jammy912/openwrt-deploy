@@ -221,7 +221,6 @@ else
         uci set network.lan.gateway='192.168.1.1'
         uci set network.lan.dns='192.168.1.1'
         log "LAN IP: $SELF_IP (非主 gateway)"
-        push_notify "LAN IP: $SELF_IP"
         NEED_RESTART_NET=1
         CHANGED=1
     fi
@@ -232,6 +231,11 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     log "重啟網路..."
     /etc/init.d/network restart
     NEED_RESTART_NET=0
+    # 等待網路恢復，確保後續推播能送出
+    for i in 1 2 3 4 5; do
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
+        sleep 2
+    done
 fi
 
 # DHCP server / relay
@@ -408,9 +412,9 @@ fi
 
 # 角色或主/副變更時推播
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
-    push_notify "AutoRole: ${CURRENT_ROLE:-none}→${NEW_ROLE} ${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+    push_notify "AutoRole: ${CURRENT_ROLE:-none}→${GW_TYPE} ${FINAL_IP}"
 elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ] && [ -n "$PREV_GWTYPE" ]; then
-    push_notify "AutoRole: ${PREV_GWTYPE}→${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+    push_notify "AutoRole: ${PREV_GWTYPE}→${GW_TYPE} ${FINAL_IP}"
 fi
 if [ "$NEW_ROLE" = "gateway" ]; then
     echo -n "$GW_TYPE" > "$GWTYPE_FILE"
