@@ -5,7 +5,7 @@
 # 邏輯:
 #   1. 有 WAN + 最高優先 → 主 gateway (IP=.1, 開 DHCP server, gw_mode=server)
 #   2. 有 WAN + 非最高優先 → 副 gateway (靜態 IP, 關 DHCP, gw_mode=server)
-#   3. 沒 WAN → client (靜態 IP, 關 DHCP, gw_mode=client)
+#   3. 沒 WAN → client (靜態 IP from MAC/DHCP lease, 關 DHCP server, gw_mode=client)
 #
 # mesh 設定由 Google Sheet 同步到:
 #   .mesh_priority  - 優先權 (數字大=優先當主 gateway)
@@ -303,16 +303,20 @@ wg_start() {
 }
 
 if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
-    # 主 gateway: 只在有變更時啟動服務
-    if [ "$CHANGED" = "1" ]; then
+    # 主 gateway: 有變更或主/副切換時啟動服務
+    PROMOTED=0
+    [ "$PREV_GWTYPE" != "主gw" ] && PROMOTED=1
+    if [ "$CHANGED" = "1" ] || [ "$PROMOTED" = "1" ]; then
         svc_enable ddns
         svc_enable adguardhome
         svc_enable pbr
         svc_enable qosify
         wg_start
-        log "服務: 全開 (主 gateway)"
+        [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
+        [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
+        CHANGED=1
     fi
-    dbg "5.主gateway (changed=$CHANGED)"
+    dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 每次確保 WG/DDNS 停掉
     svc_disable ddns
