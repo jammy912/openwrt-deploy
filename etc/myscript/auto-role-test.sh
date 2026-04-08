@@ -139,16 +139,42 @@ switch_to() {
     CUR_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
     if [ "$CUR_LAN_IP" != "$NEW_IP" ]; then
         OLD_CIDR=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
-        log "ACTION: IP 熱切換 $OLD_CIDR → ${NEW_IP}/24"
-        ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
-        ip addr add "${NEW_IP}/24" dev br-lan 2>/dev/null
-        if [ -n "$NEW_GW" ]; then
-            ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
-        else
-            # 主gw: default route 走 WAN
+
+        if [ "$TARGET" = "主gw" ]; then
+            # 升主gw: 立刻搶 .1 + gratuitous ARP
+            log "ACTION: 升主gw - 搶 .1 (先加再刪舊IP)"
+            ip addr add "192.168.1.1/24" dev br-lan 2>/dev/null
+            # gratuitous ARP 通知所有裝置 .1 是我
+            MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+            arping -U -c3 -w1 -I br-lan 192.168.1.1 2>/dev/null &
+            sleep 1
+            # 刪舊 IP
+            [ "$OLD_CIDR" != "192.168.1.1/24" ] && ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
             ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
+            log "ACTION: IP 搶奪完成: $OLD_CIDR → 192.168.1.1/24 (GARP sent)"
+        else
+            # 降副gw/client: 等新主搶到 .1 再改自己 IP
+            log "ACTION: 降級 - 等新主搶 .1 (最多 30s)..."
+            WAITED=0
+            while [ "$WAITED" -lt 30 ]; do
+                # 檢查有沒有別人回應 .1 的 ARP
+                OTHER_MAC=$(arping -c1 -w1 -I br-lan 192.168.1.1 2>/dev/null | grep -i 'reply' | grep -oi '[0-9a-f:]\{17\}' | head -1)
+                if [ -n "$OTHER_MAC" ] && [ "$OTHER_MAC" != "$MY_BR_MAC" ]; then
+                    log "ACTION: 新主已就位 (.1 = $OTHER_MAC)，等了 ${WAITED}s"
+                    break
+                fi
+                sleep 3
+                WAITED=$((WAITED + 3))
+            done
+            [ "$WAITED" -ge 30 ] && log "ACTION: 等待超時(30s)，強制切換 IP"
+
+            log "ACTION: IP 熱切換 $OLD_CIDR → ${NEW_IP}/24"
+            ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
+            ip addr add "${NEW_IP}/24" dev br-lan 2>/dev/null
+            ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
         fi
-        # UCI 也更新
+
+        # UCI 更新
         uci set network.lan.ipaddr="$NEW_IP"
         if [ -n "$NEW_GW" ]; then
             uci set network.lan.gateway="$NEW_GW"
@@ -159,7 +185,6 @@ switch_to() {
         fi
         uci commit network
 
-        # 等 IP 生效
         sleep 2
         log "ACTION: IP 切換後確認: $(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')"
     else
