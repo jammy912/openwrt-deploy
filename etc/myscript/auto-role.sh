@@ -535,17 +535,21 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
     echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
     NEIGH_CACHE=$(ip neigh show dev br-lan 2>/dev/null | grep -v FAILED)
     LEASE_CACHE=$(cat /tmp/dhcp.leases 2>/dev/null)
+    # 用後4字節合併同一台的有線/無線 MAC
+    SEEN_TAILS=""
     for mac in $PEER_MACS; do
-        # 連線類型
-        LINKS=$(echo "$N_CACHE" | grep "$mac" | awk '{print $1}' | while read iface; do
+        MAC_TAIL=$(echo "$mac" | cut -d: -f3-5)
+        echo "$SEEN_TAILS" | grep -q "$MAC_TAIL" && continue
+        SEEN_TAILS="$SEEN_TAILS $MAC_TAIL"
+        # 連線類型: 收集同 tail 的所有 MAC 的介面
+        LINKS=$(echo "$N_CACHE" | grep -i "$MAC_TAIL" | awk '{print $1}' | while read iface; do
             echo "$iface" | grep -q '^lan' && echo "有線" || echo "無線"
         done | sort -u | tr '\n' '+' | sed 's/+$//')
-        # gwl priority
-        PEER_PRI=$(echo "$GWL_CACHE" | grep "$mac" | awk '{for(i=1;i<=NF;i++){if($i~/\/.*MBit/){split($i,bw,"/");split(bw[1],d,".");print d[1];exit}}}')
+        # gwl priority: 同 tail 的任一 MAC 在 gwl 裡找
+        PEER_PRI=$(echo "$GWL_CACHE" | grep -i "$MAC_TAIL" | head -1 | awk '{for(i=1;i<=NF;i++){if($i~/\//){split($i,bw,"/");split(bw[1],d,".");print d[1];exit}}}')
         PEER_ROLE="client"
         [ -n "$PEER_PRI" ] && PEER_ROLE="gw pri=${PEER_PRI}"
-        # 用後4字節模糊比對 ARP → IP → hostname
-        MAC_TAIL=$(echo "$mac" | cut -d: -f3-6)
+        # ARP → IP → hostname
         PEER_IP=$(echo "$NEIGH_CACHE" | grep -i "$MAC_TAIL" | awk '/^192\.168\.1\./{print $1}' | head -1)
         PEER_NAME=""
         [ -n "$PEER_IP" ] && PEER_NAME=$(echo "$LEASE_CACHE" | awk -v ip="$PEER_IP" '$3==ip && $4!="*"{print $4}')
