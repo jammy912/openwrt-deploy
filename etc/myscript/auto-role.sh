@@ -313,24 +313,59 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
+        # 開啟 IOT WiFi
+        IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+        if [ -n "$IOT_IF" ]; then
+            CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
+            if [ "$CUR_IOT_DIS" = "1" ]; then
+                uci delete wireless.${IOT_IF}.disabled
+                uci commit wireless
+                NEED_WIFI_RELOAD=1
+                log "IOT WiFi 已啟用 (主 gateway)"
+            fi
+        fi
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
     fi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: 每次確保 WG/DDNS 停掉
-    svc_disable ddns
-    wg_stop
-    dbg "5.非主gateway: 停WG/DDNS"
-else
-    # client: 每次確保全停
+    # 非主 gateway: 停全部服務 + IOT WiFi
     svc_disable ddns
     svc_disable adguardhome
     svc_disable pbr
     svc_disable qosify
     wg_stop
-    dbg "5.client: 停全部服務"
+    # 停 IOT WiFi (只有主 gw 需要)
+    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+    if [ -n "$IOT_IF" ]; then
+        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
+        if [ "$CUR_IOT_DIS" != "1" ]; then
+            uci set wireless.${IOT_IF}.disabled='1'
+            uci commit wireless
+            NEED_WIFI_RELOAD=1
+            log "IOT WiFi 已停用 (非主 gateway)"
+        fi
+    fi
+    dbg "5.非主gateway: 停全部服務+IOT"
+else
+    # client: 停全部服務 + IOT WiFi
+    svc_disable ddns
+    svc_disable adguardhome
+    svc_disable pbr
+    svc_disable qosify
+    wg_stop
+    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+    if [ -n "$IOT_IF" ]; then
+        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
+        if [ "$CUR_IOT_DIS" != "1" ]; then
+            uci set wireless.${IOT_IF}.disabled='1'
+            uci commit wireless
+            NEED_WIFI_RELOAD=1
+            log "IOT WiFi 已停用 (client)"
+        fi
+    fi
+    dbg "5.client: 停全部服務+IOT"
 fi
 
 # =====================
@@ -550,10 +585,23 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
     fi
 else
-    # 副 gw / client: WG 不該跑
+    # 副 gw / client: WG/adguardhome/pbr/qosify/IOT 不該跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
+    fi
+    pgrep -f adguardhome >/dev/null 2>&1 && {
+        svc_disable adguardhome; log "fixup: AdGuardHome 不應運行，已停止"; FIXUP=1
+    }
+    pgrep -f pbr >/dev/null 2>&1 && {
+        svc_disable pbr; log "fixup: PBR 不應運行，已停止"; FIXUP=1
+    }
+    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+    if [ -n "$IOT_IF" ] && [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
+        uci set wireless.${IOT_IF}.disabled='1'
+        uci commit wireless
+        wifi reload
+        log "fixup: IOT WiFi 不應開啟，已停用"; FIXUP=1
     fi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"
