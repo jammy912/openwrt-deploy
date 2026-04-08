@@ -334,7 +334,6 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi
     svc_disable ddns
-    svc_disable adguardhome
     svc_disable pbr
     svc_disable qosify
     wg_stop
@@ -355,7 +354,6 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
 else
     # client: 停全部服務 + IOT WiFi
     svc_disable ddns
-    svc_disable adguardhome
     svc_disable pbr
     svc_disable qosify
     wg_stop
@@ -591,14 +589,11 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
     fi
 else
-    # 副 gw / client: WG/adguardhome/pbr/qosify/IOT 不該跑
+    # 副 gw / client: WG/pbr/qosify/IOT 不該跑 (adguardhome 保留給 DNS)
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
     fi
-    pgrep -x AdGuardHome >/dev/null 2>&1 && {
-        svc_disable adguardhome; log "fixup: AdGuardHome 不應運行，已停止"; FIXUP=1
-    }
     /etc/init.d/pbr enabled 2>/dev/null && {
         svc_disable pbr; log "fixup: PBR 不應運行，已停止"; FIXUP=1
     }
