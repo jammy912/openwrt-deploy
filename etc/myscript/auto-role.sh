@@ -297,6 +297,11 @@ wg_stop() {
         ifdown "$wg_if" 2>/dev/null
     done
 }
+wg_start() {
+    for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+        ifup "$wg_if" 2>/dev/null
+    done
+}
 
 if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     # 主 gateway: 只在有變更時啟動服務
@@ -305,6 +310,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         svc_enable adguardhome
         svc_enable pbr
         svc_enable qosify
+        wg_start
         log "服務: 全開 (主 gateway)"
     fi
     dbg "5.主gateway (changed=$CHANGED)"
