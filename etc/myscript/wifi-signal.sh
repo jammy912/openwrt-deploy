@@ -160,6 +160,10 @@ FIRST_RUN=0
 # =====================
 # Enable / Disable 介面
 # =====================
+# 非主gw 不啟用 IOT (2G)，避免 wifi-signal 把 auto-role 停用的 IOT 開回來
+GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+[ "$GW_TYPE" != "主gw" ] && ENABLE_2G=0
+
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)
 
