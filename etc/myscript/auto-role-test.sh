@@ -350,4 +350,8 @@ log "============================================"
 log "測試完成！LOG: $LOG"
 log "============================================"
 
-push_notify "AutoRole測試完成($HOSTNAME): $LOG"
+push_notify "AutoRole測試完成($HOSTNAME) 30秒後重開機"
+
+log "30 秒後重開機..."
+sleep 30
+reboot
