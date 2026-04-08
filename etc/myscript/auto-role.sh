@@ -396,6 +396,7 @@ if [ "$WANT_WIRED" = "Y" ] && [ -z "$WIRE_DEV" ]; then
         }
         uci commit network
         NEED_RESTART_NET=1
+        push_notify "有線mesh啟用: $WIRE_DEV"
         log "自動建立 batmesh_wire ($WIRE_DEV)"
         CHANGED=1
     fi
