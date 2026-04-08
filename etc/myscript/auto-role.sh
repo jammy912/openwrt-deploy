@@ -596,10 +596,10 @@ else
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
     fi
-    pgrep -f adguardhome >/dev/null 2>&1 && {
+    pgrep -x AdGuardHome >/dev/null 2>&1 && {
         svc_disable adguardhome; log "fixup: AdGuardHome 不應運行，已停止"; FIXUP=1
     }
-    pgrep -f pbr >/dev/null 2>&1 && {
+    /etc/init.d/pbr enabled 2>/dev/null && {
         svc_disable pbr; log "fixup: PBR 不應運行，已停止"; FIXUP=1
     }
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
