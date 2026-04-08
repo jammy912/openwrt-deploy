@@ -475,6 +475,31 @@ else
     > "$GWTYPE_FILE"
 fi
 
+# 主 gw 確立時推播 mesh 架構圖
+if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ]; }; then
+    MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
+    GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
+    N_CACHE=$(batctl n 2>/dev/null | grep ':')
+    # 取唯一鄰居 MAC 列表
+    PEER_MACS=$(echo "$N_CACHE" | awk '{print $2}' | sort -u)
+    MESH_TMP="/tmp/mesh_map.$$"
+    echo "Mesh架構:" > "$MESH_TMP"
+    echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
+    for mac in $PEER_MACS; do
+        # 連線類型
+        LINKS=$(echo "$N_CACHE" | grep "$mac" | awk '{print $1}' | while read iface; do
+            echo "$iface" | grep -q '^lan' && echo "有線" || echo "無線"
+        done | sort -u | tr '\n' '+' | sed 's/+$//')
+        # gwl priority
+        PEER_PRI=$(echo "$GWL_CACHE" | grep "$mac" | awk '{for(i=1;i<=NF;i++){if($i~/\/.*MBit/){split($i,bw,"/");split(bw[1],d,".");print d[1];exit}}}')
+        PEER_ROLE="client"
+        [ -n "$PEER_PRI" ] && PEER_ROLE="gw pri=${PEER_PRI}"
+        echo "├─${LINKS}─${mac} ${PEER_ROLE}" >> "$MESH_TMP"
+    done
+    push_notify "$(cat "$MESH_TMP")"
+    rm -f "$MESH_TMP"
+fi
+
 if [ "$CHANGED" = "0" ]; then
     log "角色: $NEW_ROLE ($GW_TYPE), IP=$FINAL_IP, DHCP=$DHCP_ACTION (無變更)"
 fi
