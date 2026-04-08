@@ -372,8 +372,34 @@ if [ -n "$WANT_WIRELESS" ]; then
     fi
 fi
 
-# 有線 mesh
+# 有線 mesh — 自動建立 batmesh_wire (預設 lan2)
 WIRE_DEV=$(uci get network.batmesh_wire.device 2>/dev/null)
+if [ "$WANT_WIRED" = "Y" ] && [ -z "$WIRE_DEV" ]; then
+    # 偵測可用的 lan port (優先 lan2)
+    if [ -e /sys/class/net/lan2 ]; then
+        WIRE_DEV="lan2"
+    else
+        WIRE_DEV=$(ls /sys/class/net/ | grep '^lan' | sort | tail -1)
+    fi
+    if [ -n "$WIRE_DEV" ]; then
+        uci set network.batmesh_wire=interface
+        uci set network.batmesh_wire.proto='batadv_hardif'
+        uci set network.batmesh_wire.master='bat0'
+        uci set network.batmesh_wire.mtu='1536'
+        uci set network.batmesh_wire.device="$WIRE_DEV"
+        # 從 br-lan 移除該 port (避免衝突)
+        uci show network | grep -q "br-lan.*ports.*$WIRE_DEV" && {
+            CUR_PORTS=$(uci get network.@device[0].ports 2>/dev/null)
+            NEW_PORTS=$(echo "$CUR_PORTS" | tr ' ' '\n' | grep -v "^${WIRE_DEV}$" | tr '\n' ' ')
+            uci delete network.@device[0].ports 2>/dev/null
+            for p in $NEW_PORTS; do uci add_list network.@device[0].ports="$p"; done
+        }
+        uci commit network
+        NEED_RESTART_NET=1
+        log "自動建立 batmesh_wire ($WIRE_DEV)"
+        CHANGED=1
+    fi
+fi
 if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
     CUR_WIRE_DISABLED=$(uci get network.batmesh_wire.disabled 2>/dev/null)
     if [ "$WANT_WIRED" = "N" ] && [ "$CUR_WIRE_DISABLED" != "1" ]; then
