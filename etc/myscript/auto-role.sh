@@ -413,8 +413,8 @@ fi
 # 角色或主/副變更時推播
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
     push_notify "AutoRole: ${CURRENT_ROLE:-none}→${GW_TYPE} ${FINAL_IP}"
-elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ] && [ -n "$PREV_GWTYPE" ]; then
-    push_notify "AutoRole: ${PREV_GWTYPE}→${GW_TYPE} ${FINAL_IP}"
+elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ]; then
+    push_notify "AutoRole: ${PREV_GWTYPE:-?}→${GW_TYPE} ${FINAL_IP}"
 fi
 if [ "$NEW_ROLE" = "gateway" ]; then
     echo -n "$GW_TYPE" > "$GWTYPE_FILE"
