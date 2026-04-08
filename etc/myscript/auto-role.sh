@@ -479,9 +479,9 @@ fi
 if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ]; }; then
     MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
     GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
-    N_CACHE=$(batctl n 2>/dev/null | grep ':')
+    N_CACHE=$(batctl n 2>/dev/null | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
     # 取唯一鄰居 MAC 列表
-    PEER_MACS=$(echo "$N_CACHE" | awk '{print $2}' | sort -u)
+    PEER_MACS=$(echo "$N_CACHE" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9a-f][0-9a-f]:/){print $i;break}}}' | sort -u)
     MESH_TMP="/tmp/mesh_map.$$"
     echo "Mesh架構:" > "$MESH_TMP"
     echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
