@@ -331,7 +331,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
                 IOT_RADIO=$(uci get wireless.${IOT_IF}.device 2>/dev/null)
                 [ -n "$IOT_RADIO" ] && uci delete wireless.${IOT_RADIO}.disabled 2>/dev/null
                 uci commit wireless
-                NEED_WIFI_RELOAD=1
+                [ -n "$IOT_RADIO" ] && wifi up "$IOT_RADIO"
                 log "IOT WiFi+${IOT_RADIO} 已啟用 (主 gateway)"
             fi
         fi
@@ -355,7 +355,7 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
             IOT_RADIO=$(uci get wireless.${IOT_IF}.device 2>/dev/null)
             [ -n "$IOT_RADIO" ] && uci set wireless.${IOT_RADIO}.disabled='1'
             uci commit wireless
-            NEED_WIFI_RELOAD=1
+            [ -n "$IOT_RADIO" ] && wifi down "$IOT_RADIO"
             log "IOT WiFi+${IOT_RADIO} 已停用 (非主 gateway)"
         fi
     fi
@@ -374,7 +374,7 @@ else
             IOT_RADIO=$(uci get wireless.${IOT_IF}.device 2>/dev/null)
             [ -n "$IOT_RADIO" ] && uci set wireless.${IOT_RADIO}.disabled='1'
             uci commit wireless
-            NEED_WIFI_RELOAD=1
+            [ -n "$IOT_RADIO" ] && wifi down "$IOT_RADIO"
             log "IOT WiFi+${IOT_RADIO} 已停用 (client)"
         fi
     fi
@@ -617,7 +617,7 @@ else
         IOT_RADIO=$(uci get wireless.${IOT_IF}.device 2>/dev/null)
         [ -n "$IOT_RADIO" ] && uci set wireless.${IOT_RADIO}.disabled='1'
         uci commit wireless
-        wifi reload
+        [ -n "$IOT_RADIO" ] && wifi down "$IOT_RADIO"
         log "fixup: IOT WiFi+${IOT_RADIO} 不應開啟，已停用"; FIXUP=1
     fi
 fi
