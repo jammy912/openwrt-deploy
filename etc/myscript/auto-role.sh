@@ -249,10 +249,25 @@ fi
 uci commit network
 
 if [ "$NEED_RESTART_NET" = "1" ]; then
-    log "重啟網路..."
-    /etc/init.d/network restart
+    # 用 ip addr 熱切換 LAN IP，避免 network restart 導致 WiFi 長時間斷線
+    OLD_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
+    NEW_IP=$(uci get network.lan.ipaddr 2>/dev/null)
+    NEW_MASK=$(uci get network.lan.netmask 2>/dev/null)
+    NEW_GW=$(uci get network.lan.gateway 2>/dev/null)
+    if [ -n "$OLD_IP" ] && [ -n "$NEW_IP" ]; then
+        ip addr del "$OLD_IP" dev br-lan 2>/dev/null
+        # netmask → CIDR
+        case "$NEW_MASK" in
+            255.255.255.0) CIDR=24 ;; 255.255.0.0) CIDR=16 ;; *) CIDR=24 ;;
+        esac
+        ip addr add "${NEW_IP}/${CIDR}" dev br-lan 2>/dev/null
+        [ -n "$NEW_GW" ] && ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
+        log "LAN IP 熱切換: $OLD_IP → ${NEW_IP}/${CIDR}"
+    else
+        log "重啟網路 (無法熱切換)..."
+        /etc/init.d/network restart
+    fi
     NEED_RESTART_NET=0
-    # 等待網路恢復，確保後續推播能送出
     for i in 1 2 3 4 5; do
         ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
         sleep 2
