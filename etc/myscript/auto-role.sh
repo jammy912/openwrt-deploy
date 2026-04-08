@@ -447,3 +447,28 @@ if [ "$DEBUG" = "1" ]; then
     dbg "diag: bat0=${BAT0_MASTER:-NONE} br-lan_has_bat0=${BR_BAT0:+YES} LAN_IP=$FINAL_IP neighbors=$MESH_NEIGHBORS tl_entries=$TL_COUNT"
 fi
 dbg "完成: role=$NEW_ROLE $GW_TYPE IP=$FINAL_IP DHCP=$DHCP_ACTION changed=$CHANGED"
+
+# =====================
+# 9. 最終狀態一致性檢查
+# =====================
+FIXUP=0
+if [ "$GW_TYPE" = "主gw" ]; then
+    # 主 gw: WG/dnsmasq/adguardhome 必須在跑
+    WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
+    if [ "$WG_UP" -eq 0 ]; then
+        wg_start; log "fixup: WG 未運行，已啟動"; FIXUP=1
+    fi
+    if ! pgrep -x dnsmasq >/dev/null 2>&1; then
+        /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
+    fi
+    if ! pgrep -f adguardhome >/dev/null 2>&1; then
+        /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
+    fi
+else
+    # 副 gw / client: WG 不該跑
+    WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
+    if [ "$WG_UP" -gt 0 ]; then
+        wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
+    fi
+fi
+[ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"
