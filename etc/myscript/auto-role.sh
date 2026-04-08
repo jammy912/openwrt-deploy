@@ -43,6 +43,8 @@ fi
 ROLE_FILE="/etc/myscript/.mesh_role"
 ACTIVE_FILE="/etc/myscript/.mesh_role_active"
 CURRENT_ROLE=$(cat "$ACTIVE_FILE" 2>/dev/null)
+GWTYPE_FILE="/etc/myscript/.mesh_gw_type"
+PREV_GWTYPE=$(cat "$GWTYPE_FILE" 2>/dev/null)
 
 # =====================
 # 0. 等待網路就緒 (WAN 有 IP 或 mesh 有鄰居)
@@ -334,6 +336,8 @@ fi
 # =====================
 WANT_WIRELESS=$(cat /etc/myscript/.mesh_wireless 2>/dev/null)
 WANT_WIRED=$(cat /etc/myscript/.mesh_wired 2>/dev/null)
+[ -z "$WANT_WIRELESS" ] && WANT_WIRELESS=Y
+[ -z "$WANT_WIRED" ] && WANT_WIRED=Y
 NEED_WIFI_RELOAD=0
 
 # 無線 mesh
@@ -402,9 +406,16 @@ else
     GW_TYPE="client"
 fi
 
-# 角色變更時推播 (含 IP 和主/副)
+# 角色或主/副變更時推播
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
     push_notify "AutoRole: ${CURRENT_ROLE:-none}→${NEW_ROLE} ${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ] && [ -n "$PREV_GWTYPE" ]; then
+    push_notify "AutoRole: ${PREV_GWTYPE}→${GW_TYPE} IP=${FINAL_IP} DHCP=${DHCP_ACTION}"
+fi
+if [ "$NEW_ROLE" = "gateway" ]; then
+    echo -n "$GW_TYPE" > "$GWTYPE_FILE"
+else
+    > "$GWTYPE_FILE"
 fi
 
 if [ "$CHANGED" = "0" ]; then
