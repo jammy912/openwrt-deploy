@@ -523,8 +523,9 @@ else
     > "$GWTYPE_FILE"
 fi
 
-# 主 gw 確立時推播 mesh 架構圖
+# 主 gw 確立時推播 mesh 架構圖 (延遲等 batman-adv 收集鄰居)
 if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ]; }; then
+    sleep 10
     MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
     GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
     N_CACHE=$(batctl n 2>/dev/null | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
