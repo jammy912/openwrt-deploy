@@ -422,7 +422,7 @@ fi
 
 # 更新當前身份
 if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
-    echo -n "$NEW_ROLE" > "$ACTIVE_FILE"
+    echo "$NEW_ROLE" > "$ACTIVE_FILE"
     log "角色切換: $CURRENT_ROLE -> $NEW_ROLE"
     CHANGED=1
 fi
@@ -470,7 +470,7 @@ elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ]; then
     push_notify "AutoRole: ${PREV_GWTYPE:-?}→${GW_TYPE} ${FINAL_IP}"
 fi
 if [ "$NEW_ROLE" = "gateway" ]; then
-    echo -n "$GW_TYPE" > "$GWTYPE_FILE"
+    echo "$GW_TYPE" > "$GWTYPE_FILE"
 else
     > "$GWTYPE_FILE"
 fi

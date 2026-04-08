@@ -602,19 +602,19 @@ main() {
         # 更新 .mesh_priority
         CUR_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
         if [ "$NEW_PRI" != "$CUR_PRI" ]; then
-            echo -n "$NEW_PRI" > /etc/myscript/.mesh_priority
+            echo "$NEW_PRI" > /etc/myscript/.mesh_priority
             log "🔧 mesh_priority: $CUR_PRI → $NEW_PRI (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_wireless
         CUR_WL=$(cat /etc/myscript/.mesh_wireless 2>/dev/null)
         if [ "$NEW_WIRELESS" != "$CUR_WL" ]; then
-            echo -n "$NEW_WIRELESS" > /etc/myscript/.mesh_wireless
+            echo "$NEW_WIRELESS" > /etc/myscript/.mesh_wireless
             log "🔧 mesh_wireless: $CUR_WL → $NEW_WIRELESS (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_wired
         CUR_WR=$(cat /etc/myscript/.mesh_wired 2>/dev/null)
         if [ "$NEW_WIRED" != "$CUR_WR" ]; then
-            echo -n "$NEW_WIRED" > /etc/myscript/.mesh_wired
+            echo "$NEW_WIRED" > /etc/myscript/.mesh_wired
             log "🔧 mesh_wired: $CUR_WR → $NEW_WIRED (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_role_override (GW Mode 強制覆蓋)
@@ -623,7 +623,7 @@ main() {
         [ "$GWMODE_LOWER" = "auto" ] && NEW_GWMODE=""
         CUR_OVERRIDE=$(cat /etc/myscript/.mesh_role_override 2>/dev/null)
         if [ "$NEW_GWMODE" != "$CUR_OVERRIDE" ]; then
-            echo -n "$NEW_GWMODE" > /etc/myscript/.mesh_role_override
+            echo "$NEW_GWMODE" > /etc/myscript/.mesh_role_override
             if [ -n "$NEW_GWMODE" ]; then
                 log "🔧 mesh_role_override: $CUR_OVERRIDE → $NEW_GWMODE (hostname=$MY_HOSTNAME)"
             else
