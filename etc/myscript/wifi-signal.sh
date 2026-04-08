@@ -170,8 +170,14 @@ CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 
 DESIRED_2G_STATUS=$((1 - ENABLE_2G))
 [ "$CURRENT_2G_STATUS" -ne "$DESIRED_2G_STATUS" ] && {
     uci set "wireless.$UCI_IFACE_2G.disabled=$DESIRED_2G_STATUS"
+    # 連同 radio 一起開關，讓 LuCI 顯示正確的 ❌ 狀態
+    if [ "$ENABLE_2G" -eq 1 ]; then
+        uci delete "wireless.$UCI_RADIO_2G.disabled" 2>/dev/null
+    else
+        uci set "wireless.$UCI_RADIO_2G.disabled=1"
+    fi
     change_occured=1
-    [ "$ENABLE_2G" -eq 1 ] && log "[$UCI_IFACE_2G] 啟用" || log "[$UCI_IFACE_2G] 停用"
+    [ "$ENABLE_2G" -eq 1 ] && log "[$UCI_IFACE_2G+$UCI_RADIO_2G] 啟用" || log "[$UCI_IFACE_2G+$UCI_RADIO_2G] 停用"
 }
 
 DESIRED_5G_STATUS=$((1 - ENABLE_5G))
