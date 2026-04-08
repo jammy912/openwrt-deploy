@@ -182,6 +182,7 @@ fi
 # 4. 套用變更
 # =====================
 CHANGED=0
+NEED_WG_START=0
 
 # batman gw_mode
 if [ "$NEW_ROLE" = "gateway" ]; then
@@ -311,7 +312,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         svc_enable adguardhome
         svc_enable pbr
         svc_enable qosify
-        wg_start
+        NEED_WG_START=1
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
@@ -411,6 +412,18 @@ fi
 # 確保 gw_mode + bandwidth(=priority) 在 network restart 後生效
 if [ "$NEW_ROLE" = "gateway" ]; then
     batctl gw server ${MY_PRI}MBit 2>/dev/null
+fi
+
+# WG 延遲啟動 (等所有 network restart 完成 + WAN 就緒)
+if [ "$NEED_WG_START" = "1" ]; then
+    # 等 WAN 拿到 IP 且能上網
+    for i in 1 2 3 4 5 6; do
+        WAN_OK=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+        [ -n "$WAN_OK" ] && ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
+        sleep 3
+    done
+    wg_start
+    log "WG 已啟動 (WAN=$WAN_OK)"
 fi
 
 # 取得最新 IP (network restart 後可能改變)
