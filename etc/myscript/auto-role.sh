@@ -469,7 +469,12 @@ if [ "$GW_TYPE" = "主gw" ]; then
     # 主 gw: WG/dnsmasq/adguardhome 必須在跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -eq 0 ]; then
-        wg_start; log "fixup: WG 未運行，已啟動"; FIXUP=1
+        for i in 1 2 3 4 5; do
+            WAN_OK=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+            [ -n "$WAN_OK" ] && break
+            sleep 2
+        done
+        wg_start; log "fixup: WG 未運行，已啟動 (WAN=$WAN_OK)"; FIXUP=1
     fi
     if ! pgrep -x dnsmasq >/dev/null 2>&1; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
