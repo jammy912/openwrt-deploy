@@ -11,6 +11,10 @@
 #   - (新增) 如果 PING 失敗且時間為整點，則嘗試重啟該介面。
 #================================================================
 
+# 非主gw 不需要檢查 PBR/WG 狀態
+GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+[ "$GW_TYPE" != "主gw" ] && exit 0
+
 # 引入通知器
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
