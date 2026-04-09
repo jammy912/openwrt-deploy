@@ -551,7 +551,12 @@ fi
 
 # 主 gw 確立時推播 mesh 架構圖 (延遲等 batman-adv 收集鄰居)
 if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ]; }; then
-    sleep 10
+    # 等待 batman-adv 鄰居恢復（切 gw_mode / wifi up 後需要時間重新發現）
+    for _wait in 1 2 3 4 5 6; do
+        _nc=$(batctl n 2>/dev/null | grep -c '[0-9a-f][0-9a-f]:')
+        [ "$_nc" -gt 0 ] && break
+        sleep 5
+    done
     MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
     GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
     N_RAW=$(batctl n 2>/dev/null)

@@ -376,6 +376,15 @@ log "測試完成！LOG: $LOG"
 log "============================================"
 
 # === Mesh 架構圖推播 (debug) ===
+# 等待 batman-adv 鄰居恢復（切 gw_mode / wifi up 後需要時間重新發現）
+log "等待 batman-adv 鄰居恢復..."
+for _wait in 1 2 3 4 5 6; do
+    _nc=$(batctl n 2>/dev/null | grep -c '[0-9a-f][0-9a-f]:')
+    [ "$_nc" -gt 0 ] && break
+    log "mesh-map: 等待鄰居... (${_wait}/6, count=$_nc)"
+    sleep 5
+done
+
 MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
 GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null || echo "?")
