@@ -554,14 +554,20 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
     sleep 10
     MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
     GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
-    N_CACHE=$(batctl n 2>/dev/null | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
+    N_RAW=$(batctl n 2>/dev/null)
+    N_CACHE=$(echo "$N_RAW" | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
     # 取唯一鄰居 MAC 列表
     PEER_MACS=$(echo "$N_CACHE" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9a-f][0-9a-f]:/){print $i;break}}}' | sort -u)
+    log "mesh-map: batctl_n_raw_lines=$(echo "$N_RAW" | wc -l) filtered_lines=$(echo "$N_CACHE" | grep -c .) peer_macs=[${PEER_MACS}]"
+    log "mesh-map: batctl_n_raw: $(echo "$N_RAW" | head -5)"
+    log "mesh-map: gwl_cache: $(echo "$GWL_CACHE" | head -3)"
     MESH_TMP="/tmp/mesh_map.$$"
     echo "Mesh架構:" > "$MESH_TMP"
     echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
     NEIGH_CACHE=$(ip neigh show dev br-lan 2>/dev/null | grep -v FAILED)
     LEASE_CACHE=$(cat /tmp/dhcp.leases 2>/dev/null)
+    log "mesh-map: neigh_cache=$(echo "$NEIGH_CACHE" | head -5)"
+    log "mesh-map: lease_cache=$(echo "$LEASE_CACHE" | head -5)"
     # 用後4字節合併同一台的有線/無線 MAC
     SEEN_TAILS=""
     for mac in $PEER_MACS; do
@@ -588,8 +594,13 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
         else
             PEER_LABEL="$mac"
         fi
+        log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
         echo "├─${LINKS}─${PEER_LABEL} ${PEER_ROLE}" >> "$MESH_TMP"
     done
+    if [ -z "$PEER_MACS" ]; then
+        log "mesh-map: ⚠️ PEER_MACS 為空，無法組建架構圖"
+        echo "├─(無鄰居)" >> "$MESH_TMP"
+    fi
     push_notify "$(cat "$MESH_TMP")"
     rm -f "$MESH_TMP"
 fi
