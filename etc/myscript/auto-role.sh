@@ -748,11 +748,12 @@ fi
 # =====================
 # 10. usteer 確保正確註冊 hostapd
 # =====================
-if pgrep -x usteerd >/dev/null 2>&1; then
-    # 檢查 usteer 是否有看到本地 AP（local_info 不為空 {}）
+if pgrep -x usteerd >/dev/null 2>&1 && [ "$CHANGED" = "1" ]; then
+    # wifi 變更後 hostapd 需要時間重新初始化，等待後再檢查
+    sleep 8
     _usteer_nodes=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
     if [ "$_usteer_nodes" -eq 0 ]; then
-        ( sleep 5; /etc/init.d/usteer restart ) >/dev/null 2>&1 &
-        log "fixup: usteer 未偵測到本地 AP，延遲 restart"
+        /etc/init.d/usteer restart >/dev/null 2>&1
+        log "fixup: usteer 未偵測到本地 AP，已 restart"
     fi
 fi
