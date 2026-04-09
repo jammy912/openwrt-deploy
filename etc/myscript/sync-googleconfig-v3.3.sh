@@ -584,7 +584,7 @@ main() {
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                 }
-                if (h == host) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw; exit }
+                if (tolower(h) == tolower(host)) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw; exit }
             }
         ' "$TMP_DECRYPTED")
         [ -z "$NEW_PRI" ] && NEW_PRI=50
