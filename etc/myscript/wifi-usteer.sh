@@ -39,6 +39,7 @@ check_val load_kick_enabled "${14}"
 check_val load_kick_threshold "${15}"
 check_val load_kick_min_clients "${16}"
 check_val load_kick_delay "${17}"
+check_val remote_node_timeout "120"
 
 # 比對 ssid_list
 cur_ssids=$(uci -q get $UCI.ssid_list | tr ' ' '\n' | sort)
@@ -73,6 +74,7 @@ uci set $UCI.load_kick_enabled="${14}"
 uci set $UCI.load_kick_threshold="${15}"
 uci set $UCI.load_kick_min_clients="${16}"
 uci set $UCI.load_kick_delay="${17}"
+uci set $UCI.remote_node_timeout='120'
 
 # ssid_list 處理：清除舊的，再設定新的
 while uci -q delete $UCI.ssid_list; do :; done
