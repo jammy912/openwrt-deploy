@@ -33,36 +33,18 @@ push_notify() {
 
     [ -z "$PUSH_KEYS" ] && { echo "[WARN] PUSH_NAMES 未設定或找不到對應 key 檔案" >&2; return 1; }
 
-	urlencode() {
-		local s="$1"
-		local o=""
-		local i c
-		i=1
-		while [ $i -le ${#s} ]; do
-			c=$(echo "$s" | cut -c $i)
-			case "$c" in
-				[a-zA-Z0-9.~_-]) o="${o}${c}" ;;
-				' ') o="${o}+" ;;
-				*) 
-					# 轉成 %XX
-					o="${o}$(printf '%%%02X' "'$c")"
-					;;
-			esac
-			i=$((i+1))
-		done
-		echo "$o"
-	}
-
     local key
-    local full_msg="$(urlencode "${HOSTNAME}$msg")"
+    local full_msg="${HOSTNAME}$msg"
 
     # 支援逗號或空白分隔的多個 key
     for key in ${PUSH_KEYS//,/ }; do
         # PushDeer key 偵測 (以 PD 開頭)
         if echo "$key" | grep -qE '^PD'; then
-            echo "https://api2.pushdeer.com/message/push?pushkey=${key}&type=text&text=${full_msg}"
-            curl --connect-timeout 5 --max-time 10 \
-                "https://api2.pushdeer.com/message/push?pushkey=${key}&type=text&text=${full_msg}" \
+            curl -s --connect-timeout 5 --max-time 10 \
+                -G "https://api2.pushdeer.com/message/push" \
+                --data-urlencode "pushkey=${key}" \
+                --data-urlencode "type=text" \
+                --data-urlencode "text=${full_msg}" \
                 >/dev/null 2>&1
 
         # LINE Notify Token 偵測 (40 字元以上)
