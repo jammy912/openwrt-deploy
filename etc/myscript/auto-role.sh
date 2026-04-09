@@ -31,9 +31,14 @@ fi
 echo $$ > "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT
 
-# --debug 模式: 每步推播
-DEBUG=0
-[ "$1" = "--debug" ] && DEBUG=1
+# --debug 模式: 每步推播 / --dry-run 模式: 只偵測不執行
+DEBUG=0; DRY_RUN=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --debug)  DEBUG=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+    esac
+done
 dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
 
 # =====================
@@ -185,6 +190,50 @@ else
     # client: 關閉 DHCP
     DHCP_ACTION="off"
     LAN_MODE="keep"
+fi
+
+# =====================
+# dry-run: 輸出偵測結果後退出
+# =====================
+if [ "$DRY_RUN" = "1" ]; then
+    # 決定 GW_TYPE 標籤
+    if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
+        _GW_TYPE="主gw"
+    elif [ "$NEW_ROLE" = "gateway" ]; then
+        _GW_TYPE="副gw"
+    else
+        _GW_TYPE="client"
+    fi
+    echo "========== dry-run 偵測結果 =========="
+    echo "HOSTNAME:    $(cat /proc/sys/kernel/hostname)"
+    echo "UPTIME:      $(awk -F. '{print $1}' /proc/uptime)s"
+    echo "CURRENT_ROLE: $CURRENT_ROLE"
+    echo "PREV_GWTYPE:  $PREV_GWTYPE"
+    echo "---"
+    echo "OVERRIDE:     ${OVERRIDE:-none}"
+    echo "WAN_IP:       ${WAN_IP:-none}"
+    echo "HAS_WAN:      ${HAS_WAN:-N/A}"
+    echo "PING_8.8.8.8: $(ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && echo OK || echo FAIL)"
+    echo "NEW_ROLE:     $NEW_ROLE"
+    echo "---"
+    echo "MY_PRI:       $MY_PRI"
+    echo "MY_MAC:       $MY_MAC"
+    echo "BOOT_DELAY:   ${BOOT_DELAY}s (skipped in dry-run)"
+    echo "IS_PRIMARY:   $IS_PRIMARY"
+    echo "HIGHER_FOUND: ${HIGHER:-no}"
+    echo "---"
+    echo "結論: $_GW_TYPE (role=$NEW_ROLE, primary=$IS_PRIMARY)"
+    echo "DHCP_ACTION:  $DHCP_ACTION"
+    echo "LAN_MODE:     $LAN_MODE"
+    echo "---"
+    echo "batctl gw:    $(batctl gw 2>/dev/null)"
+    echo "batctl gwl:"
+    batctl gwl 2>/dev/null | head -10
+    echo "batctl n:"
+    batctl n 2>/dev/null | head -10
+    echo "======================================="
+    rm -f "$LOCKFILE"
+    exit 0
 fi
 
 # =====================
