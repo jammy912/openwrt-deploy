@@ -564,6 +564,15 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
         ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
         sleep 2
     done
+    # network restart 後主 GW 需重啟 WG/PBR (否則 VPN 斷線)
+    if [ "$IS_PRIMARY" = "1" ] && [ "$NEED_WG_START" != "1" ]; then
+        WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
+        if [ "$WG_UP" -gt 0 ] || /etc/init.d/pbr enabled 2>/dev/null; then
+            log "network restart 後重啟 WG/PBR..."
+            wg_start
+            /etc/init.d/pbr restart >/dev/null 2>&1
+        fi
+    fi
 fi
 
 # 確保 gw_mode + bandwidth(=priority) 在 network restart 後生效
@@ -748,10 +757,13 @@ fi
 # =====================
 # 10. usteer 確保正確註冊 hostapd
 # =====================
-if pgrep -x usteerd >/dev/null 2>&1 && [ "$CHANGED" = "1" ]; then
-    # wifi 變更後 hostapd 需要時間重新初始化，等待後再檢查
-    sleep 8
-    _usteer_nodes=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
+if pgrep -x usteerd >/dev/null 2>&1 && { [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; }; then
+    # network restart / wifi 變更後 hostapd 需要時間重新初始化
+    for _ust_try in 1 2 3; do
+        sleep 5
+        _usteer_nodes=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
+        [ "$_usteer_nodes" -gt 0 ] && break
+    done
     if [ "$_usteer_nodes" -eq 0 ]; then
         /etc/init.d/usteer restart >/dev/null 2>&1
         log "fixup: usteer 未偵測到本地 AP，已 restart"
