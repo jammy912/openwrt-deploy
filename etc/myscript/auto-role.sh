@@ -414,6 +414,8 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
                 log "IOT WiFi+${IOT_RADIO} 已啟用 (主 gateway)"
             fi
         fi
+        # wifi up 後 hostapd 需要時間初始化，延遲 restart usteer 確保抓到 ssid
+        ( sleep 5; /etc/init.d/usteer restart ) >/dev/null 2>&1 &
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
