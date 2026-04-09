@@ -571,6 +571,7 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
     echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
     NEIGH_CACHE=$(ip neigh show dev br-lan 2>/dev/null | grep -v FAILED)
     LEASE_CACHE=$(cat /tmp/dhcp.leases 2>/dev/null)
+    STATIC_HOSTS=$(uci show dhcp 2>/dev/null | grep "=host$" | cut -d'.' -f2 | cut -d'=' -f1)
     log "mesh-map: neigh_cache=$(echo "$NEIGH_CACHE" | head -5)"
     log "mesh-map: lease_cache=$(echo "$LEASE_CACHE" | head -5)"
     # 用後4字節合併同一台的有線/無線 MAC
@@ -587,10 +588,25 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
         PEER_PRI=$(echo "$GWL_CACHE" | grep -i "$MAC_TAIL" | head -1 | awk '{for(i=1;i<=NF;i++){if($i~/\//){split($i,bw,"/");split(bw[1],d,".");print d[1];exit}}}')
         PEER_ROLE="client"
         [ -n "$PEER_PRI" ] && PEER_ROLE="gw pri=${PEER_PRI}"
-        # ARP → IP → hostname
+        # 1. ARP 表查 IP
         PEER_IP=$(echo "$NEIGH_CACHE" | grep -i "$MAC_TAIL" | awk '/^192\.168\.1\./{print $1}' | head -1)
         PEER_NAME=""
         [ -n "$PEER_IP" ] && PEER_NAME=$(echo "$LEASE_CACHE" | awk -v ip="$PEER_IP" '$3==ip && $4!="*"{print $4}')
+        # 2. fallback: DHCP 靜態設定 (uci show dhcp host) 用 MAC_TAIL 匹配
+        if [ -z "$PEER_IP" ]; then
+            for _host in $STATIC_HOSTS; do
+                _hmac=$(uci get dhcp.${_host}.mac 2>/dev/null | tr 'A-Z' 'a-z')
+                echo "$_hmac" | grep -qi "$MAC_TAIL" || continue
+                PEER_IP=$(uci get dhcp.${_host}.ip 2>/dev/null)
+                PEER_NAME=$(uci get dhcp.${_host}.name 2>/dev/null)
+                break
+            done
+        fi
+        # 3. fallback: DHCP lease 檔用 MAC_TAIL 匹配
+        if [ -z "$PEER_IP" ]; then
+            PEER_IP=$(echo "$LEASE_CACHE" | awk -v tail="$MAC_TAIL" 'tolower($2) ~ tolower(tail) {print $3; exit}')
+            [ -n "$PEER_IP" ] && PEER_NAME=$(echo "$LEASE_CACHE" | awk -v ip="$PEER_IP" '$3==ip && $4!="*"{print $4}')
+        fi
         # 組合: hostname(IP) 或 IP 或 MAC
         if [ -n "$PEER_NAME" ]; then
             PEER_LABEL="${PEER_NAME}(${PEER_IP})"
