@@ -592,12 +592,14 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
         PEER_IP=$(echo "$NEIGH_CACHE" | grep -i "$MAC_TAIL" | awk '/^192\.168\.1\./{print $1}' | head -1)
         PEER_NAME=""
         [ -n "$PEER_IP" ] && PEER_NAME=$(echo "$LEASE_CACHE" | awk -v ip="$PEER_IP" '$3==ip && $4!="*"{print $4}')
-        # 2. fallback: DHCP 靜態設定 (uci show dhcp host) 用 MAC_TAIL 匹配
+        # 2. fallback: DHCP 靜態設定 (uci show dhcp host) 用 MAC_TAIL 匹配，跳過 99.x
         if [ -z "$PEER_IP" ]; then
             for _host in $STATIC_HOSTS; do
                 _hmac=$(uci get dhcp.${_host}.mac 2>/dev/null | tr 'A-Z' 'a-z')
                 echo "$_hmac" | grep -qi "$MAC_TAIL" || continue
-                PEER_IP=$(uci get dhcp.${_host}.ip 2>/dev/null)
+                _hip=$(uci get dhcp.${_host}.ip 2>/dev/null)
+                echo "$_hip" | grep -q '^192\.168\.1\.' || continue
+                PEER_IP="$_hip"
                 PEER_NAME=$(uci get dhcp.${_host}.name 2>/dev/null)
                 break
             done
