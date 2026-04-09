@@ -414,8 +414,6 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
                 log "IOT WiFi+${IOT_RADIO} 已啟用 (主 gateway)"
             fi
         fi
-        # wifi up 後 hostapd 需要時間初始化，延遲 restart usteer 確保抓到 ssid
-        ( sleep 5; /etc/init.d/usteer restart ) >/dev/null 2>&1 &
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
@@ -743,3 +741,15 @@ else
     fi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"
+
+# =====================
+# 10. usteer 確保正確註冊 hostapd
+# =====================
+if pgrep -x usteerd >/dev/null 2>&1; then
+    # 檢查 usteer 是否有看到本地 AP（local_info 不為空 {}）
+    _usteer_nodes=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
+    if [ "$_usteer_nodes" -eq 0 ]; then
+        ( sleep 5; /etc/init.d/usteer restart ) >/dev/null 2>&1 &
+        log "fixup: usteer 未偵測到本地 AP，延遲 restart"
+    fi
+fi
