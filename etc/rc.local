@@ -72,7 +72,23 @@ for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 
 done
 
 # 開機同步 Google Sheet 設定 (自動依 .mesh_role_active 判斷身份)
-/etc/myscript/sync-googleconfig-v3.3.sh --apply &
+# 暫停 AGH，用系統 DNS 確保 sync 能連外網，完成後恢復
+(
+    /etc/init.d/adguardhome stop 2>/dev/null
+    _agh_noresolv=$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
+    if [ "$_agh_noresolv" = "1" ]; then
+        uci set dhcp.@dnsmasq[0].noresolv='0'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+    fi
+    /etc/myscript/sync-googleconfig-v3.3.sh --apply
+    if [ "$_agh_noresolv" = "1" ]; then
+        uci set dhcp.@dnsmasq[0].noresolv='1'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+    fi
+    /etc/init.d/adguardhome start 2>/dev/null
+) &
 
 exit 0
 
