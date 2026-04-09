@@ -140,31 +140,14 @@ switch_to() {
     if [ "$CUR_LAN_IP" != "$NEW_IP" ]; then
         OLD_CIDR=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
 
-        # 同 subnet 不能同時有兩個 primary IP，用 ip addr replace 一步到位
+        # 用 ifconfig 原子替換 IP（一步到位，不會有空窗期）
+        log "ACTION: ifconfig br-lan ${NEW_IP} netmask 255.255.255.0"
+        ifconfig br-lan "$NEW_IP" netmask 255.255.255.0 2>/dev/null
+
         if [ "$TARGET" = "主gw" ]; then
-            log "ACTION: 升主gw - 搶 .1 (replace)"
-            # 移除舊 default route via .1（降級時加的）
+            # 移除降級時加的 default route via .1
             ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
-            # 一步替換 IP
-            ip addr replace "192.168.1.1/24" dev br-lan 2>/dev/null
-            # 刪舊 IP（如果還殘留）
-            if [ -n "$OLD_CIDR" ] && [ "$OLD_CIDR" != "192.168.1.1/24" ]; then
-                ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
-            fi
-            sleep 1
-            # 驗證
-            VERIFY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
-            if echo "$VERIFY_IP" | grep -q "192.168.1.1/24"; then
-                log "ACTION: IP 搶奪成功: $OLD_CIDR → $VERIFY_IP"
-            else
-                log "ACTION: IP replace 失敗 ($VERIFY_IP)，fallback: del+add"
-                [ -n "$OLD_CIDR" ] && ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
-                ip addr add "192.168.1.1/24" dev br-lan 2>/dev/null
-                sleep 1
-                VERIFY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
-                log "ACTION: fallback 後: $VERIFY_IP"
-            fi
-            # 恢復 WAN default route（升主gw 要走 WAN 出去）
+            # 恢復 WAN default route
             WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
             WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
             if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
@@ -174,14 +157,13 @@ switch_to() {
                 log "ACTION: 警告 - 無法取得 WAN gateway ($WAN_GW / $WAN_DEV)"
             fi
         else
-            log "ACTION: 降級 - IP 熱切換 $OLD_CIDR → ${NEW_IP}/24 (replace)"
-            ip addr replace "${NEW_IP}/24" dev br-lan 2>/dev/null
-            # 刪舊 IP（如果還殘留）
-            if [ -n "$OLD_CIDR" ] && [ "$OLD_CIDR" != "${NEW_IP}/24" ]; then
-                ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
-            fi
             ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
         fi
+
+        # 驗證
+        sleep 1
+        VERIFY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
+        log "ACTION: IP 切換結果: $OLD_CIDR → $VERIFY_IP"
 
         # UCI 更新
         uci set network.lan.ipaddr="$NEW_IP"
