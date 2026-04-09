@@ -121,7 +121,7 @@ switch_to() {
         NEW_GW=""
     else
         # 非主: 用 DHCP lease 或 MAC 算
-        MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
+        MY_BR_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null | tr 'A-Z' 'a-z')
         SELF_IP=""
         if [ -n "$MY_BR_MAC" ]; then
             MATCH_IDX=$(uci show dhcp 2>/dev/null | grep -i "mac='$MY_BR_MAC'" | head -1 | sed "s/\.mac=.*//")
@@ -201,6 +201,12 @@ switch_to() {
             uci set dhcp.lan.dhcpv4='disabled'
             uci commit dhcp
             /etc/init.d/dnsmasq restart
+            sleep 2
+            # 確保 dnsmasq 還在跑（DNS 轉發需要它）
+            if ! pgrep -x dnsmasq >/dev/null 2>&1; then
+                log "ACTION: dnsmasq 未啟動，重試..."
+                /etc/init.d/dnsmasq start
+            fi
             log "ACTION: DHCP server 關閉"
         else
             log "ACTION: DHCP 已關 (不變)"

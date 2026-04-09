@@ -223,7 +223,7 @@ if [ "$LAN_MODE" = "static" ]; then
     fi
 else
     # 非主 gateway / client: 查 DHCP 靜態對應，沒有則用 MAC 算 IP
-    MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
+    MY_BR_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null | tr 'A-Z' 'a-z')
     # 從本地 /etc/config/dhcp 找自己 MAC 的靜態 IP
     SELF_IP=""
     if [ -n "$MY_BR_MAC" ]; then
