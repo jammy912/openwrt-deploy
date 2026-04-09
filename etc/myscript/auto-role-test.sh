@@ -375,6 +375,56 @@ log "============================================"
 log "測試完成！LOG: $LOG"
 log "============================================"
 
+# === Mesh 架構圖推播 (debug) ===
+MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
+FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null || echo "?")
+GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
+N_RAW=$(batctl n 2>/dev/null)
+N_CACHE=$(echo "$N_RAW" | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
+PEER_MACS=$(echo "$N_CACHE" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9a-f][0-9a-f]:/){print $i;break}}}' | sort -u)
+log "mesh-map: batctl_n_raw_lines=$(echo "$N_RAW" | wc -l) filtered=$(echo "$N_CACHE" | grep -c .) peer_macs=[${PEER_MACS}]"
+log "mesh-map: batctl_n_raw: $(echo "$N_RAW" | head -5)"
+log "mesh-map: gwl_cache: $(echo "$GWL_CACHE" | head -3)"
+MESH_TMP="/tmp/mesh_map.$$"
+echo "Mesh架構:" > "$MESH_TMP"
+echo "${HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
+NEIGH_CACHE=$(ip neigh show dev br-lan 2>/dev/null | grep -v FAILED)
+LEASE_CACHE=$(cat /tmp/dhcp.leases 2>/dev/null)
+log "mesh-map: neigh=$(echo "$NEIGH_CACHE" | head -5)"
+log "mesh-map: lease=$(echo "$LEASE_CACHE" | head -5)"
+SEEN_TAILS=""
+for mac in $PEER_MACS; do
+    MAC_TAIL=$(echo "$mac" | cut -d: -f3-5)
+    echo "$SEEN_TAILS" | grep -q "$MAC_TAIL" && continue
+    SEEN_TAILS="$SEEN_TAILS $MAC_TAIL"
+    LINKS=$(echo "$N_CACHE" | grep -i "$MAC_TAIL" | awk '{print $1}' | while read iface; do
+        echo "$iface" | grep -q '^lan' && echo "有線" || echo "無線"
+    done | sort -u | tr '\n' '+' | sed 's/+$//')
+    PEER_PRI=$(echo "$GWL_CACHE" | grep -i "$MAC_TAIL" | head -1 | awk '{for(i=1;i<=NF;i++){if($i~/\//){split($i,bw,"/");split(bw[1],d,".");print d[1];exit}}}')
+    PEER_ROLE="client"
+    [ -n "$PEER_PRI" ] && PEER_ROLE="gw pri=${PEER_PRI}"
+    PEER_IP=$(echo "$NEIGH_CACHE" | grep -i "$MAC_TAIL" | awk '/^192\.168\.1\./{print $1}' | head -1)
+    PEER_NAME=""
+    [ -n "$PEER_IP" ] && PEER_NAME=$(echo "$LEASE_CACHE" | awk -v ip="$PEER_IP" '$3==ip && $4!="*"{print $4}')
+    if [ -n "$PEER_NAME" ]; then
+        PEER_LABEL="${PEER_NAME}(${PEER_IP})"
+    elif [ -n "$PEER_IP" ]; then
+        PEER_LABEL="$PEER_IP"
+    else
+        PEER_LABEL="$mac"
+    fi
+    log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
+    echo "├─${LINKS}─${PEER_LABEL} ${PEER_ROLE}" >> "$MESH_TMP"
+done
+if [ -z "$PEER_MACS" ]; then
+    log "mesh-map: ⚠️ PEER_MACS 為空，無鄰居"
+    echo "├─(無鄰居)" >> "$MESH_TMP"
+fi
+log "mesh-map: 推播內容: $(cat "$MESH_TMP")"
+push_notify "$(cat "$MESH_TMP")"
+rm -f "$MESH_TMP"
+
 push_notify "AutoRole測試完成($HOSTNAME) 30秒後重開機"
 
 log "30 秒後重開機..."
