@@ -144,20 +144,21 @@ switch_to() {
         log "ACTION: ifconfig br-lan ${NEW_IP} netmask 255.255.255.0"
         ifconfig br-lan "$NEW_IP" netmask 255.255.255.0 2>/dev/null
 
-        if [ "$TARGET" = "主gw" ]; then
-            # 移除降級時加的 default route via .1
+        if [ "$TARGET" = "client" ]; then
+            # client 沒 WAN，走 br-lan→.1
+            ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
+            log "ACTION: client default route → via $NEW_GW dev br-lan"
+        else
+            # 主gw / 副gw 都走 WAN
             ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
-            # 恢復 WAN default route
             WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
             WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
             if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
                 ip route replace default via "$WAN_GW" dev "$WAN_DEV" 2>/dev/null
-                log "ACTION: 恢復 WAN default route: via $WAN_GW dev $WAN_DEV"
+                log "ACTION: WAN default route: via $WAN_GW dev $WAN_DEV"
             else
                 log "ACTION: 警告 - 無法取得 WAN gateway ($WAN_GW / $WAN_DEV)"
             fi
-        else
-            ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
         fi
 
         # 驗證
@@ -167,10 +168,12 @@ switch_to() {
 
         # UCI 更新
         uci set network.lan.ipaddr="$NEW_IP"
-        if [ -n "$NEW_GW" ]; then
+        if [ "$TARGET" = "client" ]; then
+            # client 沒 WAN，gateway 指向 .1
             uci set network.lan.gateway="$NEW_GW"
             uci set network.lan.dns='192.168.1.1'
         else
+            # 主gw / 副gw 走 WAN，不需要 LAN gateway
             uci delete network.lan.gateway 2>/dev/null
             uci delete network.lan.dns 2>/dev/null
         fi

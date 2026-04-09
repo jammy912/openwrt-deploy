@@ -239,9 +239,16 @@ else
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr="$SELF_IP"
         uci set network.lan.netmask='255.255.255.0'
-        uci set network.lan.gateway='192.168.1.1'
-        uci set network.lan.dns='192.168.1.1'
-        log "LAN IP: $SELF_IP (非主 gateway)"
+        if [ "$NEW_ROLE" = "client" ]; then
+            # client 沒 WAN，走 .1
+            uci set network.lan.gateway='192.168.1.1'
+            uci set network.lan.dns='192.168.1.1'
+        else
+            # 副gw 有 WAN，不設 gateway（走自己的 WAN）
+            uci delete network.lan.gateway 2>/dev/null
+            uci delete network.lan.dns 2>/dev/null
+        fi
+        log "LAN IP: $SELF_IP (非主, role=$NEW_ROLE)"
         NEED_RESTART_NET=1
         CHANGED=1
     fi
