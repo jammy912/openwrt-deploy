@@ -4,6 +4,10 @@
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
+# client 模式不用 AGH，跳過檢查
+_role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
+[ "$_role" = "client" ] && exit 0
+
 TEST_DNS="127.0.0.1"
 TEST_PORT=53535
 # 使用確定存在的域名，確保有正常的 DNS 回應

@@ -187,8 +187,8 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     DHCP_ACTION="off"
     LAN_MODE="keep"
 else
-    # client: 關閉 DHCP
-    DHCP_ACTION="off"
+    # client: 開 DHCP (靜態對應，gateway/DNS 指向主 GW)
+    DHCP_ACTION="server"
     LAN_MODE="keep"
 fi
 
@@ -359,6 +359,28 @@ if [ "$DHCP_ACTION" = "server" ]; then
         /etc/init.d/dnsmasq restart
         log "DHCP server 已開啟"
         CHANGED=1
+    fi
+    # client: DHCP 發出的 gateway/DNS 指向主 GW
+    if [ "$NEW_ROLE" = "client" ]; then
+        CUR_GW_OPT=$(uci get dhcp.lan.dhcp_option 2>/dev/null)
+        if ! echo "$CUR_GW_OPT" | grep -q '3,192.168.1.1'; then
+            uci delete dhcp.lan.dhcp_option 2>/dev/null
+            uci add_list dhcp.lan.dhcp_option='3,192.168.1.1'
+            uci add_list dhcp.lan.dhcp_option='6,192.168.1.1'
+            uci commit dhcp
+            /etc/init.d/dnsmasq restart
+            log "DHCP: gateway/DNS 指向 192.168.1.1 (client)"
+            CHANGED=1
+        fi
+    elif [ "$IS_PRIMARY" = "1" ]; then
+        # 主 gw: 清除 dhcp_option 覆蓋 (從 client 切回時)
+        if uci get dhcp.lan.dhcp_option >/dev/null 2>&1; then
+            uci delete dhcp.lan.dhcp_option 2>/dev/null
+            uci commit dhcp
+            /etc/init.d/dnsmasq restart
+            log "DHCP: 清除 gateway/DNS 覆蓋 (主 gw)"
+            CHANGED=1
+        fi
     fi
 elif [ "$DHCP_ACTION" = "off" ]; then
     if [ "$CUR_DHCP_IGNORE" != "1" ]; then
@@ -592,9 +614,11 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     fi
 fi
 
-# 確保 gw_mode + bandwidth(=priority) 在 network restart 後生效
+# 確保 gw_mode + bandwidth(=priority) 生效 (uci set 需要 network restart 才套用，直接用 batctl 即時生效)
 if [ "$NEW_ROLE" = "gateway" ]; then
     batctl gw server ${MY_PRI}MBit 2>/dev/null
+else
+    batctl gw client 2>/dev/null
 fi
 
 # WG 延遲啟動 (等所有 network restart 完成 + WAN 就緒)
