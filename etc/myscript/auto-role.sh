@@ -671,11 +671,17 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
             PEER_LABEL="$mac"
         fi
         log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
-        echo "├─${LINKS}─${PEER_LABEL} ${PEER_ROLE}" >> "$MESH_TMP"
+        # gw 排前面(1)、client 排後面(2)
+        _sort_key="2"
+        echo "$PEER_ROLE" | grep -q "gw" && _sort_key="1"
+        echo "${_sort_key}├─${LINKS}─${PEER_LABEL} ${PEER_ROLE}" >> "${MESH_TMP}.unsorted"
     done
     if [ -z "$PEER_MACS" ]; then
         log "mesh-map: ⚠️ PEER_MACS 為空，無法組建架構圖"
         echo "├─(無鄰居)" >> "$MESH_TMP"
+    elif [ -f "${MESH_TMP}.unsorted" ]; then
+        sort "${MESH_TMP}.unsorted" | sed 's/^[12]//' >> "$MESH_TMP"
+        rm -f "${MESH_TMP}.unsorted"
     fi
     push_notify "$(cat "$MESH_TMP")"
     rm -f "$MESH_TMP"
