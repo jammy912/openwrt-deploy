@@ -515,12 +515,15 @@ if [ "$WANT_WIRED" = "Y" ] && [ -z "$WIRE_DEV" ]; then
         uci set network.batmesh_wire.mtu='1536'
         uci set network.batmesh_wire.device="$WIRE_DEV"
         # 從 br-lan 移除該 port (避免衝突)
-        uci show network | grep -q "br-lan.*ports.*$WIRE_DEV" && {
-            CUR_PORTS=$(uci get network.@device[0].ports 2>/dev/null)
-            NEW_PORTS=$(echo "$CUR_PORTS" | tr ' ' '\n' | grep -v "^${WIRE_DEV}$" | tr '\n' ' ')
+        CUR_PORTS=$(uci get network.@device[0].ports 2>/dev/null)
+        if echo " $CUR_PORTS " | grep -q " ${WIRE_DEV} "; then
             uci delete network.@device[0].ports 2>/dev/null
-            for p in $NEW_PORTS; do uci add_list network.@device[0].ports="$p"; done
-        }
+            for p in $CUR_PORTS; do
+                [ "$p" = "$WIRE_DEV" ] && continue
+                uci add_list network.@device[0].ports="$p"
+            done
+            log "br-lan 移除 $WIRE_DEV (原: $CUR_PORTS)"
+        fi
         uci commit network
         NEED_RESTART_NET=1
         push_notify "有線mesh啟用: $WIRE_DEV"
