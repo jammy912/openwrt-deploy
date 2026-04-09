@@ -140,39 +140,46 @@ switch_to() {
     if [ "$CUR_LAN_IP" != "$NEW_IP" ]; then
         OLD_CIDR=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
 
+        # 同 subnet 不能同時有兩個 primary IP，用 ip addr replace 一步到位
         if [ "$TARGET" = "主gw" ]; then
-            # 升主gw: 立刻搶 .1 (ip addr add 會自動發 gratuitous ARP)
-            log "ACTION: 升主gw - 搶 .1 (先加再刪舊IP)"
-            ip addr add "192.168.1.1/24" dev br-lan 2>/dev/null
-            sleep 1
-            # 再刪再加，觸發第二次 GARP 確保所有裝置更新
-            ip addr del "192.168.1.1/24" dev br-lan 2>/dev/null
-            ip addr add "192.168.1.1/24" dev br-lan 2>/dev/null
-            # 刪舊 IP
-            [ "$OLD_CIDR" != "192.168.1.1/24" ] && ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
+            log "ACTION: 升主gw - 搶 .1 (replace)"
+            # 移除舊 default route via .1（降級時加的）
             ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
-            log "ACTION: IP 搶奪完成: $OLD_CIDR → 192.168.1.1/24 (GARP via ip addr)"
+            # 一步替換 IP
+            ip addr replace "192.168.1.1/24" dev br-lan 2>/dev/null
+            # 刪舊 IP（如果還殘留）
+            if [ -n "$OLD_CIDR" ] && [ "$OLD_CIDR" != "192.168.1.1/24" ]; then
+                ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
+            fi
+            sleep 1
+            # 驗證
+            VERIFY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
+            if echo "$VERIFY_IP" | grep -q "192.168.1.1/24"; then
+                log "ACTION: IP 搶奪成功: $OLD_CIDR → $VERIFY_IP"
+            else
+                log "ACTION: IP replace 失敗 ($VERIFY_IP)，fallback: del+add"
+                [ -n "$OLD_CIDR" ] && ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
+                ip addr add "192.168.1.1/24" dev br-lan 2>/dev/null
+                sleep 1
+                VERIFY_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
+                log "ACTION: fallback 後: $VERIFY_IP"
+            fi
+            # 恢復 WAN default route（升主gw 要走 WAN 出去）
+            WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+            WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+            if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
+                ip route replace default via "$WAN_GW" dev "$WAN_DEV" 2>/dev/null
+                log "ACTION: 恢復 WAN default route: via $WAN_GW dev $WAN_DEV"
+            else
+                log "ACTION: 警告 - 無法取得 WAN gateway ($WAN_GW / $WAN_DEV)"
+            fi
         else
-            # 降副gw/client: 等新主搶到 .1 再改自己 IP
-            MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
-            log "ACTION: 降級 - 等新主搶 .1 (最多 30s, my_mac=$MY_BR_MAC)..."
-            WAITED=0
-            while [ "$WAITED" -lt 30 ]; do
-                # ping .1 看 ARP 表裡的 MAC 是不是別人
-                ping -c1 -W1 192.168.1.1 >/dev/null 2>&1
-                ARP_MAC=$(ip neigh show 192.168.1.1 dev br-lan 2>/dev/null | awk '{print $5}' | tr 'A-Z' 'a-z')
-                if [ -n "$ARP_MAC" ] && [ "$ARP_MAC" != "$MY_BR_MAC" ]; then
-                    log "ACTION: 新主已就位 (.1 = $ARP_MAC)，等了 ${WAITED}s"
-                    break
-                fi
-                sleep 3
-                WAITED=$((WAITED + 3))
-            done
-            [ "$WAITED" -ge 30 ] && log "ACTION: 等待超時(30s)，強制切換 IP"
-
-            log "ACTION: IP 熱切換 $OLD_CIDR → ${NEW_IP}/24"
-            ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
-            ip addr add "${NEW_IP}/24" dev br-lan 2>/dev/null
+            log "ACTION: 降級 - IP 熱切換 $OLD_CIDR → ${NEW_IP}/24 (replace)"
+            ip addr replace "${NEW_IP}/24" dev br-lan 2>/dev/null
+            # 刪舊 IP（如果還殘留）
+            if [ -n "$OLD_CIDR" ] && [ "$OLD_CIDR" != "${NEW_IP}/24" ]; then
+                ip addr del "$OLD_CIDR" dev br-lan 2>/dev/null
+            fi
             ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
         fi
 

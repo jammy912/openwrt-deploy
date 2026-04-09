@@ -255,13 +255,22 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     NEW_MASK=$(uci get network.lan.netmask 2>/dev/null)
     NEW_GW=$(uci get network.lan.gateway 2>/dev/null)
     if [ -n "$OLD_IP" ] && [ -n "$NEW_IP" ]; then
-        ip addr del "$OLD_IP" dev br-lan 2>/dev/null
         # netmask → CIDR
         case "$NEW_MASK" in
             255.255.255.0) CIDR=24 ;; 255.255.0.0) CIDR=16 ;; *) CIDR=24 ;;
         esac
-        ip addr add "${NEW_IP}/${CIDR}" dev br-lan 2>/dev/null
-        [ -n "$NEW_GW" ] && ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
+        # 同 subnet 用 ip addr replace 一步到位，避免瞬間無 IP
+        ip addr replace "${NEW_IP}/${CIDR}" dev br-lan 2>/dev/null
+        [ "$OLD_IP" != "${NEW_IP}/${CIDR}" ] && ip addr del "$OLD_IP" dev br-lan 2>/dev/null
+        if [ -n "$NEW_GW" ]; then
+            ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
+        else
+            # 主gw: 移除 br-lan default route，恢復 WAN route
+            ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
+            WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+            WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+            [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ] && ip route replace default via "$WAN_GW" dev "$WAN_DEV" 2>/dev/null
+        fi
         log "LAN IP 熱切換: $OLD_IP → ${NEW_IP}/${CIDR}"
     else
         log "重啟網路 (無法熱切換)..."
