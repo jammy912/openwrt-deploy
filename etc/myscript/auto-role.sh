@@ -124,7 +124,7 @@ fi
 # 邏輯: priority 大的優先，相同時 MAC 小的優先
 MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 [ -z "$MY_PRI" ] && MY_PRI=50
-MY_MAC=$(cat /sys/class/net/bat0/address 2>/dev/null)
+MY_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
 
 # 開機延遲: priority 越低等越久，讓高 priority 的先搶主 gw
 BOOT_DELAY=$(( (600 - MY_PRI) / 10 ))
@@ -375,7 +375,11 @@ fi
 # 5. 服務啟停
 # =====================
 svc_enable()  { /etc/init.d/$1 enable 2>/dev/null; /etc/init.d/$1 start 2>/dev/null; }
-svc_disable() { /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null; }
+svc_disable() {
+    # 已經停了就不再跑（避免每次 cron 重複輸出 stop 訊息）
+    /etc/init.d/$1 enabled 2>/dev/null || return 0
+    /etc/init.d/$1 stop 2>/dev/null; /etc/init.d/$1 disable 2>/dev/null
+}
 wg_stop() {
     for wg_if in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
         ifdown "$wg_if" 2>/dev/null
