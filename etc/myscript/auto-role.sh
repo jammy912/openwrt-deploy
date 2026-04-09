@@ -401,6 +401,14 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
+        # 恢復 dnsmasq 指向 AGH (從 client 切回時需要)
+        if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" != "1" ]; then
+            uci set dhcp.@dnsmasq[0].noresolv='1'
+            uci set dhcp.@dnsmasq[0].server='127.0.0.1#53535'
+            uci commit dhcp
+            /etc/init.d/dnsmasq restart
+            log "dnsmasq: 恢復 AGH 轉發 (主 gateway)"
+        fi
         # 開啟 IOT WiFi
         IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
         if [ -n "$IOT_IF" ]; then
@@ -440,11 +448,20 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     fi
     dbg "5.非主gateway: 停全部服務+IOT"
 else
-    # client: 停全部服務 + IOT WiFi
+    # client: 停全部服務 + IOT WiFi + AGH (DNS 直接走主 GW)
     svc_disable ddns
     svc_disable pbr
     svc_disable qosify
+    svc_disable adguardhome
     wg_stop
+    # dnsmasq 直接用主 GW 的 DNS，不經 AGH
+    if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+        uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
+        uci delete dhcp.@dnsmasq[0].server 2>/dev/null
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+        log "dnsmasq: 移除 AGH 轉發，改用 resolv (client)"
+    fi
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
     if [ -n "$IOT_IF" ]; then
         CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
@@ -734,7 +751,7 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
     fi
 else
-    # 副 gw / client: WG/pbr/qosify/IOT 不該跑 (adguardhome 保留給 DNS)
+    # 副 gw / client: WG/pbr/qosify/IOT 不該跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
@@ -742,6 +759,17 @@ else
     /etc/init.d/pbr enabled 2>/dev/null && {
         svc_disable pbr; log "fixup: PBR 不應運行，已停止"; FIXUP=1
     }
+    # client: AGH 不該跑 (DNS 直接走主 GW); 副 gw: AGH 保留
+    if [ "$GW_TYPE" != "副gw" ] && pgrep -f adguardhome >/dev/null 2>&1; then
+        svc_disable adguardhome; log "fixup: AGH 不應運行 (client)，已停止"; FIXUP=1
+    fi
+    if [ "$GW_TYPE" != "副gw" ] && [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+        uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
+        uci delete dhcp.@dnsmasq[0].server 2>/dev/null
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+        log "fixup: dnsmasq 移除 AGH 轉發 (client)"; FIXUP=1
+    fi
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
     if [ -n "$IOT_IF" ] && [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
         uci set wireless.${IOT_IF}.disabled='1'
