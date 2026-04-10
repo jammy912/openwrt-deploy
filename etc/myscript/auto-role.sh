@@ -812,15 +812,18 @@ fi
 # =====================
 # 10. usteer 確保正確註冊 hostapd
 # =====================
-if pgrep -x usteerd >/dev/null 2>&1 && { [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; }; then
-    # network restart / wifi 變更後 hostapd 需要時間重新初始化
-    for _ust_try in 1 2 3; do
+if pgrep -x usteerd >/dev/null 2>&1; then
+    if [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; then
+        # 主副互換或角色變更: 直接 restart (hostapd socket 已更新)
         sleep 5
-        _usteer_nodes=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
-        [ "$_usteer_nodes" -gt 0 ] && break
-    done
-    if [ "$_usteer_nodes" -eq 0 ]; then
         /etc/init.d/usteer restart >/dev/null 2>&1
-        log "fixup: usteer 未偵測到本地 AP，已 restart"
+        log "usteer restart (角色/網路變更)"
+    else
+        # 常態健康檢查: local_info 沒有 AP 就 restart
+        _ust_ap=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
+        if [ "$_ust_ap" -eq 0 ]; then
+            /etc/init.d/usteer restart >/dev/null 2>&1
+            log "fixup: usteer 無本地 AP，已 restart"
+        fi
     fi
 fi
