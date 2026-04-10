@@ -254,6 +254,13 @@ if [ "$CUR_GW" != "$WANT_GW" ]; then
     log "bat0 gw_mode: $CUR_GW -> $WANT_GW"
     CHANGED=1
 fi
+# 啟用 bridge loop avoidance (防止 lan3+hub+lan2 mesh 造成 L2 迴圈)
+CUR_BLA=$(uci get network.bat0.bridge_loop_avoidance 2>/dev/null)
+if [ "$CUR_BLA" != "1" ]; then
+    uci set network.bat0.bridge_loop_avoidance='1'
+    log "bat0 BLA: 已啟用"
+    CHANGED=1
+fi
 CUR_LAN_PROTO=$(uci get network.lan.proto 2>/dev/null)
 CUR_LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null)
 [ -z "$CUR_LAN_IP" ] && CUR_LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
