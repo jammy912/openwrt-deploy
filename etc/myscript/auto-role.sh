@@ -841,8 +841,10 @@ if [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; then
     sleep 5
     /etc/init.d/usteer restart >/dev/null 2>&1
     log "usteer restart (角色/網路變更)"
-elif ! pgrep -x usteerd >/dev/null 2>&1; then
+elif ! pidof usteerd >/dev/null 2>&1; then
     # usteerd process 死掉 (crash/OOM/ubus 斷線後未恢復)
+    # 注意: 不用 `pgrep -x usteerd` - BusyBox 的 pgrep -x 對純字串比對不會觸發，
+    #       會永遠誤判為 DEAD，導致每分鐘 false-positive restart
     /etc/init.d/usteer restart >/dev/null 2>&1
     log "fixup: usteerd 未執行，已 restart"
 else
