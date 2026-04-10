@@ -369,9 +369,11 @@ if [ "$DHCP_ACTION" = "server" ]; then
     fi
     # 只有主 gw 發 IPv6 RA/DHCPv6 (有 public prefix from wan6)
     # client 模式 br-lan 沒有 public prefix, 一樣應該靠 bat0 bridge 轉發主 gw RA
+    # 注意: IS_PRIMARY=1 只代表 mesh 內最高優先, client 也可能是 primary,
+    #      所以必須同時是 gateway 才算主 gw
     CUR_DHCPV6=$(uci -q get dhcp.lan.dhcpv6)
     CUR_RA=$(uci -q get dhcp.lan.ra)
-    if [ "$IS_PRIMARY" = "1" ]; then
+    if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
         _want_v6="server"
     else
         _want_v6="disabled"
