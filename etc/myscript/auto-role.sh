@@ -819,18 +819,21 @@ fi
 # =====================
 # 10. usteer 確保正確註冊 hostapd
 # =====================
-if pgrep -x usteerd >/dev/null 2>&1; then
-    if [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; then
-        # 主副互換或角色變更: 直接 restart (hostapd socket 已更新)
-        sleep 5
+if [ "$CHANGED" = "1" ] || [ "$NEED_RESTART_NET" = "1" ]; then
+    # 主副互換或角色變更: 直接 restart (hostapd socket 已更新)
+    sleep 5
+    /etc/init.d/usteer restart >/dev/null 2>&1
+    log "usteer restart (角色/網路變更)"
+elif ! pgrep -x usteerd >/dev/null 2>&1; then
+    # usteerd process 死掉 (crash/OOM/ubus 斷線後未恢復)
+    /etc/init.d/usteer restart >/dev/null 2>&1
+    log "fixup: usteerd 未執行，已 restart"
+else
+    # 常態健康檢查: local_info 沒有 AP 就 restart
+    # (usteerd 存活但已從 hostapd disconnect，自己不會重連)
+    _ust_ap=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
+    if [ "$_ust_ap" -eq 0 ]; then
         /etc/init.d/usteer restart >/dev/null 2>&1
-        log "usteer restart (角色/網路變更)"
-    else
-        # 常態健康檢查: local_info 沒有 AP 就 restart
-        _ust_ap=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
-        if [ "$_ust_ap" -eq 0 ]; then
-            /etc/init.d/usteer restart >/dev/null 2>&1
-            log "fixup: usteer 無本地 AP，已 restart"
-        fi
+        log "fixup: usteer 無本地 AP，已 restart"
     fi
 fi
