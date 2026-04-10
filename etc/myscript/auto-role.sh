@@ -367,6 +367,23 @@ if [ "$DHCP_ACTION" = "server" ]; then
         log "DHCP server 已開啟"
         CHANGED=1
     fi
+    # 只有主 gw 發 IPv6 RA/DHCPv6 (有 public prefix from wan6)
+    # client 模式 br-lan 沒有 public prefix, 一樣應該靠 bat0 bridge 轉發主 gw RA
+    CUR_DHCPV6=$(uci -q get dhcp.lan.dhcpv6)
+    CUR_RA=$(uci -q get dhcp.lan.ra)
+    if [ "$IS_PRIMARY" = "1" ]; then
+        _want_v6="server"
+    else
+        _want_v6="disabled"
+    fi
+    if [ "$CUR_DHCPV6" != "$_want_v6" ] || [ "$CUR_RA" != "$_want_v6" ]; then
+        uci set dhcp.lan.dhcpv6="$_want_v6"
+        uci set dhcp.lan.ra="$_want_v6"
+        uci commit dhcp
+        /etc/init.d/odhcpd restart 2>/dev/null
+        log "IPv6: odhcpd dhcpv6/ra=$_want_v6"
+        CHANGED=1
+    fi
     # client: DHCP 發出的 gateway/DNS 指向主 GW
     if [ "$NEW_ROLE" = "client" ]; then
         CUR_GW_OPT=$(uci get dhcp.lan.dhcp_option 2>/dev/null)
@@ -396,6 +413,19 @@ elif [ "$DHCP_ACTION" = "off" ]; then
         uci commit dhcp
         /etc/init.d/dnsmasq restart
         log "DHCP server 已關閉 (非主 gateway)"
+        CHANGED=1
+    fi
+    # 副 gw 沒有 public IPv6 prefix,odhcpd 不該發 RA/DHCPv6,
+    # 主 gw 的 RA 會透過 bat0 bridge 直接穿到下游
+    # 留著 server 會導致 odhcpd 每次發 RA 都噴 "no public prefix" warning
+    CUR_DHCPV6=$(uci -q get dhcp.lan.dhcpv6)
+    CUR_RA=$(uci -q get dhcp.lan.ra)
+    if [ "$CUR_DHCPV6" != "disabled" ] || [ "$CUR_RA" != "disabled" ]; then
+        uci set dhcp.lan.dhcpv6='disabled'
+        uci set dhcp.lan.ra='disabled'
+        uci commit dhcp
+        /etc/init.d/odhcpd restart 2>/dev/null
+        log "IPv6: odhcpd dhcpv6/ra 已關閉 (副 gw 透過 mesh 轉發主 gw RA)"
         CHANGED=1
     fi
 fi
