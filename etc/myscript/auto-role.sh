@@ -663,33 +663,42 @@ else
 fi
 
 # 主 gw 確立時推播 mesh 架構圖 (延遲等 batman-adv 收集鄰居)
-# 觸發條件: 角色變更、主/副切換、或開機首次執行
+# 觸發條件: 角色變更、主/副切換、開機首次、或架構內容與上次不同
 _BOOT_FIRST=0
 [ ! -f /tmp/auto-role.boot ] && _BOOT_FIRST=1 && touch /tmp/auto-role.boot
-if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ] || [ "$_BOOT_FIRST" = "1" ]; }; then
-    # 等待 batman-adv 鄰居恢復（切 gw_mode / wifi up 後需要時間重新發現）
-    for _wait in 1 2 3 4 5 6; do
-        _nc=$(batctl n 2>/dev/null | grep -c '[0-9a-f][0-9a-f]:')
-        [ "$_nc" -gt 0 ] && break
-        sleep 5
-    done
+if [ "$GW_TYPE" = "主gw" ]; then
+    # 是否為觸發事件 (角色變更/開機) — 決定要不要等 batman-adv 鄰居恢復
+    _MESH_TRIGGER=0
+    if [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_GWTYPE" != "$GW_TYPE" ] || [ "$_BOOT_FIRST" = "1" ]; then
+        _MESH_TRIGGER=1
+        # 等待 batman-adv 鄰居恢復（切 gw_mode / wifi up 後需要時間重新發現）
+        for _wait in 1 2 3 4 5 6; do
+            _nc=$(batctl n 2>/dev/null | grep -c '[0-9a-f][0-9a-f]:')
+            [ "$_nc" -gt 0 ] && break
+            sleep 5
+        done
+    fi
     MY_HOSTNAME=$(cat /proc/sys/kernel/hostname)
     GWL_CACHE=$(batctl gwl 2>/dev/null | grep 'MBit')
     N_RAW=$(batctl n 2>/dev/null)
     N_CACHE=$(echo "$N_RAW" | grep '[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]')
     # 取唯一鄰居 MAC 列表
     PEER_MACS=$(echo "$N_CACHE" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9a-f][0-9a-f]:/){print $i;break}}}' | sort -u)
-    log "mesh-map: batctl_n_raw_lines=$(echo "$N_RAW" | wc -l) filtered_lines=$(echo "$N_CACHE" | grep -c .) peer_macs=[${PEER_MACS}]"
-    log "mesh-map: batctl_n_raw: $(echo "$N_RAW" | head -5)"
-    log "mesh-map: gwl_cache: $(echo "$GWL_CACHE" | head -3)"
+    if [ "$_MESH_TRIGGER" = "1" ]; then
+        log "mesh-map: batctl_n_raw_lines=$(echo "$N_RAW" | wc -l) filtered_lines=$(echo "$N_CACHE" | grep -c .) peer_macs=[${PEER_MACS}]"
+        log "mesh-map: batctl_n_raw: $(echo "$N_RAW" | head -5)"
+        log "mesh-map: gwl_cache: $(echo "$GWL_CACHE" | head -3)"
+    fi
     MESH_TMP="/tmp/mesh_map.$$"
     echo "Mesh架構:" > "$MESH_TMP"
     echo "${MY_HOSTNAME}(${FINAL_IP}) ${GW_TYPE} pri=${MY_PRI}" >> "$MESH_TMP"
     NEIGH_CACHE=$(ip neigh show dev br-lan 2>/dev/null | grep -v FAILED)
     LEASE_CACHE=$(cat /tmp/dhcp.leases 2>/dev/null)
     STATIC_HOSTS=$(uci show dhcp 2>/dev/null | grep "=host$" | cut -d'.' -f2 | cut -d'=' -f1)
-    log "mesh-map: neigh_cache=$(echo "$NEIGH_CACHE" | head -5)"
-    log "mesh-map: lease_cache=$(echo "$LEASE_CACHE" | head -5)"
+    if [ "$_MESH_TRIGGER" = "1" ]; then
+        log "mesh-map: neigh_cache=$(echo "$NEIGH_CACHE" | head -5)"
+        log "mesh-map: lease_cache=$(echo "$LEASE_CACHE" | head -5)"
+    fi
     # 用後4字節合併同一台的有線/無線 MAC
     SEEN_TAILS=""
     for mac in $PEER_MACS; do
@@ -733,7 +742,7 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
         else
             PEER_LABEL="$mac"
         fi
-        log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
+        [ "$_MESH_TRIGGER" = "1" ] && log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
         # gw 排前面(1)、client 排後面(2)
         _sort_key="2"
         echo "$PEER_ROLE" | grep -q "gw" && _sort_key="1"
@@ -746,7 +755,15 @@ if [ "$GW_TYPE" = "主gw" ] && { [ "$CURRENT_ROLE" != "$NEW_ROLE" ] || [ "$PREV_
         sort "${MESH_TMP}.unsorted" | sed 's/^[12]//' >> "$MESH_TMP"
         rm -f "${MESH_TMP}.unsorted"
     fi
-    push_notify "$(cat "$MESH_TMP")"
+    # 推播判斷: 角色變更/主副切換/開機首次 → 無條件推
+    # 其餘時候 → 架構內容 hash 與上次不同才推 (偵測鄰居加入/離開/連線類型變動)
+    MESH_HASH=$(md5sum "$MESH_TMP" 2>/dev/null | awk '{print $1}')
+    LAST_HASH=$(cat /tmp/mesh_map.hash 2>/dev/null)
+    if [ "$_MESH_TRIGGER" = "1" ] || [ "$MESH_HASH" != "$LAST_HASH" ]; then
+        push_notify "$(cat "$MESH_TMP")"
+        echo "$MESH_HASH" > /tmp/mesh_map.hash
+        [ "$_MESH_TRIGGER" = "1" ] && log "mesh-map: 推播 (角色/開機觸發)" || log "mesh-map: 推播 (架構變動)"
+    fi
     rm -f "$MESH_TMP"
 fi
 
