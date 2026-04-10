@@ -662,6 +662,38 @@ else
     > "$GWTYPE_FILE"
 fi
 
+# =====================
+# wan6 自動管理
+# =====================
+# 只有主gw需要自己拉 IPv6 上游;副gw/client透過 mesh 從主gw 拿 RA,
+# 自己拉 wan6 在 rename device + MAC clone 架構下會引發 netifd flap
+# (ubus error: Invalid argument, 10+/sec)
+if [ -n "$(uci -q get network.wan6)" ]; then
+    _wan6_disabled=$(uci -q get network.wan6.disabled)
+    if [ "$GW_TYPE" = "主gw" ]; then
+        _wan6_want="0"
+    else
+        _wan6_want="1"
+    fi
+    # 空字串視為 0 (uci 預設啟用)
+    [ -z "$_wan6_disabled" ] && _wan6_disabled="0"
+    if [ "$_wan6_disabled" != "$_wan6_want" ]; then
+        if [ "$_wan6_want" = "1" ]; then
+            uci set network.wan6.disabled='1'
+            uci commit network
+            ifdown wan6 2>/dev/null
+            # 殺掉殘留的 odhcp6c (netifd flap 時常遺留)
+            killall -q odhcp6c 2>/dev/null
+            log "wan6: disabled (${GW_TYPE}不需獨立IPv6)"
+        else
+            uci -q delete network.wan6.disabled
+            uci commit network
+            ifup wan6 2>/dev/null
+            log "wan6: enabled (主gw拉IPv6上游)"
+        fi
+    fi
+fi
+
 # 主 gw 確立時推播 mesh 架構圖 (延遲等 batman-adv 收集鄰居)
 # 觸發條件: 角色變更、主/副切換、開機首次、或架構內容與上次不同
 _BOOT_FIRST=0
