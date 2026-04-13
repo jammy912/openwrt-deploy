@@ -45,6 +45,7 @@ ENABLE_LOG=1            # 1 為啟用日誌, 0 為停用
 RSSI_KICK_5G=""         # 5G 信號低於此值(dBm)踢掉客戶端，空值=不啟用 (如 -75)
 RSSI_KICK_2G=""         # 2.4G 信號低於此值(dBm)踢掉客戶端，空值=不啟用 (如 -75)
 KICK_COOLDOWN=""        # 踢除後冷卻時間(分鐘)，冷卻期內同一MAC不再踢，空值=不限制
+USE_HEARING_MAP="N"     # [新增] Y=引入 usteer hearing map 作為訊號檢測基準並做 AP 擇強 (強制 MONITOR_MODE=0); N=原行為
 MONITOR_MODE=1          # [V7.5 新增] 1=廣泛模式(Phone+ARP), 0=嚴格模式(僅關鍵字)
 DEVICE_KEYWORDS="Phone"  # DHCP 租約中要匹配的裝置名稱關鍵字，多個用分號分隔 (如 Phone;iPad;Laptop)
 
@@ -74,8 +75,17 @@ shift 9
 
 shift 8
 [ -n "$1" ] && KICK_COOLDOWN="$1"        # 第 18 個參數: 踢除冷卻時間(分鐘)
-[ -n "$2" ] && MONITOR_MODE="$2"         # 第 19 個參數: 監控模式
-[ -n "$3" ] && DEVICE_KEYWORDS="$3"      # 第 20 個參數: 裝置名稱關鍵字
+[ -n "$2" ] && USE_HEARING_MAP="$2"      # 第 19 個參數: 使用 usteer hearing map (Y/N)
+[ -n "$3" ] && MONITOR_MODE="$3"         # 第 20 個參數: 監控模式
+[ -n "$4" ] && DEVICE_KEYWORDS="$4"      # 第 21 個參數: 裝置名稱關鍵字
+
+# USE_HEARING_MAP=Y 時強制 MONITOR_MODE=0，避免把鄰居裝置納入監控
+if [ "$USE_HEARING_MAP" = "Y" ] || [ "$USE_HEARING_MAP" = "y" ]; then
+    USE_HEARING_MAP="Y"
+    if [ "$MONITOR_MODE" != "0" ]; then
+        MONITOR_MODE=0
+    fi
+fi
 
 # =====================
 # ash 兼容 log 函式
@@ -94,7 +104,7 @@ log "命令列參數載入:
 2.4G(閾=$THRESHOLD_2G, min=$LOW_PWR_2G, max=$HIGH_PWR_2G, boost=$BOOST_PWR_2G, enable=$ENABLE_2G)
 HYSTERESIS=$HYSTERESIS, BOOST_TIMEOUT=$BOOST_TIMEOUT_SECONDS, PROPORTIONAL_FACTOR=$PROPORTIONAL_FACTOR
 日誌=$ENABLE_LOG, RSSI_KICK_5G=$RSSI_KICK_5G, RSSI_KICK_2G=$RSSI_KICK_2G, KICK_COOLDOWN=${KICK_COOLDOWN:-無}分鐘
-監控模式=$MONITOR_MODE, 裝置關鍵字=$DEVICE_KEYWORDS"
+HEARING_MAP=$USE_HEARING_MAP, 監控模式=$MONITOR_MODE, 裝置關鍵字=$DEVICE_KEYWORDS"
 
 # =====================
 # RSSI 踢除弱信號客戶端
@@ -260,6 +270,105 @@ else
     fi
 fi
 
+# =====================
+# [新增] usteer hearing map 快取 & 擇強過濾 (僅 USE_HEARING_MAP=Y 啟用)
+# =====================
+HEARING_MAP_JSON=""
+
+# 對給定 MAC，從 hearing map 解析出本機訊號與最強遠端訊號，
+# 輸出格式: "<decision> <local_sig> <max_remote_sig>"
+# decision: KEEP / SKIP / NOTFOUND / NOLOCAL
+# 本機節點 key 不含 '#'；遠端節點 key 形如 '<ip>#hostapd.xxx'
+hm_lookup_mac() {
+    local mac="$1"
+    local lc_mac
+    lc_mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+    echo "$HEARING_MAP_JSON" | awk -v target="$lc_mac" '
+        BEGIN { in_mac=0; depth=0; current_key=""; local_sig=""; max_remote=""; found_local=0; found_remote=0 }
+        {
+            line=$0
+            lc=tolower(line)
+            if (in_mac==0) {
+                if (index(lc, "\"" target "\"") > 0 && index(line, "{") > 0) {
+                    in_mac=1; depth=1
+                }
+                next
+            }
+            tmp=line; n_open=gsub(/\{/, "{", tmp)
+            tmp=line; n_close=gsub(/\}/, "}", tmp)
+            depth += n_open - n_close
+
+            if (match(line, /"[^"]+"[[:space:]]*:[[:space:]]*\{/)) {
+                key=substr(line, RSTART+1)
+                q=index(key, "\"")
+                current_key=substr(key, 1, q-1)
+            }
+            if (match(line, /"signal"[[:space:]]*:[[:space:]]*-?[0-9]+/)) {
+                s=substr(line, RSTART, RLENGTH)
+                sub(/.*:[[:space:]]*/, "", s)
+                sig=s+0
+                if (index(current_key, "#")==0) {
+                    if (found_local==0 || sig > local_sig) local_sig=sig
+                    found_local=1
+                } else {
+                    if (found_remote==0 || sig > max_remote) max_remote=sig
+                    found_remote=1
+                }
+            }
+
+            if (depth<=0) {
+                if (found_local==0) { print "NOLOCAL 0 0"; exit }
+                if (found_remote==0) { printf "KEEP %d 0\n", local_sig; exit }
+                if (local_sig+0 >= max_remote+0) printf "KEEP %d %d\n", local_sig, max_remote
+                else printf "SKIP %d %d\n", local_sig, max_remote
+                exit
+            }
+        }
+        END { if (in_mac==0) print "NOTFOUND 0 0" }
+    '
+}
+
+filter_by_hearing_map() {
+    local in_macs="$1"
+    [ -z "$in_macs" ] && { echo ""; return; }
+    [ -z "$HEARING_MAP_JSON" ] && { echo "$in_macs"; return; }
+    local kept="" mac r d lsig rsig
+    for mac in $in_macs; do
+        r=$(hm_lookup_mac "$mac")
+        d=$(echo "$r" | awk '{print $1}')
+        lsig=$(echo "$r" | awk '{print $2}')
+        rsig=$(echo "$r" | awk '{print $3}')
+        case "$d" in
+            KEEP)
+                kept="$kept $mac"
+                log "[HearingMap] 保留 $mac (本機=${lsig}dBm 遠端最強=${rsig}dBm)"
+                ;;
+            SKIP)
+                log "[HearingMap] 跳過 $mac (本機=${lsig}dBm < 遠端=${rsig}dBm，讓較強 AP 處理)"
+                ;;
+            NOLOCAL)
+                log "[HearingMap] 跳過 $mac (本機節點無此裝置訊號資料)"
+                ;;
+            NOTFOUND|*)
+                kept="$kept $mac"
+                log "[HearingMap] 保留 $mac (hearing map 查無資料，預設保留)"
+                ;;
+        esac
+    done
+    echo "$kept" | sed 's/^ //'
+}
+
+if [ "$USE_HEARING_MAP" = "Y" ]; then
+    HEARING_MAP_JSON=$(ubus call usteer get_clients 2>/dev/null)
+    if [ -z "$HEARING_MAP_JSON" ]; then
+        log "[HearingMap] ubus call usteer get_clients 無回應，本次不做擇強過濾"
+    else
+        BEFORE_MACS="$MONITORED_MACS"
+        MONITORED_MACS=$(filter_by_hearing_map "$MONITORED_MACS")
+        log "[HearingMap] 擇強過濾完成: 原=[$BEFORE_MACS] -> 過濾後=[$MONITORED_MACS]"
+    fi
+fi
+
 log "[動態監控] 本次監控 MAC 列表: $MONITORED_MACS"
 
 # =====================
@@ -293,7 +402,54 @@ get_clients_on_radio() {
 # =====================
 get_weakest_signal() {
     local radio_name="$1"
-    
+
+    # [新增] USE_HEARING_MAP=Y 時，改用 hearing map 的本機節點訊號 (包含 probe-only 裝置)
+    # 只計算對應 radio 的介面 (phy0=2.4G, phy1=5G)
+    if [ "$USE_HEARING_MAP" = "Y" ] && [ -n "$HEARING_MAP_JSON" ]; then
+        local hm_prefix=""
+        [ "$radio_name" = "radio0" ] && hm_prefix="hostapd.phy0"
+        [ "$radio_name" = "radio1" ] && hm_prefix="hostapd.phy1"
+        local weakest_hm
+        weakest_hm=$(echo "$HEARING_MAP_JSON" | awk -v macs="$MONITORED_MACS" -v pfx="$hm_prefix" '
+            BEGIN {
+                n=split(tolower(macs), arr, " ")
+                for (i=1;i<=n;i++) want[arr[i]]=1
+                depth=0; in_mac=0; cur_mac=""; cur_key=""; found=0; weakest=0
+            }
+            {
+                line=$0
+                tmp=line; no=gsub(/\{/, "{", tmp)
+                tmp=line; nc=gsub(/\}/, "}", tmp)
+
+                if (in_mac==0) {
+                    if (match(line, /"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{/)) {
+                        m=substr(line, RSTART+1, 17); m=tolower(m)
+                        if (m in want) { in_mac=1; cur_mac=m; depth=1; next }
+                    }
+                    next
+                }
+                depth += no - nc
+                if (match(line, /"[^"]+"[[:space:]]*:[[:space:]]*\{/)) {
+                    k=substr(line, RSTART+1); q=index(k, "\"")
+                    cur_key=substr(k, 1, q-1)
+                }
+                if (match(line, /"signal"[[:space:]]*:[[:space:]]*-?[0-9]+/)) {
+                    s=substr(line, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s); sig=s+0
+                    # 只取本機節點 (不含 #) 且符合 radio 前綴
+                    if (index(cur_key, "#")==0 && index(cur_key, pfx)==1) {
+                        if (found==0 || sig < weakest) weakest=sig
+                        found=1
+                    }
+                }
+                if (depth<=0) { in_mac=0; cur_mac=""; cur_key="" }
+            }
+            END { if (found) print weakest; else print -1 }
+        ')
+        log "[HearingMap] ${radio_name} 最弱訊號 (來自 hearing map) = ${weakest_hm}"
+        echo "$weakest_hm"
+        return
+    fi
+
     local interface_prefix=""
     [ "$radio_name" = "radio0" ] && interface_prefix="phy0"
     [ "$radio_name" = "radio1" ] && interface_prefix="phy1"
