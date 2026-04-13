@@ -320,7 +320,7 @@ hm_lookup_mac() {
 
             if (depth<=0) {
                 if (found_local==0) { print "NOLOCAL 0 0"; exit }
-                if (found_remote==0) { printf "KEEP %d 0\n", local_sig; exit }
+                if (found_remote==0) { printf "KEEPLOCAL %d 0\n", local_sig; exit }
                 if (local_sig+0 >= max_remote+0) printf "KEEP %d %d\n", local_sig, max_remote
                 else printf "SKIP %d %d\n", local_sig, max_remote
                 exit
@@ -344,6 +344,10 @@ filter_by_hearing_map() {
             KEEP)
                 kept="$kept $mac"
                 log "[HearingMap] 保留 $mac (本機=${lsig}dBm 遠端最強=${rsig}dBm)"
+                ;;
+            KEEPLOCAL)
+                kept="$kept $mac"
+                log "[HearingMap] 保留 $mac (本機=${lsig}dBm，無其他 AP 看到此裝置)"
                 ;;
             SKIP)
                 log "[HearingMap] 跳過 $mac (本機=${lsig}dBm < 遠端=${rsig}dBm，讓較強 AP 處理)"
