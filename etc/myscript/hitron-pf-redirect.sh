@@ -15,7 +15,11 @@ CK=/tmp/.hitron_pf_ck.$$
 LOG=/tmp/hitron-pf.log
 
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
-cleanup() { rm -f "$CK"; }
+cleanup() {
+    # 登出釋放 session (Hitron 上限 30)
+    [ -f "$CK" ] && curl -s -b "$CK" -X POST "$HITRON/goform/logout" -o /dev/null 2>/dev/null
+    rm -f "$CK"
+}
 trap cleanup EXIT
 
 # 取本機 WAN IP
