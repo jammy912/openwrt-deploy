@@ -505,7 +505,8 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi
     svc_disable ddns
-    svc_disable pbr
+    # pbr 保持 enabled (避免 dnsmasq 因 dangling /etc/dnsmasq.d/pbr symlink crash)
+    svc_enable pbr
     svc_disable qosify
     wg_stop
     # 停 IOT WiFi (只有主 gw 需要)
@@ -525,7 +526,10 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
 else
     # client: 停全部服務 + IOT WiFi + AGH (DNS 直接走主 GW)
     svc_disable ddns
-    svc_disable pbr
+    # pbr 保持 enabled: 它不影響 client 路由 (client 流量走 mesh→主gw)，
+    # 但 /etc/dnsmasq.d/pbr -> /var/run/pbr.dnsmasq 是 pbr 套件裝時建的固定 symlink,
+    # /var/run 是 tmpfs 重開機清空，pbr 沒跑 → dnsmasq confdir 掃到 dangling symlink → crash
+    svc_enable pbr
     svc_disable qosify
     svc_disable adguardhome
     wg_stop
@@ -955,8 +959,9 @@ else
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
     fi
-    /etc/init.d/pbr enabled 2>/dev/null && {
-        svc_disable pbr; log "fixup: PBR 不應運行，已停止"; FIXUP=1
+    # pbr 在副gw/client 不停 (避免 dnsmasq 因 dangling /etc/dnsmasq.d/pbr symlink crash)
+    /etc/init.d/pbr enabled 2>/dev/null || {
+        svc_enable pbr; log "fixup: PBR 已啟用 (避免 dnsmasq dangling symlink crash)"; FIXUP=1
     }
     # client: AGH 不該跑 (DNS 直接走主 GW); 副 gw: AGH 保留
     if [ "$GW_TYPE" != "副gw" ] && pgrep -f adguardhome >/dev/null 2>&1; then

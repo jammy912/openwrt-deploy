@@ -21,6 +21,14 @@ mount --bind /tmp/crontabs_ram /etc/crontabs
 # 防止 reboot cron 造成開機循環
 sed -i '/^[^#].*reboot/d' /etc/crontabs/root
 
+# 清掉 /etc/dnsmasq.d/ 下 dangling symlink (常見: pbr 沒 enable 時 -> /var/run/pbr.dnsmasq)
+# 否則 dnsmasq boot 時 confdir 掃到失效連結會 crash loop
+for _f in /etc/dnsmasq.d/*; do
+    [ -L "$_f" ] && [ ! -e "$_f" ] && rm -f "$_f" && \
+        logger -t rc.local "removed dangling dnsmasq.d symlink: $_f"
+done
+/etc/init.d/dnsmasq restart 2>/dev/null
+
 # LED 關閉 (依機型)
 case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
     cmcc,rax3000m)
