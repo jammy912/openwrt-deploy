@@ -7,6 +7,10 @@
 HITRON=http://192.168.168.1
 USER=admin
 PASS=password
+DRY_RUN=0
+[ "$1" = "--dry-run" ] && DRY_RUN=1
+DRY_RUN=0
+[ "$1" = "--dry-run" ] && DRY_RUN=1
 CK=/tmp/.hitron_pf_ck.$$
 LOG=/tmp/hitron-pf.log
 
@@ -44,11 +48,40 @@ if ! echo "$RULES" | grep -q '^\['; then
 fi
 
 # 修改 wg* 開頭規則的 localIpAddr
-NEW=$(echo "$RULES" | jq --arg ip "$TARGET_IP" '
+NEW=$(echo "$RULES" | jq -c --arg ip "$TARGET_IP" '
     map(if (.appName | ascii_downcase | startswith("wg")) then .localIpAddr = $ip else . end)
 ')
 if [ -z "$NEW" ] || ! echo "$NEW" | grep -q '^\['; then
     log "[ERROR] jq 處理失敗"
+    exit 1
+fi
+
+# 備份（每次都存一份，供災難恢復）
+BK_DIR=/etc/myscript/hitron-pf-backup
+mkdir -p "$BK_DIR"
+echo "$RULES" > "$BK_DIR/rules-$(date +%Y%m%d-%H%M%S).json"
+# 只保留最近 10 份
+ls -1t "$BK_DIR"/rules-*.json 2>/dev/null | tail -n +11 | xargs -r rm -f
+
+# 驗證 NEW 是合法 JSON array 且條數不少於原本 (防止意外截斷)
+OLD_COUNT=$(echo "$RULES" | jq 'length' 2>/dev/null)
+NEW_COUNT=$(echo "$NEW" | jq 'length' 2>/dev/null)
+if [ -z "$NEW_COUNT" ] || [ "$NEW_COUNT" -lt "$OLD_COUNT" ]; then
+    log "[ERROR] 新規則條數異常 (old=$OLD_COUNT, new=$NEW_COUNT)，中止"
+    exit 1
+fi
+
+# 備份
+BK_DIR=/etc/myscript/hitron-pf-backup
+mkdir -p "$BK_DIR"
+echo "$RULES" > "$BK_DIR/rules-$(date +%Y%m%d-%H%M%S).json"
+ls -1t "$BK_DIR"/rules-*.json 2>/dev/null | tail -n +11 | xargs -r rm -f
+
+# 條數檢查 (防截斷)
+OLD_COUNT=$(echo "$RULES" | jq 'length' 2>/dev/null)
+NEW_COUNT=$(echo "$NEW" | jq 'length' 2>/dev/null)
+if [ -z "$NEW_COUNT" ] || [ "$NEW_COUNT" -lt "$OLD_COUNT" ]; then
+    log "[ERROR] 新規則條數異常 (old=$OLD_COUNT, new=$NEW_COUNT)，中止"
     exit 1
 fi
 
@@ -66,6 +99,16 @@ echo "$NEW" | jq -r '.[] | select(.appName | ascii_downcase | startswith("wg")) 
     log "[CHANGE]$line"
 done
 
+if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY-RUN] 不套用變更，結束"
+    exit 0
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY-RUN] 不套用變更"
+    exit 0
+fi
+
 # 取 CSRF 並送 PfwCollection
 TS=$(date +%s%N 2>/dev/null | cut -c1-13)
 [ -z "$TS" ] && TS=$(date +%s)000
@@ -75,8 +118,10 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
+# 手動 urlencode model (busybox curl 的 --data-urlencode 遇換行可能截斷)
+NEW_ENC=$(printf '%s' "$NEW" | od -An -tx1 -v | tr -d ' \n' | sed 's/../%&/g')
 RESP=$(curl -s -b "$CK" -X POST "$HITRON/goform/PfwCollection" \
-    --data-urlencode "model=$NEW" \
+    --data "model=$NEW_ENC" \
     --data-urlencode "CsrfToken=$TOKEN" \
     -d "CsrfTokenFlag=0")
 log "[INFO] PfwCollection 回應: ${RESP:-<空>}"
