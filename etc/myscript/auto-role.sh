@@ -182,6 +182,9 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
     DHCP_ACTION="server"
     LAN_MODE="static"
     log "主 gateway (priority=$MY_PRI)"
+    # 將 Hitron port forward wg* 規則指向本機 WAN IP
+    [ -x /etc/myscript/hitron-pf-redirect.sh ] && \
+        /etc/myscript/hitron-pf-redirect.sh >/dev/null 2>&1 &
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 關閉 DHCP (client 透過 bat0/br-lan 直接拿主 gw 的 DHCP)
     DHCP_ACTION="off"
