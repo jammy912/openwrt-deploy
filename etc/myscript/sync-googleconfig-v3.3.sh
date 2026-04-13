@@ -813,6 +813,13 @@ main() {
     if check_content_changed "$TMP_ROUTERCONFIG" "$STATE_ROUTERCONFIG" "RouterConfig"; then
         CHANGED_ROUTERCONFIG=1
     fi
+    # .hitron-pf.json 缺失 → 強制處理 RouterConfig 以補回
+    if [ "$CHANGED_ROUTERCONFIG" -eq 0 ] && \
+       [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
+       [ ! -f /etc/myscript/.hitron-pf.json ]; then
+        log "  ⚠️ .hitron-pf.json 缺失，強制視為 RouterConfig 變更以補回"
+        CHANGED_ROUTERCONFIG=1
+    fi
 
     # 如果沒有任何變更，退出
     if [ $CHANGED_NETWORK -eq 0 ] && [ $CHANGED_DHCP -eq 0 ] && [ $CHANGED_PBR -eq 0 ] && \
