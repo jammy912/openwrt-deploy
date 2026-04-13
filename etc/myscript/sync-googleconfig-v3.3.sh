@@ -154,6 +154,12 @@ check_md5_changed() {
     fi
 
     if [ "$current_md5" = "$previous_md5" ]; then
+        # .hitron-pf.json 缺失時強制處理 (非 client)
+        local _role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
+        if [ "$_role" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ]; then
+            log "🔄 MD5 相同但 .hitron-pf.json 缺失，強制處理"
+            return 0
+        fi
         log "ℹ️  配置文件未變化，跳過處理"
         return 1
     else
