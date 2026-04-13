@@ -13,8 +13,8 @@
 #     --wifi-key "mywifikey" \
 #     --iot-key "myiotkey" \
 #     --ssid "RAX3000Z" \
-#     --channel "149" \
 #     --country "TW" \
+# 註: 5G 頻道由 auto-role.sh 依角色/mesh 狀態動態套用，不再由 CLI 指定
 #     --encryption "psk2" \
 #     --tdx-id "TDX_APP_ID" \
 #     --tdx-key "TDX_APP_KEY"
@@ -40,7 +40,6 @@ ARG_IV=""
 ARG_WIFI_KEY=""
 ARG_IOT_KEY=""
 ARG_SSID=""
-ARG_CHANNEL=""
 ARG_COUNTRY=""
 ARG_ENCRYPTION=""
 ARG_TDX_ID=""
@@ -59,7 +58,6 @@ while [ $# -gt 0 ]; do
         --wifi-key)   ARG_WIFI_KEY="$2"; shift ;;
         --iot-key)    ARG_IOT_KEY="$2"; shift ;;
         --ssid)       ARG_SSID="$2"; shift ;;
-        --channel)    ARG_CHANNEL="$2"; shift ;;
         --country)    ARG_COUNTRY="$2"; shift ;;
         --encryption) ARG_ENCRYPTION="$2"; shift ;;
         --tdx-id)     ARG_TDX_ID="$2"; shift ;;
@@ -250,6 +248,10 @@ if [ "$MESH_ROLE" != "client" ]; then
     echo -n "$MESH_PRIORITY" > /etc/myscript/.mesh_priority
     echo "  優先權: $MESH_PRIORITY"
 fi
+
+# Mesh 啟停預設 (首次部署時寫入，之後由 Google Sheet 同步覆蓋)
+[ ! -f /etc/myscript/.mesh_wireless ] && echo -n "Y" > /etc/myscript/.mesh_wireless
+[ ! -f /etc/myscript/.mesh_wired ]    && echo -n "Y" > /etc/myscript/.mesh_wired
 
 # =====================
 # 1. 安裝必要套件
@@ -885,10 +887,10 @@ echo "   同步時會自動寫入 /etc/myscript/.secrets/pushkey.<名稱>"
 # =====================
 echo ""
 if [ "$AUTO_MODE" = "1" ]; then
-    export AUTO_MODE ARG_WIFI_KEY ARG_IOT_KEY ARG_SSID ARG_CHANNEL ARG_COUNTRY ARG_ENCRYPTION MESH_ROLE
+    export AUTO_MODE ARG_WIFI_KEY ARG_IOT_KEY ARG_SSID ARG_COUNTRY ARG_ENCRYPTION MESH_ROLE
     sh "$DEPLOY_DIR/wifi-setup.sh"
 else
-    printf "${C_PROMPT}是否設定 WiFi (SSID/密碼/頻道)？(y/n) [y]: ${C_RESET}"
+    printf "${C_PROMPT}是否設定 WiFi (SSID/密碼)？(y/n) [y]: ${C_RESET}"
     read -r setup_wifi < /dev/tty
     setup_wifi="${setup_wifi:-y}"
     case "$setup_wifi" in
