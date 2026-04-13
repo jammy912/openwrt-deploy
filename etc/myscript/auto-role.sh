@@ -626,6 +626,76 @@ if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
     fi
 fi
 
+# =====================
+# 7.5 5G 頻道政策
+#   - mesh radio (同 radio 下有 mode=mesh 介面) 且 mesh_wireless=Y → 固定 149
+#   - 其他 5G radio (client AP):
+#       主gw / client → channel=auto, channels='36 40 48'       (低頻段)
+#       副gw          → channel=auto, channels='149 153 157 161 165' (高頻段)
+# =====================
+apply_5g_channel_policy() {
+    local gw_type="$1"          # 主gw / 副gw / client
+    local mesh_wireless="$2"    # Y / N
+    local ap_channel="auto" ap_channels
+    # 非 DFS 頻段 (台灣): 低頻 36/40/44/48、高頻 149/153/157/161/165
+    case "$gw_type" in
+        副gw) ap_channels="149 153 157 161 165" ;;
+        *)    ap_channels="36 40 44 48" ;;
+    esac
+
+    local radio band has_mesh mesh_disabled tgt_ch tgt_chs cur_ch cur_chs
+    for radio in radio0 radio1 radio2 radio3; do
+        band=$(uci get wireless.$radio.band 2>/dev/null)
+        [ "$band" != "5g" ] && continue
+
+        # 該 radio 是否為 mesh radio (有 mode=mesh 的介面綁在上面)
+        has_mesh=0
+        mesh_disabled=1
+        for iface in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface/ {print $2}'); do
+            [ "$(uci get wireless.$iface.device 2>/dev/null)" = "$radio" ] || continue
+            [ "$(uci get wireless.$iface.mode 2>/dev/null)" = "mesh" ] || continue
+            has_mesh=1
+            [ "$(uci get wireless.$iface.disabled 2>/dev/null)" = "1" ] || mesh_disabled=0
+        done
+
+        if [ "$has_mesh" = "1" ] && [ "$mesh_wireless" = "Y" ] && [ "$mesh_disabled" = "0" ]; then
+            tgt_ch="149"; tgt_chs=""
+        else
+            tgt_ch="$ap_channel"; tgt_chs="$ap_channels"
+        fi
+
+        cur_ch=$(uci get wireless.$radio.channel 2>/dev/null)
+        cur_chs=$(uci get wireless.$radio.channels 2>/dev/null)
+
+        if [ "$cur_ch" != "$tgt_ch" ]; then
+            uci set wireless.$radio.channel="$tgt_ch"
+            NEED_WIFI_RELOAD=1
+            log "[channel-policy] $radio channel: $cur_ch -> $tgt_ch"
+        fi
+        if [ "$cur_chs" != "$tgt_chs" ]; then
+            if [ -n "$tgt_chs" ]; then
+                uci set wireless.$radio.channels="$tgt_chs"
+            else
+                uci delete wireless.$radio.channels 2>/dev/null
+            fi
+            NEED_WIFI_RELOAD=1
+            log "[channel-policy] $radio channels: [$cur_chs] -> [$tgt_chs]"
+        fi
+    done
+
+    [ "$NEED_WIFI_RELOAD" = "1" ] && uci commit wireless
+}
+
+# 決定 GW_TYPE (line 677 才最終定，這裡用同邏輯提早算)
+if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
+    _GW_TYPE_FOR_CH="主gw"
+elif [ "$NEW_ROLE" = "gateway" ]; then
+    _GW_TYPE_FOR_CH="副gw"
+else
+    _GW_TYPE_FOR_CH="client"
+fi
+apply_5g_channel_policy "$_GW_TYPE_FOR_CH" "$WANT_WIRELESS"
+
 [ "$NEED_WIFI_RELOAD" = "1" ] && wifi reload
 
 # 更新當前身份
