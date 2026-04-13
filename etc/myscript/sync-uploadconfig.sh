@@ -157,6 +157,16 @@ main() {
     # -------------------------------------------------
     HITRON_PF_COUNT=0
     _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
+    _hcool=/tmp/.hitron_cooldown
+    if [ "$_role" != "client" ] && [ -f "$_hcool" ]; then
+        _age=$(( $(date +%s) - $(date -r "$_hcool" +%s 2>/dev/null || echo 0) ))
+        if [ "$_age" -lt 300 ]; then
+            log "⏭️ Hitron cooldown (${_age}s < 300s)，跳過"
+            _role="client"  # 用這招跳過下面的區塊
+        else
+            rm -f "$_hcool"
+        fi
+    fi
     if [ "$_role" != "client" ]; then
         log "🔁 抓取 Hitron port forward..."
         _hck=/tmp/.hitron_up_ck.$$
@@ -190,6 +200,7 @@ main() {
         fi
         rm -f "$_hck"
         if [ "$_ok" != "1" ]; then
+            touch "$_hcool"  # 失敗 → 進 cooldown 300 秒，避免觸發 Hitron LoginProtect
             push_notify "UploadConfig_HitronFailed"
         fi
     fi
