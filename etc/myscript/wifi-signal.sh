@@ -205,8 +205,19 @@ BATMAN_ENABLED=0
 BATMAN_LOCAL_MACS=""
 if ip link show bat0 >/dev/null 2>&1; then
     BATMAN_ENABLED=1
-    BATMAN_LOCAL_MACS=$(batctl meshif bat0 tl 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-z' 'A-Z' | sort -u | tr '\n' ' ')
-    log "[BATMAN] 偵測到 bat0 介面，本機客戶端 MAC: ${BATMAN_LOCAL_MACS:-無}"
+    # BATMAN tl 只列「透過 bat0 加入 mesh」的客戶端；
+    # 實務上 AP 介面多半掛 br-lan (非 bat0)，本機 AP 客戶端不會進 TT，
+    # 故聯集本機 iwinfo assoclist (hostapd 即時回報) 補足
+    _bat_tl=$(batctl meshif bat0 tl 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')
+    _iw_local=""
+    for _ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+        _mode=$(iw dev "$_ifc" info 2>/dev/null | awk '/type/{print $2; exit}')
+        [ "$_mode" = "AP" ] || continue
+        _iw_local="$_iw_local
+$(iwinfo "$_ifc" assoclist 2>/dev/null | grep -oE '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')"
+    done
+    BATMAN_LOCAL_MACS=$(printf '%s\n%s\n' "$_bat_tl" "$_iw_local" | grep -E '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-z' 'A-Z' | sort -u | tr '\n' ' ')
+    log "[BATMAN] 偵測到 bat0 介面，本機客戶端 MAC (tl∪iwinfo): ${BATMAN_LOCAL_MACS:-無}"
 else
     log "[BATMAN] 未偵測到 bat0 介面，使用標準模式"
 fi
