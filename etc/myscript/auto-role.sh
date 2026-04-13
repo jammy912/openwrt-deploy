@@ -474,7 +474,9 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         # 恢復 dnsmasq 指向 AGH (從 client 切回時需要)
         if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" != "1" ]; then
             uci set dhcp.@dnsmasq[0].noresolv='1'
-            uci set dhcp.@dnsmasq[0].server='127.0.0.1#53535'
+            # server 是 list 不是 option，必須用 add_list (否則 dnsmasq.conf 不帶 upstream)
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#53535'
             uci commit dhcp
             # 等 AGH listen 53535 再 restart dnsmasq，避免 dnsmasq 標記 upstream dead → REFUSED
             for _i in 1 2 3 4 5 6 7 8 9 10; do
