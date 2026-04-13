@@ -181,7 +181,7 @@ main() {
                     log "  ❌ Hitron PF 讀取失敗: $_pf"
                 fi
                 # 登出釋放 session
-                curl -s -b "$_hck" -X POST "$_hitron/logout" -d "data=byebye" -o /dev/null --max-time 5
+                curl -s -b "$_hck" -X POST "$_hitron/goform/logout" -d "data=byebye" -o /dev/null --max-time 5
             else
                 log "  ❌ Hitron 登入失敗: $_resp"
             fi

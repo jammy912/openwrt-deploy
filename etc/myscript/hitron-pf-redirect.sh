@@ -27,7 +27,7 @@ LOG=/tmp/hitron-pf.log
 
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 cleanup() {
-    [ -f "$CK" ] && curl -s -b "$CK" -X POST "$HITRON/logout" -d "data=byebye" -o /dev/null 2>/dev/null
+    [ -f "$CK" ] && curl -s -b "$CK" -X POST "$HITRON/goform/logout" -d "data=byebye" -o /dev/null 2>/dev/null
     rm -f "$CK"
 }
 trap cleanup EXIT
