@@ -470,8 +470,13 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
             uci set dhcp.@dnsmasq[0].noresolv='1'
             uci set dhcp.@dnsmasq[0].server='127.0.0.1#53535'
             uci commit dhcp
+            # 等 AGH listen 53535 再 restart dnsmasq，避免 dnsmasq 標記 upstream dead → REFUSED
+            for _i in 1 2 3 4 5 6 7 8 9 10; do
+                netstat -lnu 2>/dev/null | grep -q ":53535 " && break
+                sleep 1
+            done
             /etc/init.d/dnsmasq restart
-            log "dnsmasq: 恢復 AGH 轉發 (主 gateway)"
+            log "dnsmasq: 恢復 AGH 轉發 (主 gateway, 等 AGH ready ${_i}s)"
         fi
         # 開啟 IOT WiFi
         IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
