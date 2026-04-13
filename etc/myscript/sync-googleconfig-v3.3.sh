@@ -363,7 +363,12 @@ main() {
 
     # 下載並解密
     log "下載並解密配置..."
+    local _role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
     if [ "$DUMP_ONLY" = "1" ]; then
+        local dl_url="$URL"
+    elif [ "$_role" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ]; then
+        # .hitron-pf.json 缺失: 不帶 md5，強制 server 回完整 payload 以補回
+        log "  ℹ️ .hitron-pf.json 缺失，不帶 md5 強制下載"
         local dl_url="$URL"
     else
         local dl_url="$URL&md5=$(cat "$MD5_FILE" 2>/dev/null)"
