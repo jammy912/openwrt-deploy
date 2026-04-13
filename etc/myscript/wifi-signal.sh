@@ -205,7 +205,7 @@ BATMAN_ENABLED=0
 BATMAN_LOCAL_MACS=""
 if ip link show bat0 >/dev/null 2>&1; then
     BATMAN_ENABLED=1
-    BATMAN_LOCAL_MACS=$(batctl meshif bat0 tl 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr '[:lower:]' '[:upper:]' | sort -u | tr '\n' ' ')
+    BATMAN_LOCAL_MACS=$(batctl meshif bat0 tl 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-z' 'A-Z' | sort -u | tr '\n' ' ')
     log "[BATMAN] 偵測到 bat0 介面，本機客戶端 MAC: ${BATMAN_LOCAL_MACS:-無}"
 else
     log "[BATMAN] 未偵測到 bat0 介面，使用標準模式"
@@ -248,7 +248,7 @@ get_monitored_macs() {
     # 來源三：根據監控模式，決定是否從 ARP 表獲取所有無線裝置
     if [ "$MONITOR_MODE" -eq 1 ]; then
         log "[動態監控] 啟用廣泛模式，掃描 ARP 表"
-        local wireless_macs=$(cat /proc/net/arp 2>/dev/null | awk '$3 == "0x2" {print $4}' | tr '[:lower:]' '[:upper:]')
+        local wireless_macs=$(cat /proc/net/arp 2>/dev/null | awk '$3 == "0x2" {print $4}' | tr 'a-z' 'A-Z')
         final_macs="$final_macs $wireless_macs"
     else
         log "[動態監控] 啟用嚴格模式，僅監控符合關鍵字 '$DEVICE_KEYWORDS' 的裝置"
@@ -282,7 +282,8 @@ HEARING_MAP_JSON=""
 hm_lookup_mac() {
     local mac="$1"
     local lc_mac
-    lc_mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+    # busybox tr 對 '[:upper:]' 支援不一致，改用明確範圍
+    lc_mac=$(echo "$mac" | tr 'A-Z' 'a-z')
     echo "$HEARING_MAP_JSON" | awk -v target="$lc_mac" '
         BEGIN { in_mac=0; depth=0; current_key=""; local_sig=""; max_remote=""; found_local=0; found_remote=0 }
         {
@@ -389,7 +390,7 @@ get_clients_on_radio() {
             if iwinfo "$interface" info >/dev/null 2>&1; then
                 iwinfo "$interface" assoclist 2>/dev/null
             fi
-        done | grep -oE "([0-9A-F]{2}:){5}[0-9A-F]{2}" | tr '[:lower:]' '[:upper:]' | sort -u | tr '\n' ' '
+        done | grep -oE "([0-9A-F]{2}:){5}[0-9A-F]{2}" | tr 'a-z' 'A-Z' | sort -u | tr '\n' ' '
     )
 
     # BATMAN 啟用時僅保留本機客戶端
