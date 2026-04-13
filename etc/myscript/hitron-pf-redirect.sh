@@ -45,7 +45,7 @@ fi
 
 # 修改 wg* 開頭規則的 localIpAddr
 NEW=$(echo "$RULES" | jq --arg ip "$TARGET_IP" '
-    map(if (.appName | test("^wg"; "i")) then .localIpAddr = $ip else . end)
+    map(if (.appName | ascii_downcase | startswith("wg")) then .localIpAddr = $ip else . end)
 ')
 if [ -z "$NEW" ] || ! echo "$NEW" | grep -q '^\['; then
     log "[ERROR] jq 處理失敗"
@@ -62,7 +62,7 @@ if [ "$OLD_HASH" = "$NEW_HASH" ]; then
 fi
 
 # 列出將被修改的規則
-echo "$NEW" | jq -r '.[] | select(.appName | test("^wg"; "i")) | "  \(.appName): \(.pubStart) -> \(.localIpAddr):\(.priStart) (\(.protocal))"' | while read line; do
+echo "$NEW" | jq -r '.[] | select(.appName | ascii_downcase | startswith("wg")) | "  \(.appName): \(.pubStart) -> \(.localIpAddr):\(.priStart) (\(.protocal))"' | while read line; do
     log "[CHANGE]$line"
 done
 
