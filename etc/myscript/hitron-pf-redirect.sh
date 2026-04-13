@@ -75,12 +75,6 @@ if [ -z "$NEW_COUNT" ] || [ "$NEW_COUNT" -lt "$OLD_COUNT" ]; then
     exit 1
 fi
 
-# 備份
-BK_DIR=/etc/myscript/hitron-pf-backup
-mkdir -p "$BK_DIR"
-echo "$RULES" > "$BK_DIR/rules-$(date +%Y%m%d-%H%M%S).json"
-ls -1t "$BK_DIR"/rules-*.json 2>/dev/null | tail -n +11 | xargs -r rm -f
-
 # 條數檢查 (防截斷)
 OLD_COUNT=$(echo "$RULES" | jq 'length' 2>/dev/null)
 NEW_COUNT=$(echo "$NEW" | jq 'length' 2>/dev/null)
