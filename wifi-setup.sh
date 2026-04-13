@@ -58,22 +58,11 @@ for radio in $RADIO_LIST; do
     # 確保 radio 啟用
     uci set wireless.$radio.disabled='0'
 
-    # 頻道
+    # 頻道: 先給安全預設 (非 DFS)；實際值由 auto-role.sh 依角色/mesh 狀態套用
     case "$band" in
-        5g) ch_default="149" ;;
-        *)  ch_default="auto" ;;
+        5g) uci set wireless.$radio.channel='149' ;;
+        *)  uci set wireless.$radio.channel='auto' ;;
     esac
-    if [ "$AUTO_MODE" = "1" ]; then
-        channel="${ARG_CHANNEL:-$ch_default}"
-    else
-        echo "  頻道: auto=自動選擇, 或指定數字"
-        echo "    2.4G 常用: 1, 6, 11"
-        echo "    5G 常用: 36, 40, 44, 48, 149, 153, 157, 161"
-        printf "${C_PROMPT}  頻道 [$ch_default]: ${C_RESET}"
-        read -r channel < /dev/tty
-        channel="${channel:-$ch_default}"
-    fi
-    uci set wireless.$radio.channel="$channel"
 
     # 發射功率
     uci set wireless.$radio.txpower='5'
