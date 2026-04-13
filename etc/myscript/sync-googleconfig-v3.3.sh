@@ -1243,6 +1243,11 @@ NFTEOF
     # client 不處理 RouterConfig（WG/DDNS 是 gateway 專屬）
     # =====================================================
     DEVICE_ROLE=$(cat /etc/myscript/.mesh_role 2>/dev/null)
+    # 非 client 時，若 .hitron-pf.json 缺失，強制跑 restore 補回
+    if [ "$DEVICE_ROLE" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ] && [ $CHANGED_ROUTERCONFIG -eq 0 ]; then
+        log "  ℹ️ .hitron-pf.json 缺失，強制處理 RouterConfig 以補回"
+        CHANGED_ROUTERCONFIG=1
+    fi
     if [ "$DEVICE_ROLE" = "client" ]; then
         log "  ℹ️ Client 角色，跳過 RouterConfig"
     elif [ $CHANGED_ROUTERCONFIG -eq 1 ]; then
