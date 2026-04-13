@@ -153,6 +153,48 @@ main() {
     fi
 
     # -------------------------------------------------
+    # 2.5 抓 Hitron CGN5-AP port forward (gateway 才跑)
+    # -------------------------------------------------
+    HITRON_PF_COUNT=0
+    _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
+    if [ "$_role" != "client" ]; then
+        log "🔁 抓取 Hitron port forward..."
+        _hck=/tmp/.hitron_up_ck.$$
+        _hitron=http://192.168.168.1
+        _huser=admin
+        _hpass=password
+        _ok=0
+        if curl -s -c "$_hck" "$_hitron/login.html" -o /dev/null --connect-timeout 5 --max-time 10; then
+            _resp=$(curl -s -b "$_hck" -c "$_hck" -X POST "$_hitron/goform/login" \
+                -d "usr=$_huser&pwd=$_hpass&preSession=" --max-time 10)
+            if [ "$_resp" = "success" ]; then
+                _pf=$(curl -s -b "$_hck" "$_hitron/data/getForwardingRules.asp" --max-time 10)
+                if echo "$_pf" | grep -q '^\['; then
+                    HITRON_PF_COUNT=$(echo "$_pf" | tr ',' '\n' | grep -c '"appName"')
+                    _b64=$(printf '%s' "$_pf" | base64 -w0 2>/dev/null || printf '%s' "$_pf" | base64 | tr -d '\n')
+                    [ -s "$TMP_PLAIN" ] && echo "" >> "$TMP_PLAIN"
+                    echo "config HITRON 'port_forward'" >> "$TMP_PLAIN"
+                    echo "        option data '$_b64'" >> "$TMP_PLAIN"
+                    log "  ✅ Hitron PF: ${HITRON_PF_COUNT} 條 (base64: ${#_b64} bytes)"
+                    _ok=1
+                else
+                    log "  ❌ Hitron PF 讀取失敗: $_pf"
+                fi
+                # 登出釋放 session
+                curl -s -b "$_hck" -X POST "$_hitron/logout" -d "data=byebye" -o /dev/null --max-time 5
+            else
+                log "  ❌ Hitron 登入失敗: $_resp"
+            fi
+        else
+            log "  ❌ Hitron 連線失敗"
+        fi
+        rm -f "$_hck"
+        if [ "$_ok" != "1" ]; then
+            push_notify "UploadConfig_HitronFailed"
+        fi
+    fi
+
+    # -------------------------------------------------
     # 3. 驗證提取結果
     # -------------------------------------------------
     if [ ! -s "$TMP_PLAIN" ]; then
@@ -229,7 +271,7 @@ main() {
         log "  ✅ 上傳成功 (HTTP $HTTP_CODE)"
         log "  📝 回應: $RESP"
         echo "$NEW_HASH" > "$HASH_FILE"
-        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT}"
+        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} HitronPF:${HITRON_PF_COUNT}"
     else
         RESP=$(cat /tmp/uploadconfig_resp.txt 2>/dev/null)
         log "  ❌ 上傳失敗 (HTTP $HTTP_CODE)"

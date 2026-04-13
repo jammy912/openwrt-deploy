@@ -183,8 +183,14 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
     LAN_MODE="static"
     log "主 gateway (priority=$MY_PRI)"
     # 將 Hitron port forward wg* 規則指向本機 WAN IP
-    [ -x /etc/myscript/hitron-pf-redirect.sh ] && \
-        /etc/myscript/hitron-pf-redirect.sh >/dev/null 2>&1 &
+    # 優先用 Google 拉下來的快照整包覆蓋 (含 58U-wg1 等所有規則)
+    if [ -x /etc/myscript/hitron-pf-redirect.sh ]; then
+        if [ -f /etc/myscript/.hitron-pf.json ]; then
+            /etc/myscript/hitron-pf-redirect.sh --apply-from /etc/myscript/.hitron-pf.json >/dev/null 2>&1 &
+        else
+            /etc/myscript/hitron-pf-redirect.sh >/dev/null 2>&1 &
+        fi
+    fi
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 關閉 DHCP (client 透過 bat0/br-lan 直接拿主 gw 的 DHCP)
     DHCP_ACTION="off"

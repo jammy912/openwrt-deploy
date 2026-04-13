@@ -1370,6 +1370,27 @@ NFTEOF
                         log "  ✅ DDNS 服務已還原 (${DDNS_RESTORED} 個)"
                     fi
                     rm -f "$TMP_RC_DDNS"
+
+                    # --- 抽取 Hitron port forward ---
+                    HITRON_PF_FILE="/etc/myscript/.hitron-pf.json"
+                    _hp_b64=$(awk "/^config HITRON/{f=1;next} /^config /{f=0} f && /option data/{print; exit}" "$TMP_RC_PLAIN" \
+                        | sed "s/.*'\(.*\)'.*/\1/")
+                    if [ -n "$_hp_b64" ]; then
+                        _hp_new=$(printf '%s' "$_hp_b64" | base64 -d 2>/dev/null)
+                        if echo "$_hp_new" | grep -q '^\['; then
+                            _hp_old=$(cat "$HITRON_PF_FILE" 2>/dev/null)
+                            if [ "$_hp_new" = "$_hp_old" ]; then
+                                log "  ⏭️ Hitron PF 與本地相同，不更新 $HITRON_PF_FILE"
+                            else
+                                printf '%s' "$_hp_new" > "$HITRON_PF_FILE"
+                                chmod 600 "$HITRON_PF_FILE"
+                                _hp_cnt=$(echo "$_hp_new" | tr ',' '\n' | grep -c '"appName"')
+                                log "  ✅ Hitron PF 已更新 ($_hp_cnt 條) → $HITRON_PF_FILE"
+                            fi
+                        else
+                            log "  ⚠️ Hitron PF base64 解碼後非合法 JSON array，跳過"
+                        fi
+                    fi
                 else
                     log "  [DRY-RUN] 模擬還原 WG 介面和 DDNS 設定"
                     _wg_cnt=$(grep -c "^config interface 'wg[0-9]" "$TMP_RC_PLAIN" 2>/dev/null || echo 0)
