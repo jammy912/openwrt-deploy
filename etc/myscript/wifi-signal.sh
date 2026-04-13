@@ -289,8 +289,9 @@ hm_lookup_mac() {
             line=$0
             lc=tolower(line)
             if (in_mac==0) {
-                if (index(lc, "\"" target "\"") > 0 && index(line, "{") > 0) {
-                    in_mac=1; depth=1
+                if (match(lc, /"([0-9a-f]{2}:){5}[0-9a-f]{2}"[[:space:]]*:[[:space:]]*\{/)) {
+                    m=substr(lc, RSTART+1, 17)
+                    if (m == target) { in_mac=1; depth=1 }
                 }
                 next
             }
