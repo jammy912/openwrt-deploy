@@ -122,10 +122,9 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-# 手動 urlencode model (busybox curl 的 --data-urlencode 遇換行可能截斷)
-NEW_ENC=$(printf '%s' "$NEW" | od -An -tx1 -v | tr -d ' \n' | sed 's/../%&/g')
+# NEW 是 jq -c 單行輸出，--data-urlencode 可正常處理
 RESP=$(curl -s -b "$CK" -X POST "$HITRON/goform/PfwCollection" \
-    --data "model=$NEW_ENC" \
+    --data-urlencode "model=$NEW" \
     --data-urlencode "CsrfToken=$TOKEN" \
     -d "CsrfTokenFlag=0")
 log "[INFO] PfwCollection 回應: ${RESP:-<空>}"
