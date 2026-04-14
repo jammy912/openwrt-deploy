@@ -206,6 +206,21 @@ main() {
     fi
 
     # -------------------------------------------------
+    # 2.6 提取 TDX API 憑證 (tdx.appid / tdx.appkey)
+    # -------------------------------------------------
+    TDX_COUNT=0
+    _tdx_id=$(cat "$SECRET_DIR/tdx.appid" 2>/dev/null)
+    _tdx_key=$(cat "$SECRET_DIR/tdx.appkey" 2>/dev/null)
+    if [ -n "$_tdx_id" ] && [ -n "$_tdx_key" ]; then
+        [ -s "$TMP_PLAIN" ] && echo "" >> "$TMP_PLAIN"
+        echo "config TDX 'credentials'" >> "$TMP_PLAIN"
+        echo "        option appid '$_tdx_id'" >> "$TMP_PLAIN"
+        echo "        option appkey '$_tdx_key'" >> "$TMP_PLAIN"
+        TDX_COUNT=1
+        log "  ✅ TDX 憑證已納入"
+    fi
+
+    # -------------------------------------------------
     # 3. 驗證提取結果
     # -------------------------------------------------
     if [ ! -s "$TMP_PLAIN" ]; then
@@ -282,7 +297,7 @@ main() {
         log "  ✅ 上傳成功 (HTTP $HTTP_CODE)"
         log "  📝 回應: $RESP"
         echo "$NEW_HASH" > "$HASH_FILE"
-        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} HitronPF:${HITRON_PF_COUNT}"
+        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} HitronPF:${HITRON_PF_COUNT} TDX:${TDX_COUNT}"
     else
         RESP=$(cat /tmp/uploadconfig_resp.txt 2>/dev/null)
         log "  ❌ 上傳失敗 (HTTP $HTTP_CODE)"

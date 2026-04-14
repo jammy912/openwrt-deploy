@@ -36,8 +36,10 @@ push_notify() {
     local key
     local full_msg="${HOSTNAME}$msg"
 
-    # 支援逗號或空白分隔的多個 key
-    for key in ${PUSH_KEYS//,/ }; do
+    # 支援逗號、分號或空白分隔的多個 key
+    local _keys_norm="${PUSH_KEYS//,/ }"
+    _keys_norm="${_keys_norm//;/ }"
+    for key in $_keys_norm; do
         # PushDeer key 偵測 (以 PD 開頭)
         if echo "$key" | grep -qE '^PD'; then
             curl -s --connect-timeout 5 --max-time 10 \

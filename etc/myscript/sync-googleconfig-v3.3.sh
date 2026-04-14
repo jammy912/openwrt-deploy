@@ -1414,6 +1414,25 @@ NFTEOF
                             log "  ⚠️ Hitron PF base64 解碼後非合法 JSON array，跳過"
                         fi
                     fi
+
+                    # --- 還原 TDX API 憑證 ---
+                    TDX_SECRET_DIR="/etc/myscript/.secrets"
+                    _tdx_id=$(awk "/^config TDX/{f=1;next} /^config /{f=0} f && /option appid/{print; exit}" "$TMP_RC_PLAIN" \
+                        | sed "s/.*'\(.*\)'.*/\1/")
+                    _tdx_key=$(awk "/^config TDX/{f=1;next} /^config /{f=0} f && /option appkey/{print; exit}" "$TMP_RC_PLAIN" \
+                        | sed "s/.*'\(.*\)'.*/\1/")
+                    if [ -n "$_tdx_id" ] && [ -n "$_tdx_key" ]; then
+                        mkdir -p "$TDX_SECRET_DIR"
+                        _tdx_id_old=$(cat "$TDX_SECRET_DIR/tdx.appid" 2>/dev/null)
+                        _tdx_key_old=$(cat "$TDX_SECRET_DIR/tdx.appkey" 2>/dev/null)
+                        if [ "$_tdx_id" = "$_tdx_id_old" ] && [ "$_tdx_key" = "$_tdx_key_old" ]; then
+                            log "  ⏭️ TDX 憑證與本地相同，不更新"
+                        else
+                            printf '%s' "$_tdx_id"  > "$TDX_SECRET_DIR/tdx.appid";  chmod 600 "$TDX_SECRET_DIR/tdx.appid"
+                            printf '%s' "$_tdx_key" > "$TDX_SECRET_DIR/tdx.appkey"; chmod 600 "$TDX_SECRET_DIR/tdx.appkey"
+                            log "  ✅ TDX 憑證已還原 → $TDX_SECRET_DIR/tdx.{appid,appkey}"
+                        fi
+                    fi
                 else
                     log "  [DRY-RUN] 模擬還原 WG 介面和 DDNS 設定"
                     _wg_cnt=$(grep -c "^config interface 'wg[0-9]" "$TMP_RC_PLAIN" 2>/dev/null || echo 0)
