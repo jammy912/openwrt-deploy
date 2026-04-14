@@ -45,7 +45,7 @@ ENABLE_LOG=1            # 1 為啟用日誌, 0 為停用
 RSSI_KICK_5G=""         # 5G 信號低於此值(dBm)踢掉客戶端，空值=不啟用 (如 -75)
 RSSI_KICK_2G=""         # 2.4G 信號低於此值(dBm)踢掉客戶端，空值=不啟用 (如 -75)
 KICK_COOLDOWN=""        # 踢除後冷卻時間(分鐘)，冷卻期內同一MAC不再踢，空值=不限制
-USE_HEARING_MAP="N"     # [新增] Y=引入 usteer hearing map 作為訊號檢測基準並做 AP 擇強 (強制 MONITOR_MODE=0); N=原行為
+USE_HEARING_MAP="0"     # [新增] 1=引入 usteer hearing map 作為訊號檢測基準並做 AP 擇強 (強制 MONITOR_MODE=0); 0=原行為
 MONITOR_MODE=1          # [V7.5 新增] 1=廣泛模式(Phone+ARP), 0=嚴格模式(僅關鍵字)
 DEVICE_KEYWORDS="Phone"  # DHCP 租約中要匹配的裝置名稱關鍵字，多個用分號分隔 (如 Phone;iPad;Laptop)
 
@@ -75,13 +75,12 @@ shift 9
 
 shift 8
 [ -n "$1" ] && KICK_COOLDOWN="$1"        # 第 18 個參數: 踢除冷卻時間(分鐘)
-[ -n "$2" ] && USE_HEARING_MAP="$2"      # 第 19 個參數: 使用 usteer hearing map (Y/N)
+[ -n "$2" ] && USE_HEARING_MAP="$2"      # 第 19 個參數: 使用 usteer hearing map (1/0)
 [ -n "$3" ] && MONITOR_MODE="$3"         # 第 20 個參數: 監控模式
 [ -n "$4" ] && DEVICE_KEYWORDS="$4"      # 第 21 個參數: 裝置名稱關鍵字
 
-# USE_HEARING_MAP=Y 時強制 MONITOR_MODE=0，避免把鄰居裝置納入監控
-if [ "$USE_HEARING_MAP" = "Y" ] || [ "$USE_HEARING_MAP" = "y" ]; then
-    USE_HEARING_MAP="Y"
+# USE_HEARING_MAP=1 時強制 MONITOR_MODE=0，避免把鄰居裝置納入監控
+if [ "$USE_HEARING_MAP" = "1" ]; then
     if [ "$MONITOR_MODE" != "0" ]; then
         MONITOR_MODE=0
     fi
@@ -282,7 +281,7 @@ else
 fi
 
 # =====================
-# [新增] usteer hearing map 快取 & 擇強過濾 (僅 USE_HEARING_MAP=Y 啟用)
+# [新增] usteer hearing map 快取 & 擇強過濾 (僅 USE_HEARING_MAP=1 啟用)
 # =====================
 HEARING_MAP_JSON=""
 
@@ -375,7 +374,7 @@ filter_by_hearing_map() {
     echo "$kept" | sed 's/^ //'
 }
 
-if [ "$USE_HEARING_MAP" = "Y" ]; then
+if [ "$USE_HEARING_MAP" = "1" ]; then
     HEARING_MAP_JSON=$(ubus call usteer get_clients 2>/dev/null)
     if [ -z "$HEARING_MAP_JSON" ]; then
         log "[HearingMap] ubus call usteer get_clients 無回應，本次不做擇強過濾"
@@ -420,9 +419,9 @@ get_clients_on_radio() {
 get_weakest_signal() {
     local radio_name="$1"
 
-    # [新增] USE_HEARING_MAP=Y 時，改用 hearing map 的本機節點訊號 (包含 probe-only 裝置)
+    # [新增] USE_HEARING_MAP=1 時，改用 hearing map 的本機節點訊號 (包含 probe-only 裝置)
     # 只計算對應 radio 的介面 (phy0=2.4G, phy1=5G)
-    if [ "$USE_HEARING_MAP" = "Y" ] && [ -n "$HEARING_MAP_JSON" ]; then
+    if [ "$USE_HEARING_MAP" = "1" ] && [ -n "$HEARING_MAP_JSON" ]; then
         local hm_prefix=""
         [ "$radio_name" = "radio0" ] && hm_prefix="hostapd.phy0"
         [ "$radio_name" = "radio1" ] && hm_prefix="hostapd.phy1"
