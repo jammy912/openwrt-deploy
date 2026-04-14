@@ -183,6 +183,21 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     fi
 fi
 
+# ARP DAD 防撞: 判定為主但自己還沒是 .1 → 用 arping -D (source 0.0.0.0) 探測
+# 若有別台 reply 且 MAC 不是自己 → 讓位為副，避免雙主
+if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ] && command -v arping >/dev/null 2>&1; then
+    CUR_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    if [ "$CUR_IP" != "192.168.1.1" ]; then
+        ARP_OUT=$(arping -c 2 -w 2 -D -I br-lan 192.168.1.1 2>&1)
+        MY_BRLAN_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
+        REMOTE_MAC=$(echo "$ARP_OUT" | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | tr 'A-Z' 'a-z' | grep -v "^${MY_BRLAN_MAC}$" | head -1)
+        if [ -n "$REMOTE_MAC" ]; then
+            IS_PRIMARY=0
+            log "ARP DAD: 192.168.1.1 已被 $REMOTE_MAC 佔用 (我 br-lan MAC=$MY_BRLAN_MAC)，讓位為副 gw"
+        fi
+    fi
+fi
+
 dbg "3.priority=$MY_PRI MAC=$MY_MAC IS_PRIMARY=$IS_PRIMARY"
 
 DHCP_ACTION=""  # server 或 off
