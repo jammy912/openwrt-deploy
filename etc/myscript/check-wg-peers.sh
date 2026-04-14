@@ -12,9 +12,7 @@
 
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}"
-HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
-[ -z "$HOSTNAME" ] && HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null)
-
+  
 WG_IFACE="${1:-wg1}"
 TIMEOUT="${2:-180}"
 STATE_DIR="/tmp"
