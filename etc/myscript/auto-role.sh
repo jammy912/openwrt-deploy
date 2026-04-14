@@ -345,6 +345,26 @@ else
 fi
 uci commit network
 
+# 副 gw 時關掉接 HUB 的那個 LAN port，避免與 batman backbone 形成 L2 迴圈
+# 可用 /etc/myscript/.hub_loop_port 自訂 (預設 lan3)；無此檔或內容空=停用
+HUB_LOOP_PORT=$(cat /etc/myscript/.hub_loop_port 2>/dev/null)
+[ -z "$HUB_LOOP_PORT" ] && HUB_LOOP_PORT="lan3"
+if [ -e "/sys/class/net/$HUB_LOOP_PORT" ]; then
+    if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "0" ]; then
+        CUR_OPER=$(cat /sys/class/net/$HUB_LOOP_PORT/operstate 2>/dev/null)
+        if [ "$CUR_OPER" != "down" ]; then
+            ip link set "$HUB_LOOP_PORT" down
+            log "副 gw: $HUB_LOOP_PORT 關閉 (防 HUB 繞包迴圈)"
+        fi
+    else
+        CUR_OPER=$(cat /sys/class/net/$HUB_LOOP_PORT/operstate 2>/dev/null)
+        if [ "$CUR_OPER" = "down" ]; then
+            ip link set "$HUB_LOOP_PORT" up
+            log "$HUB_LOOP_PORT 開啟 (role=$NEW_ROLE, primary=$IS_PRIMARY)"
+        fi
+    fi
+fi
+
 if [ "$NEED_RESTART_NET" = "1" ]; then
     # 用 ip addr 熱切換 LAN IP，避免 network restart 導致 WiFi 長時間斷線
     OLD_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
