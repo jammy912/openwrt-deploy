@@ -60,14 +60,14 @@ wg show "$WG_IFACE" latest-handshakes 2>/dev/null | while read pubkey hs_time; d
             # 有效 handshake → 在線
             if [ "$prev_state" != "online" ]; then
                 logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已連入"
-                push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已連入"
+                push_notify "$WG_IFACE: $peer_name 已連入"
             fi
             echo "${pubkey}|online" >> "$NEW_STATE_FILE"
         else
             # handshake 過期 → 離線
             if [ "$prev_state" = "online" ]; then
                 logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線 (${age}s)"
-                push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
+                push_notify "$WG_IFACE: $peer_name 已斷線"
             fi
             echo "${pubkey}|offline" >> "$NEW_STATE_FILE"
         fi
@@ -75,7 +75,7 @@ wg show "$WG_IFACE" latest-handshakes 2>/dev/null | while read pubkey hs_time; d
         # 從未握手
         if [ "$prev_state" = "online" ]; then
             logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
-            push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
+            push_notify "$WG_IFACE: $peer_name 已斷線"
         fi
         echo "${pubkey}|offline" >> "$NEW_STATE_FILE"
     fi
