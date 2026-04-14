@@ -76,14 +76,18 @@ fi
 # 如果有任何IP失败，发送通知
 if [ $failed_count -gt 0 ]; then
     if [ $failed_count -eq 3 ]; then
-        # 三个IP都失败 - 准备重启
-        log "⚠️ 警告：所有IP都无法连接！"
-        log "⚠️ 网络完全中断，准备重启路由器..."
-        push_notify "⚠️ 网络完全中断！所有DNS无法连接，路由器即将重启"
-
-        # 等待5秒，确保通知发送和日志写入
+        # 三个IP都失败 - 先等 30 秒再驗一次，避免瞬斷誤判
+        log "⚠️ 所有 IP 都失败，30 秒后重试确认..."
+        push_notify "⚠️ 网络异常：全部 DNS 失败，30秒后重试"
+        sleep 30
+        if check_ip "$IP1" || check_ip "$IP2" || check_ip "$IP3"; then
+            log "✅ 重试后至少一个恢复，取消重启"
+            push_notify "⚠️ 网络短暂中断但已恢复，未重启"
+            exit 0
+        fi
+        log "⚠️ 重试仍全失败，执行重启..."
+        push_notify "⚠️ 网络持续中断！路由器即将重启"
         sleep 5
-
         log "🔄 执行重启..."
         reboot
     else
