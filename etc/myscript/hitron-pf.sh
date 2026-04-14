@@ -1,12 +1,12 @@
 #!/bin/sh
-# hitron-pf-redirect.sh - 將 Hitron CGN5-AP wg* port forward 規則 localIpAddr
+# hitron-pf.sh - 將 Hitron CGN5-AP wg* port forward 規則 localIpAddr
 # 改指向本機 WAN IP (auto-role.sh 切主 gw 時呼叫)
 #
 # 用法:
-#   hitron-pf-redirect.sh                    從 Hitron 抓現有規則改 wg* IP 後寫回
-#   hitron-pf-redirect.sh --apply-from FILE  從 FILE 讀完整規則 (Google 拉下來的快照)
+#   hitron-pf.sh                    從 Hitron 抓現有規則改 wg* IP 後寫回
+#   hitron-pf.sh --apply-from FILE  從 FILE 讀完整規則 (Google 拉下來的快照)
 #                                            改 wg* IP 後 POST 覆蓋 Hitron
-#   hitron-pf-redirect.sh --dry-run          只 log 不寫入
+#   hitron-pf.sh --dry-run          只 log 不寫入
 
 HITRON=http://192.168.168.1
 USER=admin
