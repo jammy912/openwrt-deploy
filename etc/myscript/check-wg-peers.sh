@@ -12,7 +12,8 @@
 
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}"
-HOSTNAME=""
+HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
+[ -z "$HOSTNAME" ] && HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null)
 
 WG_IFACE="${1:-wg1}"
 TIMEOUT="${2:-180}"
@@ -58,23 +59,23 @@ wg show "$WG_IFACE" latest-handshakes 2>/dev/null | while read pubkey hs_time; d
         if [ "$age" -le "$TIMEOUT" ]; then
             # 有效 handshake → 在線
             if [ "$prev_state" != "online" ]; then
-                logger -t "check-wg" "$WG_IFACE: $peer_name 已連入"
-                push_notify "$WG_IFACE: $peer_name 已連入"
+                logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已連入"
+                push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已連入"
             fi
             echo "${pubkey}|online" >> "$NEW_STATE_FILE"
         else
             # handshake 過期 → 離線
             if [ "$prev_state" = "online" ]; then
-                logger -t "check-wg" "$WG_IFACE: $peer_name 已斷線 (${age}s)"
-                push_notify "$WG_IFACE: $peer_name 已斷線"
+                logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線 (${age}s)"
+                push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
             fi
             echo "${pubkey}|offline" >> "$NEW_STATE_FILE"
         fi
     else
         # 從未握手
         if [ "$prev_state" = "online" ]; then
-            logger -t "check-wg" "$WG_IFACE: $peer_name 已斷線"
-            push_notify "$WG_IFACE: $peer_name 已斷線"
+            logger -t "check-wg" "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
+            push_notify "[$HOSTNAME] $WG_IFACE: $peer_name 已斷線"
         fi
         echo "${pubkey}|offline" >> "$NEW_STATE_FILE"
     fi
