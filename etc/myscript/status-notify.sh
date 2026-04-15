@@ -1,7 +1,7 @@
 #!/bin/sh
 # 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G Tx-Power
 
-PUSH_NAMES="${PUSH_NAMES:-jammy}"
+PUSH_NAMES="${PUSH_NAMES:-admin}"
 . /etc/myscript/push_notify.inc
 
 cpu_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null \
