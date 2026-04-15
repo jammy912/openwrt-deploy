@@ -647,9 +647,25 @@ if [ "$WANT_WIRED" = "Y" ] && [ -z "$WIRE_DEV" ]; then
             done
             log "br-lan 移除 $WIRE_DEV (原: $CUR_PORTS)"
         fi
+        # 為 $WIRE_DEV 隨機生成 locally-administered MAC，避免與 br-lan MAC 同源
+        # 造成 batman 廣播繞回警告 (受 hostname 影響的穩定隨機，重開也不變)
+        NEW_MAC=$(hexdump -n5 -e '"02:" 4/1 "%02x:" 1/1 "%02x"' /dev/urandom)
+        # 建一個獨立 device section 設 macaddr
+        WIRE_DEV_IDX=""
+        _idx=0
+        while _name=$(uci -q get "network.@device[$_idx].name" 2>/dev/null); do
+            [ "$_name" = "$WIRE_DEV" ] && { WIRE_DEV_IDX=$_idx; break; }
+            _idx=$((_idx + 1))
+        done
+        if [ -z "$WIRE_DEV_IDX" ]; then
+            uci add network device >/dev/null
+            uci set "network.@device[-1].name=$WIRE_DEV"
+        fi
+        uci set "network.@device[${WIRE_DEV_IDX:--1}].macaddr=$NEW_MAC"
+        log "$WIRE_DEV 設定隨機 MAC: $NEW_MAC (防 batman 廣播繞回)"
         uci commit network
         NEED_RESTART_NET=1
-        push_notify "有線mesh啟用: $WIRE_DEV"
+        push_notify "有線mesh啟用: $WIRE_DEV (MAC=$NEW_MAC)"
         log "自動建立 batmesh_wire ($WIRE_DEV)"
         CHANGED=1
     fi
