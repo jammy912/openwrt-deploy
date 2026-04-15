@@ -14,14 +14,14 @@ agh_mem=$(awk '/VmRSS/{print int($2/1024)}' "/proc/${agh_pid}/status" 2>/dev/nul
 
 free_mem=$(free | awk 'NR==2{print int($4/1024)}')
 
-# 依 phy 的 frequency 判斷 band: 2=2.4G, 5=5G, 6=6G
+# 依 channel frequency 判斷 band: 2.xxx=2.4G, 5.xxx=5G, 6.xxx=6G
 get_band() {
-    f=$(iwinfo "$1" info 2>/dev/null | awk '/Frequency/{print $2; exit}')
+    f=$(iwinfo "$1" info 2>/dev/null | sed -n 's/.*Channel:.*(\([0-9]*\.[0-9]*\) GHz).*/\1/p' | head -1)
     case "$f" in
-        2*) echo "2G"  ;;
-        5*) echo "5G"  ;;
-        6*) echo "6G"  ;;
-        *)  echo ""    ;;
+        2.*) echo "2G" ;;
+        5.*) echo "5G" ;;
+        6.*) echo "6G" ;;
+        *)   echo ""   ;;
     esac
 }
 
@@ -29,13 +29,18 @@ get_pwr() {
     iwinfo "$1" info 2>/dev/null | awk '/Tx-Power/{print $2; exit}'
 }
 
-# 收集所有 AP iface 的 band/power
+# 列舉所有 wireless iface (type=AP) 的 band/power
 msg_radio=""
 seen_5g=0
-for iface in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do
+for vif in /sys/class/ieee80211/phy*/device/net/*; do
+    [ -e "$vif" ] || continue
+    iface=$(basename "$vif")
+    mode=$(iw dev "$iface" info 2>/dev/null | awk '/type /{print $2; exit}')
+    [ "$mode" = "AP" ] || continue
     band=$(get_band "$iface")
     pwr=$(get_pwr "$iface")
-    [ -z "$band" ] || [ -z "$pwr" ] && continue
+    [ -z "$band" ] && continue
+    [ -z "$pwr" ] && continue
     label="$band"
     if [ "$band" = "5G" ]; then
         seen_5g=$((seen_5g + 1))
@@ -43,5 +48,6 @@ for iface in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do
     fi
     msg_radio="${msg_radio} ${label}:${pwr}dBm"
 done
+[ -z "$msg_radio" ] && msg_radio=" (no radio)"
 
 push_notify "CPU: ${cpu_temp}°C AgH: ${agh_mem}MB | Free: ${free_mem}MB |${msg_radio}"
