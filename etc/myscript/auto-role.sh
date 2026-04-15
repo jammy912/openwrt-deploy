@@ -671,6 +671,19 @@ if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
     fi
 fi
 
+# br-lan 啟用 STP (避免 HUB/多條線造成 L2 迴圈)
+BRLAN_IDX=$(uci show network 2>/dev/null | awk -F'[][]' '/\.name=.br-lan./{print $2; exit}')
+if [ -n "$BRLAN_IDX" ]; then
+    CUR_STP=$(uci get "network.@device[$BRLAN_IDX].stp" 2>/dev/null)
+    if [ "$CUR_STP" != "1" ]; then
+        uci set "network.@device[$BRLAN_IDX].stp"='1'
+        uci commit network
+        NEED_RESTART_NET=1
+        log "br-lan STP 已啟用"
+        CHANGED=1
+    fi
+fi
+
 # =====================
 # 7.5 5G 頻道政策
 #   - mesh radio (同 radio 下有 mode=mesh 介面) 且 mesh_wireless=Y → 固定 149
