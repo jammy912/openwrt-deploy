@@ -29,14 +29,16 @@ get_pwr() {
     iwinfo "$1" info 2>/dev/null | awk '/Tx-Power/{print $2; exit}'
 }
 
-# 列舉所有 wireless iface (type=AP) 的 band/power
+# 每個 phy 只取一個 AP iface (避免重複)
 msg_radio=""
 seen_5g=0
-for vif in /sys/class/ieee80211/phy*/device/net/*; do
-    [ -e "$vif" ] || continue
-    iface=$(basename "$vif")
+seen_phy=""
+for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
     mode=$(iw dev "$iface" info 2>/dev/null | awk '/type /{print $2; exit}')
     [ "$mode" = "AP" ] || continue
+    phy=$(iw dev "$iface" info 2>/dev/null | awk '/wiphy /{print $2; exit}')
+    case " $seen_phy " in *" $phy "*) continue ;; esac
+    seen_phy="$seen_phy $phy"
     band=$(get_band "$iface")
     pwr=$(get_pwr "$iface")
     [ -z "$band" ] && continue
