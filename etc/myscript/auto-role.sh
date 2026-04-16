@@ -956,6 +956,14 @@ if [ "$GW_TYPE" = "主gw" ]; then
         if [ -n "$PEER_PRI" ]; then
             _sort_key="1"
             _merge_key="gw_pri${PEER_PRI}"
+        else
+            # 無 pri + 無 IP + locally-admin MAC → 視為 orphan，後處理合併到同類 gw
+            _first_byte=$(echo "$mac" | cut -d: -f1)
+            _byte_dec=$(printf '%d' "0x${_first_byte}" 2>/dev/null)
+            if [ -z "$PEER_IP" ] && [ -n "$_byte_dec" ] && [ $((_byte_dec & 2)) -eq 2 ]; then
+                _merge_key="_orphan_gw"
+                _sort_key="1"
+            fi
         fi
         # 格式: sort_key|merge_key|LINKS|LABEL|ROLE
         echo "${_sort_key}|${_merge_key}|${LINKS}|${PEER_LABEL}|${PEER_ROLE}" >> "${MESH_TMP}.unsorted"
@@ -965,22 +973,36 @@ if [ "$GW_TYPE" = "主gw" ]; then
         echo "├─(無鄰居)" >> "$MESH_TMP"
     elif [ -f "${MESH_TMP}.unsorted" ]; then
         # 合併同 merge_key: LINKS 聯集、LABEL 取有 IP 的那筆
+        # _orphan_gw 的 LINKS 再合併到任何 gw_pri* (通常只有一個)
         awk -F'|' '
             {
                 k=$2
                 if (!(k in seen)) { order[++n]=k; seen[k]=1; sort_key[k]=$1; role[k]=$5 }
-                # LINKS 聯集
                 split($3, parts, "+")
                 for (i in parts) if (parts[i]!="" && index(links[k], parts[i])==0) {
                     links[k] = (links[k]=="" ? parts[i] : links[k]"+"parts[i])
                 }
-                # LABEL: 優先選 IP 或 hostname(IP) 的那筆
                 if (label[k]=="" || ($4 ~ /^192\./ || $4 ~ /\(/) && !(label[k] ~ /^192\./ || label[k] ~ /\(/)) {
                     label[k] = $4
                 }
             }
             END {
-                for (i=1; i<=n; i++) { k=order[i]; print sort_key[k]"├─"links[k]"─"label[k]" "role[k] }
+                # 找第一個 gw_pri* key
+                gw_key=""
+                for (i=1; i<=n; i++) if (order[i] ~ /^gw_pri/) { gw_key=order[i]; break }
+                # 把 _orphan_gw 的 LINKS 併入 gw_key，然後從輸出移除
+                if (gw_key!="" && "_orphan_gw" in seen) {
+                    split(links["_orphan_gw"], parts, "+")
+                    for (i in parts) if (parts[i]!="" && index(links[gw_key], parts[i])==0) {
+                        links[gw_key] = (links[gw_key]=="" ? parts[i] : links[gw_key]"+"parts[i])
+                    }
+                    delete seen["_orphan_gw"]
+                }
+                for (i=1; i<=n; i++) {
+                    k=order[i]
+                    if (!(k in seen)) continue
+                    print sort_key[k]"├─"links[k]"─"label[k]" "role[k]
+                }
             }
         ' "${MESH_TMP}.unsorted" | sort | sed 's/^[12]//' >> "$MESH_TMP"
         rm -f "${MESH_TMP}.unsorted"
