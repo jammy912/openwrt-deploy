@@ -833,7 +833,7 @@ if [ "$AUTO_MODE" = "1" ]; then
     # 測試同步 (dry-run)
     echo ""
     echo "🧪 測試同步 (dry-run)..."
-    if /etc/myscript/sync-googleconfig-v3.3.sh; then
+    if /etc/myscript/sync-googleconfig.sh; then
         echo "  ✅ 測試同步成功，密鑰正確"
     else
         echo "  ❌ 測試同步失敗！請檢查 --url / --key / --iv"
@@ -858,7 +858,7 @@ else
         # 測試同步 (dry-run)：下載並解密，確認密鑰正確
         echo ""
         echo "🧪 測試同步 (dry-run)..."
-        if /etc/myscript/sync-googleconfig-v3.3.sh; then
+        if /etc/myscript/sync-googleconfig.sh; then
             echo "  ✅ 測試同步成功，密鑰正確"
             break
         else
@@ -942,12 +942,12 @@ if [ -f /etc/myscript/.secrets/secret.url ] && [ -f /etc/myscript/.secrets/secre
     echo ""
     # 首次部署：清除 state 和 MD5 快取，確保完整套用
     rm -rf /tmp/sync-state /tmp/config_base64.md5
-    /etc/myscript/sync-googleconfig-v3.3.sh --apply --no-network-check
+    /etc/myscript/sync-googleconfig.sh --apply --no-network-check
     echo ""
     echo "✅ 首次同步完成"
 else
     echo "⚠️  密鑰未設定，跳過同步"
-    echo "   設定完密鑰後手動執行: /etc/myscript/sync-googleconfig-v3.3.sh --apply"
+    echo "   設定完密鑰後手動執行: /etc/myscript/sync-googleconfig.sh --apply"
 fi
 
 echo ""

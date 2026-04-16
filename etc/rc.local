@@ -89,7 +89,7 @@ done
         uci commit dhcp
         /etc/init.d/dnsmasq restart
     fi
-    /etc/myscript/sync-googleconfig-v3.3.sh --apply
+    /etc/myscript/sync-googleconfig.sh --apply
     if [ "$_agh_noresolv" = "1" ]; then
         uci set dhcp.@dnsmasq[0].noresolv='1'
         uci commit dhcp

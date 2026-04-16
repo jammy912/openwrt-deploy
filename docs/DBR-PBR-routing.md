@@ -91,7 +91,7 @@ config dbroute 區塊
 
 | 元件 | 職責 |
 |------|------|
-| `sync-googleconfig-v3.3.sh` | 從 Google Sheet 下載設定，產生 `dbroute-domains.conf` 和 `dbroute.nft` |
+| `sync-googleconfig.sh` | 從 Google Sheet 下載設定，產生 `dbroute-domains.conf` 和 `dbroute.nft` |
 | `dbroute-domains.conf` | 告訴 dnsmasq：解析域名時把 IP 加入對應的 nft set |
 | `dbroute.nft` | 定義 nft set 和 prerouting chain（打 fwmark） |
 | `dbroute-setup.sh` | 建立 ip rule（fwmark → lookup table）和 ip route |
@@ -169,7 +169,7 @@ ip route add default dev wg0 table 1001
 
 | 檔案 | 路徑 | 說明 |
 |------|------|------|
-| sync-googleconfig | `/etc/myscript/sync-googleconfig-v3.3.sh` | 從 Google Sheet 同步所有設定 |
+| sync-googleconfig | `/etc/myscript/sync-googleconfig.sh` | 從 Google Sheet 同步所有設定 |
 | dbroute-domains.conf | `/etc/dnsmasq.d/dbroute-domains.conf` | dnsmasq nftset 對應（動態產生） |
 | dbroute.nft | `/etc/myscript/dbroute.nft` | nft set + chain 規則（動態產生） |
 | dbroute-setup.sh | `/etc/myscript/dbroute-setup.sh` | 建立 ip rule + ip route |

@@ -166,7 +166,7 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/jammy912/openwrt-deploy/mai
 |------|------------|
 | LuCI 管理介面 | http://192.168.1.1 |
 | AdGuard Home | http://192.168.1.1:3000（首次需設定密碼） |
-| 手動同步 Google Sheet | `/etc/myscript/sync-googleconfig-v3.3.sh --apply` |
+| 手動同步 Google Sheet | `/etc/myscript/sync-googleconfig.sh --apply` |
 | 檢查套件 | `/etc/myscript/check-custpkgs.sh --now` |
 | WiFi 重新設定 | `sh /tmp/deploy/wifi-setup.sh` |
 | BATMAN 重新設定 | `sh /tmp/deploy/batman-setup.sh` |
@@ -192,7 +192,7 @@ deploy/
 │   ├── init.d/              # 開機服務
 │   └── myscript/            # 所有自訂腳本
 │       ├── .secrets/        # 密鑰（不上傳 GitHub）
-│       ├── sync-googleconfig-v3.3.sh  # Google Sheet 同步
+│       ├── sync-googleconfig.sh  # Google Sheet 同步
 │       ├── check-custpkgs.sh          # 套件檢查
 │       ├── dbroute-*.sh               # 域名路由
 │       ├── wifi-*.sh                  # WiFi 管理
