@@ -950,16 +950,39 @@ if [ "$GW_TYPE" = "主gw" ]; then
             PEER_LABEL="$mac"
         fi
         [ "$_MESH_TRIGGER" = "1" ] && log "mesh-map: peer mac=$mac tail=$MAC_TAIL links=$LINKS pri=$PEER_PRI ip=$PEER_IP name=$PEER_NAME"
-        # gw 排前面(1)、client 排後面(2)
+        # gw 排前面(1)、client 排後面(2); 同 pri 合併 key 用 pri 值
         _sort_key="2"
-        echo "$PEER_ROLE" | grep -q "gw" && _sort_key="1"
-        echo "${_sort_key}├─${LINKS}─${PEER_LABEL} ${PEER_ROLE}" >> "${MESH_TMP}.unsorted"
+        _merge_key="client_${mac}"
+        if [ -n "$PEER_PRI" ]; then
+            _sort_key="1"
+            _merge_key="gw_pri${PEER_PRI}"
+        fi
+        # 格式: sort_key|merge_key|LINKS|LABEL|ROLE
+        echo "${_sort_key}|${_merge_key}|${LINKS}|${PEER_LABEL}|${PEER_ROLE}" >> "${MESH_TMP}.unsorted"
     done
     if [ -z "$PEER_MACS" ]; then
         log "mesh-map: ⚠️ PEER_MACS 為空，無法組建架構圖"
         echo "├─(無鄰居)" >> "$MESH_TMP"
     elif [ -f "${MESH_TMP}.unsorted" ]; then
-        sort "${MESH_TMP}.unsorted" | sed 's/^[12]//' >> "$MESH_TMP"
+        # 合併同 merge_key: LINKS 聯集、LABEL 取有 IP 的那筆
+        awk -F'|' '
+            {
+                k=$2
+                if (!(k in seen)) { order[++n]=k; seen[k]=1; sort_key[k]=$1; role[k]=$5 }
+                # LINKS 聯集
+                split($3, parts, "+")
+                for (i in parts) if (parts[i]!="" && index(links[k], parts[i])==0) {
+                    links[k] = (links[k]=="" ? parts[i] : links[k]"+"parts[i])
+                }
+                # LABEL: 優先選 IP 或 hostname(IP) 的那筆
+                if (label[k]=="" || ($4 ~ /^192\./ || $4 ~ /\(/) && !(label[k] ~ /^192\./ || label[k] ~ /\(/)) {
+                    label[k] = $4
+                }
+            }
+            END {
+                for (i=1; i<=n; i++) { k=order[i]; print sort_key[k]"├─"links[k]"─"label[k]" "role[k] }
+            }
+        ' "${MESH_TMP}.unsorted" | sort | sed 's/^[12]//' >> "$MESH_TMP"
         rm -f "${MESH_TMP}.unsorted"
     fi
     # 推播判斷: 角色變更/主副切換/開機首次 → 無條件推
