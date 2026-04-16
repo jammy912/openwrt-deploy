@@ -532,10 +532,9 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi
     svc_disable ddns
-    # pbr 保持 enabled (避免 dnsmasq 因 dangling /etc/dnsmasq.d/pbr symlink crash)
-    # 用 nft 判斷是否真正在跑 (pbr init running 回傳不準)
-    /etc/init.d/pbr enable 2>/dev/null
-    nft list tables 2>/dev/null | grep -q pbr || /etc/init.d/pbr start >/dev/null 2>&1
+    # 副gw 不需 PBR 路由分流，但 /etc/dnsmasq.d/pbr -> /var/run/pbr.dnsmasq
+    # 若 symlink target 不存在 dnsmasq 會 crash，touch 空檔即可
+    [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     wg_stop
     # 停 IOT WiFi (只有主 gw 需要)
@@ -555,10 +554,8 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
 else
     # client: 停全部服務 + IOT WiFi + AGH (DNS 直接走主 GW)
     svc_disable ddns
-    # pbr 保持 enabled (避免 dangling /etc/dnsmasq.d/pbr symlink → dnsmasq crash)
-    # pbr 保持 enabled (避免 dangling symlink → dnsmasq crash)
-    /etc/init.d/pbr enable 2>/dev/null
-    nft list tables 2>/dev/null | grep -q pbr || /etc/init.d/pbr start >/dev/null 2>&1
+    # client 不需 PBR，touch 空檔防 dnsmasq crash
+    [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     svc_disable adguardhome
     wg_stop
@@ -1028,14 +1025,11 @@ else
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
     fi
-    # pbr 必須 enabled + running (避免 dangling /etc/dnsmasq.d/pbr symlink → dnsmasq crash)
-    if ! /etc/init.d/pbr enabled 2>/dev/null; then
-        /etc/init.d/pbr enable 2>/dev/null
-        log "fixup: PBR enabled"; FIXUP=1
-    fi
-    if ! nft list tables 2>/dev/null | grep -q pbr; then
-        /etc/init.d/pbr start >/dev/null 2>&1
-        log "fixup: PBR 未運行，已啟動"; FIXUP=1
+    # 確保 /var/run/pbr.dnsmasq 存在 (防 dangling symlink → dnsmasq crash)
+    if [ -L /etc/dnsmasq.d/pbr ] && [ ! -f /var/run/pbr.dnsmasq ]; then
+        touch /var/run/pbr.dnsmasq 2>/dev/null
+        log "fixup: touch /var/run/pbr.dnsmasq (防 dnsmasq crash)"
+        FIXUP=1
     fi
     # client: AGH 不該跑 (DNS 直接走主 GW); 副 gw: AGH 保留
     if [ "$GW_TYPE" != "副gw" ] && pgrep -f adguardhome >/dev/null 2>&1; then
