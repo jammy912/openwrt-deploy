@@ -533,9 +533,9 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi
     svc_disable ddns
     # pbr 保持 enabled (避免 dnsmasq 因 dangling /etc/dnsmasq.d/pbr symlink crash)
-    # 只 enable，已在跑就不 restart (restart 會斷線)
+    # 用 nft 判斷是否真正在跑 (pbr init running 回傳不準)
     /etc/init.d/pbr enable 2>/dev/null
-    /etc/init.d/pbr running 2>/dev/null || /etc/init.d/pbr start >/dev/null 2>&1
+    nft list tables 2>/dev/null | grep -q pbr || /etc/init.d/pbr start >/dev/null 2>&1
     svc_disable qosify
     wg_stop
     # 停 IOT WiFi (只有主 gw 需要)
@@ -556,9 +556,9 @@ else
     # client: 停全部服務 + IOT WiFi + AGH (DNS 直接走主 GW)
     svc_disable ddns
     # pbr 保持 enabled (避免 dangling /etc/dnsmasq.d/pbr symlink → dnsmasq crash)
-    # 只 enable，已在跑就不 restart (restart 會斷線)
+    # pbr 保持 enabled (避免 dangling symlink → dnsmasq crash)
     /etc/init.d/pbr enable 2>/dev/null
-    /etc/init.d/pbr running 2>/dev/null || /etc/init.d/pbr start >/dev/null 2>&1
+    nft list tables 2>/dev/null | grep -q pbr || /etc/init.d/pbr start >/dev/null 2>&1
     svc_disable qosify
     svc_disable adguardhome
     wg_stop
@@ -1033,7 +1033,7 @@ else
         /etc/init.d/pbr enable 2>/dev/null
         log "fixup: PBR enabled"; FIXUP=1
     fi
-    if ! /etc/init.d/pbr running 2>/dev/null; then
+    if ! nft list tables 2>/dev/null | grep -q pbr; then
         /etc/init.d/pbr start >/dev/null 2>&1
         log "fixup: PBR 未運行，已啟動"; FIXUP=1
     fi
