@@ -762,6 +762,16 @@ cp -a /etc/config/* /tmp/config_ram/
 cp -a /etc/crontabs/* /tmp/crontabs_ram/ 2>/dev/null
 
 CRONTAB_FILE="/etc/crontabs/root"
+# 固定排程: 每天 12:00 同步 Google Sheet (放最上面)
+SYNC_CRON="0 12 * * * /etc/myscript/sync-googleconfig.sh --apply      # Google Sheet 同步"
+if ! grep -qF "$SYNC_CRON" "$CRONTAB_FILE" 2>/dev/null; then
+    TMP_CRON=$(mktemp)
+    echo "$SYNC_CRON" > "$TMP_CRON"
+    echo "" >> "$TMP_CRON"
+    [ -f "$CRONTAB_FILE" ] && cat "$CRONTAB_FILE" >> "$TMP_CRON"
+    mv "$TMP_CRON" "$CRONTAB_FILE"
+    echo "  ✅ 已加入每日 12:00 同步排程"
+fi
 # 建立 SyncArea 區塊 (sync-googleconfig 會在此區塊內更新排程)
 if ! grep -q "#SyncAreaStart" "$CRONTAB_FILE" 2>/dev/null; then
     echo "#SyncAreaStart" >> "$CRONTAB_FILE"
