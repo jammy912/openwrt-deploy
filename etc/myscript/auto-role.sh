@@ -1013,16 +1013,17 @@ dbg "完成: role=$NEW_ROLE $GW_TYPE IP=$FINAL_IP DHCP=$DHCP_ACTION changed=$CHA
 # =====================
 FIXUP=0
 if [ "$GW_TYPE" = "主gw" ]; then
-    # 主 gw: default route 必須走 WAN，不能指向 br-lan (自己)
-    CUR_DEF_DEV=$(ip route show default 2>/dev/null | head -1 | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1);exit}}}')
-    if [ "$CUR_DEF_DEV" != "wan" ]; then
-        WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
-        WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
-        if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
-            ip route replace default via "$WAN_GW" dev "$WAN_DEV"
-            log "fixup: default route 指向 $CUR_DEF_DEV，已修正為 via $WAN_GW dev $WAN_DEV"
-            FIXUP=1
-        fi
+    # 主 gw: default route 必須有 via 且 dev 為 WAN 的 l3_device，否則修正
+    CUR_DEF_LINE=$(ip route show default 2>/dev/null | head -1)
+    CUR_DEF_DEV=$(echo "$CUR_DEF_LINE" | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1);exit}}}')
+    CUR_DEF_VIA=$(echo "$CUR_DEF_LINE" | awk '{for(i=1;i<=NF;i++){if($i=="via"){print $(i+1);exit}}}')
+    WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+    WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ] && \
+       { [ "$CUR_DEF_DEV" != "$WAN_DEV" ] || [ "$CUR_DEF_VIA" != "$WAN_GW" ]; }; then
+        ip route replace default via "$WAN_GW" dev "$WAN_DEV"
+        log "fixup: default route ($CUR_DEF_LINE) → via $WAN_GW dev $WAN_DEV"
+        FIXUP=1
     fi
     # 主 gw: WG/dnsmasq/adguardhome 必須在跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
