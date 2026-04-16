@@ -312,6 +312,10 @@ display_bus_eta() {
 # --- Main Execution ---
 
 main() {
+    # 非主gw 不需要查公車
+    GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+    [ "$GW_TYPE" != "主gw" ] && exit 0
+
     # Check dependencies
     if ! command -v curl >/dev/null 2>&1; then
         push_notify "$TARGET_ROUTE$DIRECTION_TEXT @$TARGET_STOP curl 未安裝"
