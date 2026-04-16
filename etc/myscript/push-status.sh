@@ -14,6 +14,8 @@ agh_mem=$(awk '/VmRSS/{print int($2/1024)}' "/proc/${agh_pid}/status" 2>/dev/nul
 
 free_mem=$(free | awk 'NR==2{print int($4/1024)}')
 
+load=$(awk '{printf "%.1f %.1f %.1f", $1, $2, $3}' /proc/loadavg)
+
 # 依 channel frequency 判斷 band: 2.xxx=2.4G, 5.xxx=5G, 6.xxx=6G
 get_band() {
     f=$(iwinfo "$1" info 2>/dev/null | sed -n 's/.*Channel:.*(\([0-9]*\.[0-9]*\) GHz).*/\1/p' | head -1)
@@ -52,4 +54,4 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
 done
 [ -z "$msg_radio" ] && msg_radio=" (no radio)"
 
-push_notify "CPU: ${cpu_temp}°C AgH: ${agh_mem}MB | Free: ${free_mem}MB |${msg_radio}"
+push_notify "CPU: ${cpu_temp}°C Load: ${load} | AgH: ${agh_mem}MB Free: ${free_mem}MB |${msg_radio}"
