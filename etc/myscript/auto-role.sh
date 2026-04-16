@@ -1028,12 +1028,15 @@ else
     if [ "$WG_UP" -gt 0 ]; then
         wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
     fi
-    # pbr 在副gw/client 不停 (避免 dnsmasq 因 dangling /etc/dnsmasq.d/pbr symlink crash)
-    /etc/init.d/pbr enabled 2>/dev/null || {
+    # pbr 必須 enabled + running (避免 dangling /etc/dnsmasq.d/pbr symlink → dnsmasq crash)
+    if ! /etc/init.d/pbr enabled 2>/dev/null; then
         /etc/init.d/pbr enable 2>/dev/null
-        /etc/init.d/pbr running 2>/dev/null || /etc/init.d/pbr start >/dev/null 2>&1
-        log "fixup: PBR 已啟用 (避免 dnsmasq dangling symlink crash)"; FIXUP=1
-    }
+        log "fixup: PBR enabled"; FIXUP=1
+    fi
+    if ! /etc/init.d/pbr running 2>/dev/null; then
+        /etc/init.d/pbr start >/dev/null 2>&1
+        log "fixup: PBR 未運行，已啟動"; FIXUP=1
+    fi
     # client: AGH 不該跑 (DNS 直接走主 GW); 副 gw: AGH 保留
     if [ "$GW_TYPE" != "副gw" ] && pgrep -f adguardhome >/dev/null 2>&1; then
         svc_disable adguardhome; log "fixup: AGH 不應運行 (client)，已停止"; FIXUP=1
