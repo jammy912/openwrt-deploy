@@ -11,7 +11,7 @@ _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
 TEST_DNS="127.0.0.1"
 TEST_PORT=53535
 # 使用確定存在的域名，確保有正常的 DNS 回應
-TEST_DOMAIN="www.hinet.net"
+TEST_DOMAIN="www.twse.com.tw"
 
 UPSTREAM_DNS1="8.8.8.8"
 UPSTREAM_DNS2="1.1.1.1"
