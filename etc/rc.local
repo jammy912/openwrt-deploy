@@ -51,6 +51,26 @@ killall AdGuardHome 2>/dev/null
 # 背景持續攔截：每 10 秒檢查一次，連續 60 秒內如果 AGH 被 trigger 拉起就殺掉
 (for _i in 1 2 3 4 5 6; do sleep 10; killall AdGuardHome 2>/dev/null; done) &
 
+# AGH safe browsing 域名預解析寫入 /etc/hosts
+# 避免 AGH 啟動 I/O 風暴期間 DNS 解析 timeout → OOM 循環
+(
+    # 等網路就緒
+    for _w in 1 2 3 4 5 6 7 8 9 10; do
+        ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
+        sleep 3
+    done
+    for _dom in family.adguard-dns.com standard-block.dns.adguard.com family-block.dns.adguard.com; do
+        # 先清掉舊的
+        sed -i "/ ${_dom}$/d" /etc/hosts 2>/dev/null
+        # 解析 IPv4 並寫入
+        _ips=$(nslookup "$_dom" 8.8.8.8 2>/dev/null | awk '/^Address/&&!/8\.8\.8\.8/{print $NF}' | grep -E '^[0-9]+\.')
+        for _ip in $_ips; do
+            echo "$_ip $_dom" >> /etc/hosts
+        done
+    done
+    logger -t rc.local "AGH hosts 預解析完成"
+) &
+
 /etc/myscript/check-custpkgs.sh &
 
 # hybrid 模式: 開機自動偵測角色
