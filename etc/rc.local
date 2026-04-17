@@ -43,11 +43,13 @@ case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
 esac
 
 # 開機時先停掉 AGH，避免載入過濾清單拖慢 NAND I/O 導致全系統卡頓
-# disable 防止 procd interface trigger 自動拉起，稍後再 enable + start
+# procd boot trigger 是異步的 (interface.*.up 後 5 秒)，需要背景持續攔截
 # dnsmasq 會直連 8.8.8.8，check-adguard cron 等 AGH 起來後自動切回
 /etc/init.d/adguardhome disable 2>/dev/null
 /etc/init.d/adguardhome stop 2>/dev/null
 killall AdGuardHome 2>/dev/null
+# 背景持續攔截：每 10 秒檢查一次，連續 60 秒內如果 AGH 被 trigger 拉起就殺掉
+(for _i in 1 2 3 4 5 6; do sleep 10; killall AdGuardHome 2>/dev/null; done) &
 
 /etc/myscript/check-custpkgs.sh &
 
