@@ -578,6 +578,11 @@ main() {
         rm -f "$TMP_DECRYPTED.std"
     fi
 
+    # MAC 正規化: dash → colon (e8-9f-80 → e8:9f:80)，避免 dnsmasq 啟動失敗
+    if [ -s "$TMP_DHCP" ]; then
+        awk '{if($0 ~ /option mac/){gsub(/-/,":")} print}' "$TMP_DHCP" > "${TMP_DHCP}.tmp" && mv "${TMP_DHCP}.tmp" "$TMP_DHCP"
+    fi
+
     # routerconfig 不分模式，兩邊都提取
     sed -n '/^config routerconfig/,/^$/p' "$TMP_DECRYPTED" | sed '/^$/d' >> "$TMP_ROUTERCONFIG"
 
