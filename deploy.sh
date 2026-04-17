@@ -1140,6 +1140,11 @@ echo ""
 echo "📦 檢查並安裝所有必要套件..."
 /etc/myscript/check-custpkgs.sh --now --no-reboot
 
+# 新套件裝完後刷新 rpcd/uhttpd，否則 LuCI 開新裝的頁面會 RPCError
+rm -f /tmp/luci-indexcache
+/etc/init.d/rpcd restart 2>/dev/null
+/etc/init.d/uhttpd restart 2>/dev/null
+
 # =====================
 # AdGuard Home 客製化設定 (gateway only)
 # =====================
