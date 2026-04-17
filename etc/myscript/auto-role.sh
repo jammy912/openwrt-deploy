@@ -501,8 +501,14 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     [ "$PREV_GWTYPE" != "主gw" ] && PROMOTED=1
     if [ "$CHANGED" = "1" ] || [ "$PROMOTED" = "1" ]; then
         svc_enable ddns
-        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
-        svc_enable adguardhome
+        # 開機早期不啟動 AGH，由 rc.local 延遲 120 秒後統一啟動
+        _UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
+        if [ "$_UPTIME_SEC" -gt 180 ]; then
+            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+            svc_enable adguardhome
+        else
+            log "開機早期 (${_UPTIME_SEC}s)，跳過 AGH 啟動 (由 rc.local 延遲處理)"
+        fi
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
@@ -1052,8 +1058,11 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
     fi
     if ! pgrep -f adguardhome >/dev/null 2>&1; then
-        # agh_startup lock 有效 → 正在啟動中或剛被 OOM kill，不搶啟動
-        if lock_is_active "agh_startup" 300; then
+        _FIX_UPTIME=$(awk -F. '{print $1}' /proc/uptime)
+        if [ "$_FIX_UPTIME" -le 180 ]; then
+            log "fixup: AGH 未運行，但開機早期 (${_FIX_UPTIME}s)，由 rc.local 延遲處理"
+        elif lock_is_active "agh_startup" 300; then
+            # agh_startup lock 有效 → 正在啟動中或剛被 OOM kill，不搶啟動
             log "fixup: AdGuardHome 未運行，agh_startup lock 有效，跳過"
         else
             lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
