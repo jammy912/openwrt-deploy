@@ -542,8 +542,9 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     fi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: 停全部服務 + IOT WiFi
+    # 非主 gateway: 停全部服務 + IOT WiFi + AGH
     svc_disable ddns
+    svc_disable adguardhome
     # 副gw 不需 PBR 路由分流，但 /etc/dnsmasq.d/pbr -> /var/run/pbr.dnsmasq
     # 若 symlink target 不存在 dnsmasq 會 crash，touch 空檔即可
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
@@ -1071,11 +1072,11 @@ else
         log "fixup: touch /var/run/pbr.dnsmasq (防 dnsmasq crash)"
         FIXUP=1
     fi
-    # client: AGH 不該跑 (DNS 直接走主 GW); 副 gw: AGH 保留
-    if [ "$GW_TYPE" != "副gw" ] && pgrep -f adguardhome >/dev/null 2>&1; then
-        svc_disable adguardhome; log "fixup: AGH 不應運行 (client)，已停止"; FIXUP=1
+    # 副 gw / client: AGH 不該跑 (DNS 直接走主 GW)
+    if pgrep -f adguardhome >/dev/null 2>&1; then
+        svc_disable adguardhome; log "fixup: AGH 不應運行 ($GW_TYPE)，已停止"; FIXUP=1
     fi
-    if [ "$GW_TYPE" != "副gw" ] && [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+    if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
         uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
         uci delete dhcp.@dnsmasq[0].server 2>/dev/null
         uci commit dhcp
