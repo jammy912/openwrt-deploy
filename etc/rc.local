@@ -105,5 +105,10 @@ done
     # check-adguard cron 會自動將 dnsmasq 切到 AGH
 ) &
 
+# USB swap (priority 低於 zram，溢出時使用)
+if [ -b /dev/sda1 ]; then
+    swapon -p 10 /dev/sda1 2>/dev/null && logger -t rc.local "USB swap 已啟用"
+fi
+
 exit 0
 
