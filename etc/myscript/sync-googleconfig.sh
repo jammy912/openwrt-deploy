@@ -586,6 +586,17 @@ main() {
             log "⚠️ MAC dash→colon 修正: $BAD_MACS"
         fi
         awk '{if($0 ~ /option mac/){gsub(/-/,":")} print}' "$TMP_DHCP" > "${TMP_DHCP}.tmp" && mv "${TMP_DHCP}.tmp" "$TMP_DHCP"
+
+        # MAC 長度/格式檢查: 不符 XX:XX:XX:XX:XX:XX 的整筆移除
+        INVALID_MACS=$(awk '/option mac/{gsub(/'\''/, ""); mac=$3; if(mac !~ /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print mac}' "$TMP_DHCP" | paste -sd, -)
+        if [ -n "$INVALID_MACS" ]; then
+            # 找出對應 name
+            INVALID_NAMES=$(awk 'BEGIN{RS=""; FS="\n"} {mac=""; name=""; for(i=1;i<=NF;i++){if($i~/option mac/){gsub(/\047/,"",$i); split($i,a," "); mac=a[3]} if($i~/option name/){gsub(/\047/,"",$i); split($i,a," "); name=a[3]}} if(mac!="" && mac!~/^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print name"("mac")"}' "$TMP_DHCP" | paste -sd, -)
+            push_notify "❌ DHCP MAC 格式無效，已移除: $INVALID_NAMES"
+            log "❌ MAC 格式無效，移除: $INVALID_NAMES"
+            # 移除整個 config host block
+            awk 'BEGIN{RS=""; FS="\n"; ORS="\n"} {mac=""; for(i=1;i<=NF;i++){if($i~/option mac/){gsub(/\047/,"",$i); split($i,a," "); mac=a[3]}} if(mac~/^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/){for(i=1;i<=NF;i++) print $i; print ""}}' "$TMP_DHCP" > "${TMP_DHCP}.tmp" && mv "${TMP_DHCP}.tmp" "$TMP_DHCP"
+        fi
     fi
 
     # routerconfig 不分模式，兩邊都提取
