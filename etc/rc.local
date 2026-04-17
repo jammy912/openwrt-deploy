@@ -42,6 +42,11 @@ case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
         ;;
 esac
 
+# 開機時先停掉 AGH，避免載入過濾清單拖慢 I/O 導致全系統卡頓
+# dnsmasq 會直連 8.8.8.8，check-adguard cron 等 AGH 起來後自動切回
+/etc/init.d/adguardhome stop 2>/dev/null
+killall AdGuardHome 2>/dev/null
+
 /etc/myscript/check-custpkgs.sh &
 
 # hybrid 模式: 開機自動偵測角色
@@ -79,23 +84,17 @@ for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 
   fi
 done
 
-# 開機同步 Google Sheet 設定 (自動依 .mesh_role_active 判斷身份)
-# 暫停 AGH，用系統 DNS 確保 sync 能連外網，完成後恢復
+# 開機同步 Google Sheet 設定 + 延遲啟動 AGH
+# AGH 已在 rc.local 開頭停掉，等其他服務穩定後再啟動
+# dnsmasq 用上游 DNS 確保 sync 能連外網
 (
-    /etc/init.d/adguardhome stop 2>/dev/null
-    _agh_noresolv=$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
-    if [ "$_agh_noresolv" = "1" ]; then
-        uci set dhcp.@dnsmasq[0].noresolv='0'
-        uci commit dhcp
-        /etc/init.d/dnsmasq restart
-    fi
     /etc/myscript/sync-googleconfig.sh --apply
-    if [ "$_agh_noresolv" = "1" ]; then
-        uci set dhcp.@dnsmasq[0].noresolv='1'
-        uci commit dhcp
-        /etc/init.d/dnsmasq restart
-    fi
+    # 延遲啟動 AGH，避免 I/O 風暴 (NAND flash + zram swap 瓶頸)
+    logger -t rc.local "延遲啟動 AdGuardHome..."
+    sleep 120
     /etc/init.d/adguardhome start 2>/dev/null
+    logger -t rc.local "AdGuardHome 已啟動"
+    # check-adguard cron 會自動將 dnsmasq 切到 AGH
 ) &
 
 exit 0
