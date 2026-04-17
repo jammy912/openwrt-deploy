@@ -138,7 +138,8 @@ check_and_install() {
 
                 # 安裝 usteer 後，套用建議設定並啟用
                 if echo "$missing" | grep -qw "usteer"; then
-                    # 確保 config section 存在 (OpenWrt 25.x apk 不自動建)
+                    # 確保 config 檔+section 存在 (OpenWrt 25.x apk 不自動建)
+                    [ ! -f /etc/config/usteer ] && touch /etc/config/usteer
                     uci -q get usteer.@usteer[0] >/dev/null 2>&1 || uci add usteer usteer >/dev/null 2>&1
                     uci set usteer.@usteer[0].network='lan'
                     uci set usteer.@usteer[0].syslog='1'
