@@ -56,7 +56,7 @@ NEED_RELOAD=0
 test_dns() {
     # 方法1: 使用 dig 測試，不加 +short 以便檢查狀態
     local result
-    result=$(dig @"$TEST_DNS" -p "$TEST_PORT" "$TEST_DOMAIN" +time=2 +tries=1 2>&1)
+    result=$(dig @"$TEST_DNS" -p "$TEST_PORT" "$TEST_DOMAIN" +time=3 +tries=3 2>&1)
     local exitcode=$?
 
     # 檢查是否有 "connection timed out" 或 "no servers could be reached"
