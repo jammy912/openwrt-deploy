@@ -11,6 +11,14 @@
 #   - (新增) 如果 PING 失敗且時間為整點，則嘗試重啟該介面。
 #================================================================
 
+LOCK="/tmp/check-pbr-wg.lock"
+if [ -f "$LOCK" ]; then
+    kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0
+    rm -f "$LOCK"
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 # 非主gw 不需要檢查 PBR/WG 狀態
 GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
 [ "$GW_TYPE" != "主gw" ] && exit 0

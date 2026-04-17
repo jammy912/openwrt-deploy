@@ -1,5 +1,13 @@
 #!/bin/sh
 
+LOCK="/tmp/check-adguard.lock"
+if [ -f "$LOCK" ]; then
+    kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0
+    rm -f "$LOCK"
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 # 引入通知器
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
