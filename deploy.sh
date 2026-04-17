@@ -1150,14 +1150,23 @@ rm -f /tmp/luci-indexcache
 # =====================
 if [ "$MESH_ROLE" != "client" ]; then
 # 重新偵測 AGH 路徑 (check-custpkgs 可能剛裝完)
-# uci key 是 config_file 不是 config
 AGH_YAML=$(uci get adguardhome.config.config_file 2>/dev/null)
 [ -z "$AGH_YAML" ] && AGH_YAML=$(uci get adguardhome.config.config 2>/dev/null)
-[ -z "$AGH_YAML" ] && AGH_YAML="/etc/adguardhome.yaml"
+[ -z "$AGH_YAML" ] && AGH_YAML="/etc/adguardhome/adguardhome.yaml"
 AGH_DIR=$(dirname "$AGH_YAML")
 mkdir -p "$AGH_DIR"
 AGH_BIN=$(command -v AdGuardHome 2>/dev/null || which AdGuardHome 2>/dev/null || echo "")
 [ -z "$AGH_BIN" ] && [ -x /usr/bin/AdGuardHome ] && AGH_BIN="/usr/bin/AdGuardHome"
+# 確保 uci config 存在 (OpenWrt 25.x 不自動建)
+if [ -n "$AGH_BIN" ]; then
+    [ ! -f /etc/config/adguardhome ] && touch /etc/config/adguardhome
+    if ! uci -q get adguardhome.config >/dev/null 2>&1; then
+        uci add adguardhome adguardhome >/dev/null 2>&1
+        uci rename adguardhome.@adguardhome[0]="config" 2>/dev/null
+    fi
+    uci set adguardhome.config.config_file="$AGH_YAML"
+    uci commit adguardhome
+fi
 echo "  AGH yaml 路徑: $AGH_YAML"
 # AGH 首次安裝不會自動產生 yaml (會進入 setup wizard)
 # 需要透過 install API 完成初始設定
