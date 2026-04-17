@@ -53,6 +53,24 @@ lock_check_and_create() {
     return 0
 }
 
+# 函數: 檢查鎖定是否有效 (只看不搶)
+# 用法: lock_is_active <鎖定名稱> <過期時間_秒>
+# 返回: 0=鎖定有效, 1=無鎖定或已過期
+lock_is_active() {
+    _LK_NAME=$1
+    _LK_EXPIRY=$2
+    _LK_FILE="/tmp/$_LK_NAME.lock"
+
+    [ ! -f "$_LK_FILE" ] && return 1
+
+    _LK_TIME=$(cat "$_LK_FILE" 2>/dev/null)
+    echo "$_LK_TIME" | grep -q '^[0-9]\+$' || return 1
+
+    _LK_DIFF=$(( $(date +%s) - _LK_TIME ))
+    [ "$_LK_DIFF" -lt "$_LK_EXPIRY" ] && return 0
+    return 1
+}
+
 # 函數: 移除鎖定檔案 (不變)
 lock_remove() {
     LOCK_NAME=$1

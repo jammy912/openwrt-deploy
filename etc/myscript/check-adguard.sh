@@ -12,6 +12,13 @@ trap 'rm -f "$LOCK"' EXIT
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
+# AGH 正在啟動中 (rc.local/auto-role 建立的 lock)，跳過檢查
+. /etc/myscript/lock_handler.sh
+if lock_is_active "agh_startup" 300; then
+    logger -t adguard-switch "agh_startup lock 有效，跳過檢查"
+    exit 0
+fi
+
 # client 模式不用 AGH，跳過檢查
 _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
 [ "$_role" = "client" ] && exit 0
@@ -106,6 +113,7 @@ else
     # 如果分鐘數是 '00',代表是整點,嘗試重啟
     if [ "$CURRENT_MINUTE" = "00" ]; then
         log "⚠️ 整點嘗試重啟 AdguardHome"
+        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
         /etc/init.d/adguardhome stop
         sleep 2
         /etc/init.d/adguardhome start

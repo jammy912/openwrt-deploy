@@ -13,6 +13,7 @@
 #   .mesh_wired     - 有線 mesh (Y/N)
 
 . /etc/myscript/push_notify.inc 2>/dev/null
+. /etc/myscript/lock_handler.sh
 PUSH_NAMES="jammy"
 
 LOG_TAG="auto-role"
@@ -498,6 +499,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     [ "$PREV_GWTYPE" != "主gw" ] && PROMOTED=1
     if [ "$CHANGED" = "1" ] || [ "$PROMOTED" = "1" ]; then
         svc_enable ddns
+        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
         svc_enable adguardhome
         svc_enable pbr
         svc_enable qosify
@@ -1045,24 +1047,11 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
     fi
     if ! pgrep -f adguardhome >/dev/null 2>&1; then
-        # OOM 冷卻: 最近 10 分鐘內被 OOM kill 過就不重啟，避免 OOM→restart→OOM 循環
-        AGH_COOLDOWN="/tmp/adguardhome.oom_cooldown"
-        OOM_RECENT=$(dmesg | grep -c "Out of memory.*AdGuardHome")
-        if [ "$OOM_RECENT" -gt 0 ]; then
-            if [ -f "$AGH_COOLDOWN" ]; then
-                COOL_AGE=$(( $(date +%s) - $(date -r "$AGH_COOLDOWN" +%s 2>/dev/null || echo 0) ))
-                if [ "$COOL_AGE" -lt 600 ]; then
-                    log "fixup: AdGuardHome 未運行，但近期有 OOM (${COOL_AGE}s ago)，跳過重啟"
-                else
-                    touch "$AGH_COOLDOWN"
-                    /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，冷卻已過，已啟動"; FIXUP=1
-                fi
-            else
-                touch "$AGH_COOLDOWN"
-                log "fixup: AdGuardHome 被 OOM kill，建立冷卻鎖，跳過本次重啟"
-            fi
+        # agh_startup lock 有效 → 正在啟動中或剛被 OOM kill，不搶啟動
+        if lock_is_active "agh_startup" 300; then
+            log "fixup: AdGuardHome 未運行，agh_startup lock 有效，跳過"
         else
-            rm -f "$AGH_COOLDOWN"
+            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
             /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
         fi
     fi

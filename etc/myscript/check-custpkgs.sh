@@ -196,6 +196,8 @@ check_and_install() {
                     # --no-reboot 代表由 deploy.sh 呼叫，AGH 由 deploy.sh 負責初始化
                     if [ "$NO_REBOOT" = "0" ]; then
                         log "🎉 adguardhome 已安裝，啟動服務。"
+                        . /etc/myscript/lock_handler.sh
+                        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
                         /etc/init.d/adguardhome start
                     else
                         log "🎉 adguardhome 已安裝，由 deploy.sh 負責初始化。"

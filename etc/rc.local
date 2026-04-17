@@ -96,6 +96,9 @@ done
     # 延遲啟動 AGH，避免 I/O 風暴 (NAND flash + zram swap 瓶頸)
     logger -t rc.local "延遲啟動 AdGuardHome..."
     sleep 120
+    # 建立 agh_startup lock，防止 check-adguard/auto-role 在啟動期間干擾
+    . /etc/myscript/lock_handler.sh
+    lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
     /etc/init.d/adguardhome enable 2>/dev/null
     /etc/init.d/adguardhome start 2>/dev/null
     logger -t rc.local "AdGuardHome 已啟動"
