@@ -42,8 +42,10 @@ case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
         ;;
 esac
 
-# 開機時先停掉 AGH，避免載入過濾清單拖慢 I/O 導致全系統卡頓
+# 開機時先停掉 AGH，避免載入過濾清單拖慢 NAND I/O 導致全系統卡頓
+# disable 防止 procd interface trigger 自動拉起，稍後再 enable + start
 # dnsmasq 會直連 8.8.8.8，check-adguard cron 等 AGH 起來後自動切回
+/etc/init.d/adguardhome disable 2>/dev/null
 /etc/init.d/adguardhome stop 2>/dev/null
 killall AdGuardHome 2>/dev/null
 
@@ -92,6 +94,7 @@ done
     # 延遲啟動 AGH，避免 I/O 風暴 (NAND flash + zram swap 瓶頸)
     logger -t rc.local "延遲啟動 AdGuardHome..."
     sleep 120
+    /etc/init.d/adguardhome enable 2>/dev/null
     /etc/init.d/adguardhome start 2>/dev/null
     logger -t rc.local "AdGuardHome 已啟動"
     # check-adguard cron 會自動將 dnsmasq 切到 AGH
