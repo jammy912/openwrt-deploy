@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+. /etc/myscript/lock_handler.sh
+lock_is_active "agh_startup" 300 && exit 0
+
 # 定時重新解析所有 dbroute 域名，填充 nft set
 # 透過 dnsmasq (127.0.0.1) 查詢，觸發 nftset 指令
 

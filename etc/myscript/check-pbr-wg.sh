@@ -11,6 +11,10 @@
 #   - (新增) 如果 PING 失敗且時間為整點，則嘗試重啟該介面。
 #================================================================
 
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+. /etc/myscript/lock_handler.sh
+lock_is_active "agh_startup" 300 && exit 0
+
 LOCK="/tmp/check-pbr-wg.lock"
 if [ -f "$LOCK" ]; then
     kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0

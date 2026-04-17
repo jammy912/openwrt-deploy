@@ -1,6 +1,10 @@
 #!/bin/sh
 # 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G Tx-Power
 
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+. /etc/myscript/lock_handler.sh
+lock_is_active "agh_startup" 300 && exit 0
+
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 . /etc/myscript/push_notify.inc
 

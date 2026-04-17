@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+. /etc/myscript/lock_handler.sh
+lock_is_active "agh_startup" 300 && exit 0
+
 # check-wg-peers.sh - WireGuard peer 連入/斷線通知
 # 用法: check-wg-peers.sh <interface> [timeout_seconds]
 #   $1  WG_IFACE    WireGuard 介面名稱，如 wg1

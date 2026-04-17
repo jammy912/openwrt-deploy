@@ -14,6 +14,10 @@
 
 . /etc/myscript/push_notify.inc 2>/dev/null
 . /etc/myscript/lock_handler.sh
+
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+lock_is_active "agh_startup" 300 && exit 0
+
 PUSH_NAMES="jammy"
 
 LOG_TAG="auto-role"

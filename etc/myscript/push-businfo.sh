@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# AGH 啟動中 (I/O 高)，所有 cron 暫停
+. /etc/myscript/lock_handler.sh
+lock_is_active "agh_startup" 300 && exit 0
+
 # 推播公車到站資訊 (TDX API)
 # Requires: curl, jq (install via: opkg install curl jq)
 #
