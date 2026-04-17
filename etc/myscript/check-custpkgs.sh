@@ -192,8 +192,19 @@ check_and_install() {
                     log "🎉 samba4 已設定 interface=lan"
                 fi
 
-                # 安裝 AdGuardHome 後，啟用服務
+                # 安裝 AdGuardHome 後，建立 uci config 並啟用服務
                 if echo "$missing" | grep -qw "adguardhome"; then
+                    # 確保 uci config 存在 (OpenWrt 25.x apk 不自動建)
+                    # 必須在 enable/start 之前建好，否則 init.d 的 --config 會是空值
+                    [ ! -f /etc/config/adguardhome ] && touch /etc/config/adguardhome
+                    if ! uci -q get adguardhome.config >/dev/null 2>&1; then
+                        uci add adguardhome adguardhome >/dev/null 2>&1
+                        uci rename adguardhome.@adguardhome[0]="config" 2>/dev/null
+                    fi
+                    uci set adguardhome.config.config_file="/etc/adguardhome/adguardhome.yaml"
+                    uci commit adguardhome
+                    log "📝 adguardhome uci config 已建立 (config_file=/etc/adguardhome/adguardhome.yaml)"
+
                     /etc/init.d/adguardhome enable
                     # --no-reboot 代表由 deploy.sh 呼叫，AGH 由 deploy.sh 負責初始化
                     if [ "$NO_REBOOT" = "0" ]; then
