@@ -221,6 +221,20 @@ check_and_install() {
                         log "🚨 無法裝回 dnsmasq！DNS/DHCP 可能中斷！"
                     fi
                 fi
+                # wpad-openssl 安裝失敗，裝回 wpad-basic 保底 (否則 WiFi 全掛)
+                if echo "$missing" | grep -qw "wpad-openssl" && ! pkg_is_installed "wpad-openssl"; then
+                    log "🔄 wpad-openssl 未裝成功，裝回 wpad-basic 保底..."
+                    case "$PKG_MGR" in
+                        apk)  apk add wpad-basic-wolfssl >"$LOG_FILE" 2>&1 || apk add wpad-basic-mbedtls >"$LOG_FILE" 2>&1 ;;
+                        opkg) opkg install wpad-basic-wolfssl >"$LOG_FILE" 2>&1 || opkg install wpad-basic-mbedtls >"$LOG_FILE" 2>&1 ;;
+                    esac
+                    if [ $? -eq 0 ]; then
+                        log "✅ 已裝回 wpad-basic (WiFi 可用但不支援 mesh SAE)。"
+                    else
+                        log "🚨 無法裝回 wpad！WiFi 可能中斷！"
+                        push_notify "🚨 wpad 安裝全失敗，WiFi 可能無法使用"
+                    fi
+                fi
                 try=$((try + 1))
                 log "❌ 安裝失敗，等待 $SLEEP_BETWEEN 秒後重試..."
                 sleep $SLEEP_BETWEEN

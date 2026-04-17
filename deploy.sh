@@ -377,23 +377,36 @@ fi
 if [ "$install_batman" = "y" ]; then
     pkg_install kmod-batman-adv batctl-full luci-proto-batman-adv 2>/dev/null
     # 替換 wpad 為支援 mesh SAE 的版本
+    # 記住原本的 wpad 版本，萬一 wpad-openssl 安裝失敗可以裝回
+    WPAD_ORIG=""
     if pkg_is_installed wpad-basic-wolfssl; then
-        echo "  📦 移除 wpad-basic-wolfssl..."
-        case "$PKG_MGR" in
-            apk)  apk del wpad-basic-wolfssl 2>/dev/null ;;
-            opkg) opkg remove wpad-basic-wolfssl 2>/dev/null ;;
-        esac
+        WPAD_ORIG="wpad-basic-wolfssl"
+    elif pkg_is_installed wpad-basic-mbedtls; then
+        WPAD_ORIG="wpad-basic-mbedtls"
     fi
-    if pkg_is_installed wpad-basic-mbedtls; then
-        echo "  📦 移除 wpad-basic-mbedtls..."
+    if [ -n "$WPAD_ORIG" ]; then
+        echo "  📦 移除 $WPAD_ORIG..."
         case "$PKG_MGR" in
-            apk)  apk del wpad-basic-mbedtls 2>/dev/null ;;
-            opkg) opkg remove wpad-basic-mbedtls 2>/dev/null ;;
+            apk)  apk del "$WPAD_ORIG" 2>/dev/null ;;
+            opkg) opkg remove "$WPAD_ORIG" 2>/dev/null ;;
         esac
     fi
     pkg_install wpad-openssl 2>/dev/null
+    if pkg_is_installed wpad-openssl; then
+        echo "  ✅ wpad-openssl 安裝成功"
+    elif [ -n "$WPAD_ORIG" ]; then
+        echo "  ⚠️  wpad-openssl 安裝失敗，裝回 $WPAD_ORIG 保底..."
+        pkg_install "$WPAD_ORIG" 2>/dev/null
+        if pkg_is_installed "$WPAD_ORIG"; then
+            echo "  ✅ 已裝回 $WPAD_ORIG (WiFi 可用但不支援 mesh SAE)"
+        else
+            echo "  🚨 無法裝回 wpad！WiFi 可能無法使用！"
+        fi
+    else
+        echo "  ⚠️  wpad-openssl 安裝失敗"
+    fi
     echo "batman" >> "$MODULES_FILE"
-    echo "  ✅ BATMAN 已安裝 (含 wpad-openssl)"
+    echo "  ✅ BATMAN 已安裝"
 fi
 
 # Android USB 網路共享
