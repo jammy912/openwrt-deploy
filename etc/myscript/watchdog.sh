@@ -36,6 +36,20 @@ check_ip() {
     fi
 }
 
+# === Load 過高自動重啟 ===
+LOAD_1M=$(awk -F. '{print $1}' /proc/loadavg)
+if [ "$LOAD_1M" -ge 8 ]; then
+    UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
+    if [ "$UPTIME_SEC" -gt 300 ]; then
+        log "⚠️ Load 過高 ($(cat /proc/loadavg))，重啟路由器"
+        push_notify "⚠️ Load 過高 ($(cat /proc/loadavg))，重啟中"
+        sleep 3
+        reboot
+    else
+        log "⚠️ Load 高但開機未滿 5 分鐘，跳過重啟"
+    fi
+fi
+
 # 主逻辑
 log "开始网络连接检查..."
 

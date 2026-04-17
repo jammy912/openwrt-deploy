@@ -14,9 +14,7 @@
 
 . /etc/myscript/push_notify.inc 2>/dev/null
 . /etc/myscript/lock_handler.sh
-
-# AGH 啟動中 (I/O 高)，所有 cron 暫停
-lock_is_active "agh_startup" 300 && exit 0
+# auto-role 不受 agh_startup lock 限制 (它自己要判斷角色+停 AGH)
 
 PUSH_NAMES="jammy"
 
@@ -545,6 +543,7 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi + AGH
     svc_disable ddns
     svc_disable adguardhome
+    lock_remove "agh_startup" >/dev/null 2>&1
     # 副gw 不需 PBR 路由分流，但 /etc/dnsmasq.d/pbr -> /var/run/pbr.dnsmasq
     # 若 symlink target 不存在 dnsmasq 會 crash，touch 空檔即可
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
@@ -571,6 +570,7 @@ else
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     svc_disable adguardhome
+    lock_remove "agh_startup" >/dev/null 2>&1
     wg_stop
     # dnsmasq 直接用主 GW 的 DNS，不經 AGH
     if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
@@ -1074,7 +1074,7 @@ else
     fi
     # 副 gw / client: AGH 不該跑 (DNS 直接走主 GW)
     if pgrep -f adguardhome >/dev/null 2>&1; then
-        svc_disable adguardhome; log "fixup: AGH 不應運行 ($GW_TYPE)，已停止"; FIXUP=1
+        svc_disable adguardhome; lock_remove "agh_startup" >/dev/null 2>&1; log "fixup: AGH 不應運行 ($GW_TYPE)，已停止"; FIXUP=1
     fi
     if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
         uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
