@@ -1045,7 +1045,26 @@ if [ "$GW_TYPE" = "主gw" ]; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
     fi
     if ! pgrep -f adguardhome >/dev/null 2>&1; then
-        /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
+        # OOM 冷卻: 最近 10 分鐘內被 OOM kill 過就不重啟，避免 OOM→restart→OOM 循環
+        AGH_COOLDOWN="/tmp/adguardhome.oom_cooldown"
+        OOM_RECENT=$(dmesg | grep -c "Out of memory.*AdGuardHome")
+        if [ "$OOM_RECENT" -gt 0 ]; then
+            if [ -f "$AGH_COOLDOWN" ]; then
+                COOL_AGE=$(( $(date +%s) - $(date -r "$AGH_COOLDOWN" +%s 2>/dev/null || echo 0) ))
+                if [ "$COOL_AGE" -lt 600 ]; then
+                    log "fixup: AdGuardHome 未運行，但近期有 OOM (${COOL_AGE}s ago)，跳過重啟"
+                else
+                    touch "$AGH_COOLDOWN"
+                    /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，冷卻已過，已啟動"; FIXUP=1
+                fi
+            else
+                touch "$AGH_COOLDOWN"
+                log "fixup: AdGuardHome 被 OOM kill，建立冷卻鎖，跳過本次重啟"
+            fi
+        else
+            rm -f "$AGH_COOLDOWN"
+            /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
+        fi
     fi
 else
     # 副 gw / client: WG/pbr/qosify/IOT 不該跑
