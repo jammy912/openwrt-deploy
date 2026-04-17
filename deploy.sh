@@ -1002,6 +1002,15 @@ case "$BOARD_NAME" in
         ;;
 esac
 
+# zram swap 大小 (依機型調整，記憶體較少的機型加大 swap 避免 OOM)
+case "$BOARD_NAME" in
+    linksys,mx4200*)
+        # MX4200: 512MB RAM 但 kernel 保留 ~150MB，可用僅 372MB，設 100%
+        uci set system.@system[0].zram_size_mb='372'
+        echo "  ✅ zram swap 設為 372MB (MX4200)"
+        ;;
+esac
+
 # NTP 時間同步伺服器
 uci set system.ntp.enabled='1'
 uci delete system.ntp.server 2>/dev/null
