@@ -580,6 +580,11 @@ main() {
 
     # MAC 正規化: dash → colon (e8-9f-80 → e8:9f:80)，避免 dnsmasq 啟動失敗
     if [ -s "$TMP_DHCP" ]; then
+        BAD_MACS=$(grep 'option mac' "$TMP_DHCP" | grep -o "'[^']*-[^']*'" | tr -d "'" | paste -sd, -)
+        if [ -n "$BAD_MACS" ]; then
+            push_notify "⚠️ DHCP MAC 格式錯誤 (dash): $BAD_MACS → 已自動修正為 colon"
+            log "⚠️ MAC dash→colon 修正: $BAD_MACS"
+        fi
         awk '{if($0 ~ /option mac/){gsub(/-/,":")} print}' "$TMP_DHCP" > "${TMP_DHCP}.tmp" && mv "${TMP_DHCP}.tmp" "$TMP_DHCP"
     fi
 
