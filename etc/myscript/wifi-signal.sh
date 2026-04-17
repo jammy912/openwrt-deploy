@@ -145,19 +145,31 @@ kick_weak_clients() {
 
 
 # =====================
-# UCI & IFACE 名稱設定
+# UCI & IFACE 名稱設定 (動態偵測 band，支援 tri-band)
 # =====================
-UCI_RADIO_2G="radio0"
-UCI_RADIO_5G="radio1"
-UCI_IFACE_2G="default_radio0"
-UCI_IFACE_5G="default_radio1"
+UCI_RADIO_2G=""
+UCI_RADIO_5G=""
+for _r in radio0 radio1 radio2 radio3; do
+    _b=$(uci -q get wireless.$_r.band 2>/dev/null)
+    case "$_b" in
+        2g) [ -z "$UCI_RADIO_2G" ] && UCI_RADIO_2G="$_r" ;;
+        5g) [ -z "$UCI_RADIO_5G" ] && UCI_RADIO_5G="$_r" ;;
+    esac
+done
+[ -z "$UCI_RADIO_2G" ] && UCI_RADIO_2G="radio0"
+[ -z "$UCI_RADIO_5G" ] && UCI_RADIO_5G="radio1"
+UCI_IFACE_2G="default_${UCI_RADIO_2G}"
+UCI_IFACE_5G="default_${UCI_RADIO_5G}"
 
 log "設定 2.4GHz: $UCI_RADIO_2G, 介面: $UCI_IFACE_2G"
 log "設定 5GHz  : $UCI_RADIO_5G, 介面: $UCI_IFACE_5G"
 
 # 踢除弱信號客戶端 (僅在有設定門檻時)
-[ "$ENABLE_5G" -eq 1 ] && [ -n "$RSSI_KICK_5G" ] && kick_weak_clients "phy1-ap0" "$RSSI_KICK_5G"
-[ "$ENABLE_2G" -eq 1 ] && [ -n "$RSSI_KICK_2G" ] && kick_weak_clients "phy0-ap0" "$RSSI_KICK_2G"
+# 動態取得 phy 名稱: radioN → phyN
+_PHY_5G=$(echo "$UCI_RADIO_5G" | sed 's/radio/phy/')
+_PHY_2G=$(echo "$UCI_RADIO_2G" | sed 's/radio/phy/')
+[ "$ENABLE_5G" -eq 1 ] && [ -n "$RSSI_KICK_5G" ] && kick_weak_clients "${_PHY_5G}-ap0" "$RSSI_KICK_5G"
+[ "$ENABLE_2G" -eq 1 ] && [ -n "$RSSI_KICK_2G" ] && kick_weak_clients "${_PHY_2G}-ap0" "$RSSI_KICK_2G"
 
 change_occured=0
 
@@ -392,9 +404,7 @@ log "[動態監控] 本次監控 MAC 列表: $MONITORED_MACS"
 # =====================
 get_clients_on_radio() {
     local radio_name="$1"
-    local interface_prefix=""
-    [ "$radio_name" = "radio0" ] && interface_prefix="phy0"
-    [ "$radio_name" = "radio1" ] && interface_prefix="phy1"
+    local interface_prefix=$(echo "$radio_name" | sed 's/radio/phy/')
 
     local interfaces=$(iwinfo | awk -v p="$interface_prefix" '$1 ~ p {print $1}')
     [ -z "$interfaces" ] && { echo ""; return; }
@@ -422,9 +432,7 @@ get_weakest_signal() {
     # [新增] USE_HEARING_MAP=1 時，改用 hearing map 的本機節點訊號 (包含 probe-only 裝置)
     # 只計算對應 radio 的介面 (phy0=2.4G, phy1=5G)
     if [ "$USE_HEARING_MAP" = "1" ] && [ -n "$HEARING_MAP_JSON" ]; then
-        local hm_prefix=""
-        [ "$radio_name" = "radio0" ] && hm_prefix="hostapd.phy0"
-        [ "$radio_name" = "radio1" ] && hm_prefix="hostapd.phy1"
+        local hm_prefix="hostapd.$(echo "$radio_name" | sed 's/radio/phy/')"
         local weakest_hm
         weakest_hm=$(echo "$HEARING_MAP_JSON" | awk -v macs="$MONITORED_MACS" -v pfx="$hm_prefix" '
             BEGIN {
@@ -466,9 +474,7 @@ get_weakest_signal() {
         return
     fi
 
-    local interface_prefix=""
-    [ "$radio_name" = "radio0" ] && interface_prefix="phy0"
-    [ "$radio_name" = "radio1" ] && interface_prefix="phy1"
+    local interface_prefix=$(echo "$radio_name" | sed 's/radio/phy/')
 
     local interfaces=$(iwinfo | awk -v p="$interface_prefix" '$1 ~ p {print $1}' | sort -u)
     [ -z "$interfaces" ] && {
@@ -613,8 +619,8 @@ handle_boost() {
             rm -f "$BOOST_STATE" "$BOOST_START" "$BOOST_START.mac"
         else
             # 檢查原始斷線裝置是否重新連線到任何頻段
-            local current_5g_clients=$(get_clients_on_radio "radio1")
-            local current_2g_clients=$(get_clients_on_radio "radio0")
+            local current_5g_clients=$(get_clients_on_radio "$UCI_RADIO_5G")
+            local current_2g_clients=$(get_clients_on_radio "$UCI_RADIO_2G")
             
             if echo "$current_5g_clients $current_2g_clients" | grep -qi "$original_dropped_mac"; then
                 log "[救援成功] $BAND 裝置 $original_dropped_mac 已重新連線，解除救援"
