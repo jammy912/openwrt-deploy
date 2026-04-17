@@ -126,12 +126,18 @@ MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 [ -z "$MY_PRI" ] && MY_PRI=50
 MY_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
 
-# DNS/連外健康檢查: IP 能通但 DNS 不通時 (ex: AGH 壞/upstream 空)，
-# 暫時降 priority=0 讓出主 gw，避免把整個 mesh 的 DNS 也拖壞。
-# 下次 auto-role 若 DNS 恢復，會用回 .mesh_priority 原值。
+# 連外健康檢查: WAN 不通時暫時降 priority=0 讓出主 gw。
+# ping IP 避免 DNS 未就緒誤判；失敗後重試 3 次 (間隔 10s)。
 if [ "$NEW_ROLE" = "gateway" ]; then
-    if ! ping -c 1 -W 3 www.google.com >/dev/null 2>&1; then
-        log "⚠️ DNS/連外異常 (ping www.google.com 失敗)，暫時降 priority 0"
+    _wan_ok=0
+    for _try in 1 2 3; do
+        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            _wan_ok=1; break
+        fi
+        [ "$_try" -lt 3 ] && sleep 10
+    done
+    if [ "$_wan_ok" = "0" ]; then
+        log "⚠️ 連外異常 (ping 8.8.8.8 重試 3 次失敗)，暫時降 priority 0"
         MY_PRI=0
     fi
 fi
