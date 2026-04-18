@@ -356,7 +356,7 @@ else
 fi
 if [ "$install_usb" = "y" ]; then
     pkg_install kmod-usb3 kmod-usb-storage-uas usbutils block-mount mount-utils \
-        kmod-fs-ext4 kmod-fs-exfat kmod-fs-ntfs3 ntfs-3g \
+        kmod-fs-ext4 e2fsprogs fdisk kmod-fs-exfat kmod-fs-ntfs3 ntfs-3g \
         samba4-server luci-app-samba4 luci-i18n-samba4-zh-tw 2>/dev/null
     uci set samba4.@samba[0].interface='lan'
     uci commit samba4
