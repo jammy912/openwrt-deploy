@@ -835,7 +835,13 @@ if [ "$NEED_WG_START" = "1" ]; then
 fi
 
 # 取得最新 IP (network restart 後可能改變)
-FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+FINAL_IP=""
+for _iw in 1 2 3 4 5; do
+    FINAL_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+    [ -n "$FINAL_IP" ] && break
+    sleep 2
+done
+FINAL_IP="${FINAL_IP:-$(uci get network.lan.ipaddr 2>/dev/null)}"
 if [ "$IS_PRIMARY" = "1" ] && [ "$NEW_ROLE" = "gateway" ]; then
     GW_TYPE="主gw"
 elif [ "$NEW_ROLE" = "gateway" ]; then
