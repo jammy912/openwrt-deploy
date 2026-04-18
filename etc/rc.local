@@ -53,6 +53,7 @@ if [ -z "$_USB_PART" ]; then
             mkfs.ext4 -L adguard "${_USB}1" >/dev/null 2>&1
             mkswap "${_USB}2" >/dev/null 2>&1
             logger -t rc.local "USB 分割完成 (${_USB}1=ext4, ${_USB}2=swap)"
+            push_notify "USB $_USB (${_USB_GB}GB) 已自動分割 (ext4+swap)"
             _USB_PART="${_USB}1"
             _USB_SWAP="${_USB}2"
         fi
@@ -65,6 +66,7 @@ if [ -n "$_USB_PART" ] && [ -b "$_USB_PART" ]; then
     if grep -q " /mnt/usb " /proc/mounts; then
         chown adguardhome:adguardhome /mnt/usb 2>/dev/null
         logger -t rc.local "USB ext4 已掛載 /mnt/usb ($_USB_PART)"
+        push_notify "USB 已掛載 /mnt/usb ($_USB_PART) → AGH work-dir"
         uci set adguardhome.config.work_dir='/mnt/usb'
         uci commit adguardhome 2>/dev/null
     fi
@@ -178,6 +180,7 @@ done
     _AGH_WD=$(uci get adguardhome.config.work_dir 2>/dev/null)
     if [ "$_AGH_WD" = "/mnt/usb" ] && ! grep -q " /mnt/usb " /proc/mounts; then
         logger -t rc.local "⚠️ USB 未掛載，AGH work-dir 退回 /var/lib/adguardhome"
+        push_notify "⚠️ USB 未掛載，AGH 退回 NAND"
         uci set adguardhome.config.work_dir='/var/lib/adguardhome'
         uci commit adguardhome
     fi
