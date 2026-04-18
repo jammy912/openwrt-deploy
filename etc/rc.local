@@ -106,35 +106,6 @@ case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
         ;;
 esac
 
-# 開機時先停掉 AGH，避免載入過濾清單拖慢 NAND I/O 導致全系統卡頓
-# procd boot trigger 是異步的 (interface.*.up 後 5 秒)，需要背景持續攔截
-# dnsmasq 會直連 8.8.8.8，check-adguard cron 等 AGH 起來後自動切回
-/etc/init.d/adguardhome disable 2>/dev/null
-/etc/init.d/adguardhome stop 2>/dev/null
-killall AdGuardHome 2>/dev/null
-# 背景持續攔截：每 10 秒檢查一次，連續 60 秒內如果 AGH 被 trigger 拉起就殺掉
-(for _i in 1 2 3 4 5 6; do sleep 10; killall AdGuardHome 2>/dev/null; done) &
-
-# AGH safe browsing 域名預解析寫入 /etc/hosts
-# 避免 AGH 啟動 I/O 風暴期間 DNS 解析 timeout → OOM 循環
-(
-    # 等網路就緒
-    for _w in 1 2 3 4 5 6 7 8 9 10; do
-        ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
-        sleep 3
-    done
-    for _dom in family.adguard-dns.com standard-block.dns.adguard.com family-block.dns.adguard.com unfiltered.adguard-dns.com adguardteam.github.io; do
-        # 先清掉舊的
-        sed -i "/ ${_dom}$/d" /etc/hosts 2>/dev/null
-        # 解析 IPv4 並寫入
-        _ips=$(nslookup "$_dom" 8.8.8.8 2>/dev/null | awk '/^Address/&&!/8\.8\.8\.8/{print $NF}' | grep -E '^[0-9]+\.')
-        for _ip in $_ips; do
-            echo "$_ip $_dom" >> /etc/hosts
-        done
-    done
-    logger -t rc.local "AGH hosts 預解析完成"
-) &
-
 /etc/myscript/check-custpkgs.sh &
 
 # hybrid 模式: 開機自動偵測角色
@@ -172,14 +143,9 @@ for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 
   fi
 done
 
-# 開機同步 Google Sheet 設定 + 延遲啟動 AGH
-# AGH 已在 rc.local 開頭停掉，等其他服務穩定後再啟動
-# dnsmasq 用上游 DNS 確保 sync 能連外網
+# 開機同步 Google Sheet 設定 + 啟動 AGH
 (
     /etc/myscript/sync-googleconfig.sh --apply
-    # 延遲啟動 AGH，避免 I/O 風暴 (NAND flash + zram swap 瓶頸)
-    logger -t rc.local "延遲啟動 AdGuardHome..."
-    sleep 120
     # USB 掛載失敗時退回 NAND work-dir，避免 AGH 寫入空目錄
     _AGH_WD=$(uci get adguardhome.config.work_dir 2>/dev/null)
     if [ "$_AGH_WD" = "/mnt/usb" ] && ! grep -q " /mnt/usb " /proc/mounts; then
