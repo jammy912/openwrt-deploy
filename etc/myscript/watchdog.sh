@@ -34,7 +34,7 @@ check_ip() {
 
 # === Load 過高自動重啟 ===
 LOAD_1M=$(awk -F. '{print $1}' /proc/loadavg)
-if [ "$LOAD_1M" -ge 8 ]; then
+if [ "$LOAD_1M" -ge 12 ]; then
     UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
     if [ "$UPTIME_SEC" -le 300 ]; then
         log "⚠️ Load 高但開機未滿 5 分鐘，跳過重啟"
