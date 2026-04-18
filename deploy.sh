@@ -1181,6 +1181,12 @@ AGH_BIN=$(command -v AdGuardHome 2>/dev/null || which AdGuardHome 2>/dev/null ||
 echo "  AGH yaml 路徑: $AGH_YAML"
 # AGH 首次安裝不會自動產生 yaml (會進入 setup wizard)
 # 需要透過 install API 完成初始設定
+# AGH 記憶體限制 (避免 OOM)
+uci set adguardhome.config.memlimit='128'
+uci set adguardhome.config.gc='50'
+uci commit adguardhome
+echo "  ✅ AGH memlimit=128MB gc=50%"
+
 if [ -n "$AGH_BIN" ]; then
     echo "  📝 初始化 AdGuard Home..."
     # 確保 AGH 完全停掉
