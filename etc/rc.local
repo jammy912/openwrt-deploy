@@ -59,7 +59,7 @@ killall AdGuardHome 2>/dev/null
         ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
         sleep 3
     done
-    for _dom in family.adguard-dns.com sb.dns.adguard.com pc.dns.adguard.com standard-block.dns.adguard.com family-block.dns.adguard.com unfiltered.adguard-dns.com adguardteam.github.io; do
+    for _dom in family.adguard-dns.com standard-block.dns.adguard.com family-block.dns.adguard.com unfiltered.adguard-dns.com adguardteam.github.io; do
         # 先清掉舊的
         sed -i "/ ${_dom}$/d" /etc/hosts 2>/dev/null
         # 解析 IPv4 並寫入
