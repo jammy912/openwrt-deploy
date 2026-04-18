@@ -11,6 +11,39 @@ mkdir -p /tmp/config_ram
 cp -a /etc/config/* /tmp/config_ram/
 
 mount --bind /tmp/config_ram /etc/config
+# USB 自動初始化 + 掛載 (AGH work-dir on sda1, swap on sda2)
+_USB_KB=$(cat /sys/block/sda/size 2>/dev/null)
+_USB_KB=${_USB_KB:-0}
+_USB_GB=$((_USB_KB / 2 / 1024 / 1024))
+if [ -b /dev/sda ] && ! [ -b /dev/sda1 ] && [ "$_USB_GB" -le 64 ]; then
+    # 新 USB (≤64GB)：自動分割 (1GB ext4 + 剩餘 swap)
+    logger -t rc.local "偵測到未分割 USB (${_USB_GB}GB)，自動初始化..."
+    echo -e "o\nn\np\n1\n\n+1G\nn\np\n2\n\n\nt\n2\n82\nw" | fdisk /dev/sda >/dev/null 2>&1
+    sleep 2
+    if [ -b /dev/sda1 ]; then
+        mkfs.ext4 -L adguard /dev/sda1 >/dev/null 2>&1
+        mkswap /dev/sda2 >/dev/null 2>&1
+        logger -t rc.local "USB 分割完成 (sda1=ext4, sda2=swap)"
+    fi
+elif [ -b /dev/sda ] && ! [ -b /dev/sda1 ] && [ "$_USB_GB" -gt 64 ]; then
+    logger -t rc.local "⚠️ USB 容量 ${_USB_GB}GB 超過 64GB，跳過自動分割"
+fi
+if [ -b /dev/sda1 ]; then
+    mkdir -p /mnt/usb
+    if ! mount /dev/sda1 /mnt/usb 2>/dev/null; then
+        # 掛載失敗 (檔案系統損壞或非 ext4)，重新格式化
+        logger -t rc.local "⚠️ sda1 掛載失敗，重新格式化..."
+        mkfs.ext4 -L adguard /dev/sda1 >/dev/null 2>&1
+        mount /dev/sda1 /mnt/usb 2>/dev/null
+    fi
+    if mountpoint -q /mnt/usb 2>/dev/null; then
+        chown adguardhome:adguardhome /mnt/usb 2>/dev/null
+        logger -t rc.local "USB ext4 已掛載 /mnt/usb"
+        # work_dir 指向 USB
+        uci set adguardhome.config.work_dir='/mnt/usb'
+        uci commit adguardhome 2>/dev/null
+    fi
+fi
 
 mkdir -p /tmp/crontabs_ram
 
@@ -116,6 +149,13 @@ done
     # 延遲啟動 AGH，避免 I/O 風暴 (NAND flash + zram swap 瓶頸)
     logger -t rc.local "延遲啟動 AdGuardHome..."
     sleep 120
+    # USB 掛載失敗時退回 NAND work-dir，避免 AGH 寫入空目錄
+    _AGH_WD=$(uci get adguardhome.config.work_dir 2>/dev/null)
+    if [ "$_AGH_WD" = "/mnt/usb" ] && ! mountpoint -q /mnt/usb 2>/dev/null; then
+        logger -t rc.local "⚠️ USB 未掛載，AGH work-dir 退回 /var/lib/adguardhome"
+        uci set adguardhome.config.work_dir='/var/lib/adguardhome'
+        uci commit adguardhome
+    fi
     # 建立 agh_startup lock，防止 check-adguard/auto-role 在啟動期間干擾
     . /etc/myscript/lock_handler.sh
     lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
@@ -126,8 +166,8 @@ done
 ) &
 
 # USB swap (priority 低於 zram，溢出時使用)
-if [ -b /dev/sda1 ]; then
-    swapon -p 10 /dev/sda1 2>/dev/null && logger -t rc.local "USB swap 已啟用"
+if [ -b /dev/sda2 ]; then
+    swapon -p 10 /dev/sda2 2>/dev/null && logger -t rc.local "USB swap 已啟用"
 fi
 
 exit 0
