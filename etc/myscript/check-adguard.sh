@@ -19,9 +19,9 @@ if lock_is_active "agh_startup" 300; then
     exit 0
 fi
 
-# client 模式不用 AGH，跳過檢查
-_role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
-[ "$_role" = "client" ] && exit 0
+# 非主 gw 不用 AGH，跳過檢查
+_gw_type=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+[ "$_gw_type" != "主gw" ] && exit 0
 
 TEST_DNS="127.0.0.1"
 TEST_PORT=53535

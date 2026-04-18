@@ -12,9 +12,9 @@ trap 'rm -f "$LOCK"' EXIT
 
 # 將所有參數原樣傳遞
 /etc/myscript/wifi-signal.sh "$@"
-sleep 15
+sleep 13
 /etc/myscript/wifi-signal.sh "$@"
-sleep 15
+sleep 13
 /etc/myscript/wifi-signal.sh "$@"
-sleep 15
+sleep 13
 /etc/myscript/wifi-signal.sh "$@"
