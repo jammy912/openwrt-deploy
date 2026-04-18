@@ -11,35 +11,46 @@ mkdir -p /tmp/config_ram
 cp -a /etc/config/* /tmp/config_ram/
 
 mount --bind /tmp/config_ram /etc/config
-# USB 自動初始化 + 掛載 (AGH work-dir on sda1, swap on sda2)
-_USB_KB=$(cat /sys/block/sda/size 2>/dev/null)
-_USB_KB=${_USB_KB:-0}
-_USB_GB=$((_USB_KB / 2 / 1024 / 1024))
-if [ -b /dev/sda ] && ! [ -b /dev/sda1 ] && [ "$_USB_GB" -le 64 ]; then
-    # 新 USB (≤64GB)：自動分割 (1GB ext4 + 剩餘 swap)
-    logger -t rc.local "偵測到未分割 USB (${_USB_GB}GB)，自動初始化..."
-    echo -e "o\nn\np\n1\n\n+1G\nn\np\n2\n\n\nt\n2\n82\nw" | fdisk /dev/sda >/dev/null 2>&1
-    sleep 2
-    if [ -b /dev/sda1 ]; then
-        mkfs.ext4 -L adguard /dev/sda1 >/dev/null 2>&1
-        mkswap /dev/sda2 >/dev/null 2>&1
-        logger -t rc.local "USB 分割完成 (sda1=ext4, sda2=swap)"
+# USB 自動初始化 + 掛載 (AGH work-dir on ${_USB}1, swap on ${_USB}2)
+# 多顆 USB 時選容量最小且 ≤64GB 的
+_USB=""
+_USB_GB=0
+_MIN_SIZE=999999
+for _dev in /sys/block/sd*; do
+    _name=$(basename "$_dev")
+    [ -b "/dev/$_name" ] || continue
+    _sectors=$(cat "$_dev/size" 2>/dev/null)
+    _sectors=${_sectors:-0}
+    _gb=$((_sectors / 2 / 1024 / 1024))
+    [ "$_gb" -eq 0 ] && continue
+    if [ "$_gb" -le 64 ] && [ "$_sectors" -lt "$_MIN_SIZE" ]; then
+        _MIN_SIZE=$_sectors
+        _USB="/dev/$_name"
+        _USB_GB=$_gb
     fi
-elif [ -b /dev/sda ] && ! [ -b /dev/sda1 ] && [ "$_USB_GB" -gt 64 ]; then
-    logger -t rc.local "⚠️ USB 容量 ${_USB_GB}GB 超過 64GB，跳過自動分割"
+done
+if [ -n "$_USB" ] && ! [ -b "${_USB}1" ]; then
+    # 新 USB (≤64GB)：自動分割 (1GB ext4 + 剩餘 swap)
+    logger -t rc.local "偵測到未分割 USB $_USB (${_USB_GB}GB)，自動初始化..."
+    echo -e "o\nn\np\n1\n\n+1G\nn\np\n2\n\n\nt\n2\n82\nw" | fdisk "$_USB" >/dev/null 2>&1
+    sleep 2
+    if [ -b "${_USB}1" ]; then
+        mkfs.ext4 -L adguard "${_USB}1" >/dev/null 2>&1
+        mkswap "${_USB}2" >/dev/null 2>&1
+        logger -t rc.local "USB 分割完成 (${_USB}1=ext4, ${_USB}2=swap)"
+    fi
 fi
-if [ -b /dev/sda1 ]; then
+if [ -n "$_USB" ] && [ -b "${_USB}1" ]; then
     mkdir -p /mnt/usb
-    if ! mount /dev/sda1 /mnt/usb 2>/dev/null; then
+    if ! mount "${_USB}1" /mnt/usb 2>/dev/null; then
         # 掛載失敗 (檔案系統損壞或非 ext4)，重新格式化
-        logger -t rc.local "⚠️ sda1 掛載失敗，重新格式化..."
-        mkfs.ext4 -L adguard /dev/sda1 >/dev/null 2>&1
-        mount /dev/sda1 /mnt/usb 2>/dev/null
+        logger -t rc.local "⚠️ ${_USB}1 掛載失敗，重新格式化..."
+        mkfs.ext4 -L adguard "${_USB}1" >/dev/null 2>&1
+        mount "${_USB}1" /mnt/usb 2>/dev/null
     fi
     if mountpoint -q /mnt/usb 2>/dev/null; then
         chown adguardhome:adguardhome /mnt/usb 2>/dev/null
-        logger -t rc.local "USB ext4 已掛載 /mnt/usb"
-        # work_dir 指向 USB
+        logger -t rc.local "USB ext4 已掛載 /mnt/usb ($_USB, ${_USB_GB}GB)"
         uci set adguardhome.config.work_dir='/mnt/usb'
         uci commit adguardhome 2>/dev/null
     fi
@@ -166,8 +177,8 @@ done
 ) &
 
 # USB swap (priority 低於 zram，溢出時使用)
-if [ -b /dev/sda2 ]; then
-    swapon -p 10 /dev/sda2 2>/dev/null && logger -t rc.local "USB swap 已啟用"
+if [ -n "$_USB" ] && [ -b "${_USB}2" ]; then
+    swapon -p 10 "${_USB}2" 2>/dev/null && logger -t rc.local "USB swap 已啟用 (${_USB}2)"
 fi
 
 exit 0
