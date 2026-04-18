@@ -71,6 +71,15 @@ if [ -n "$_USB_PART" ] && [ -b "$_USB_PART" ]; then
         uci commit adguardhome 2>/dev/null
     fi
 fi
+# 有 USB 口的機型找不到可用 USB 時推播提醒
+if ! grep -q " /mnt/usb " /proc/mounts; then
+    case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+        linksys,mx4200*)
+            logger -t rc.local "⚠️ 未偵測到可用 USB，AGH 將使用 NAND"
+            push_notify "⚠️ MX4200 未偵測到可用 USB (≤64GB)，請插入 USB"
+            ;;
+    esac
+fi
 
 mkdir -p /tmp/crontabs_ram
 
