@@ -1015,12 +1015,15 @@ case "$BOARD_NAME" in
         ;;
 esac
 
-# zram swap 大小 (依機型調整，記憶體較少的機型加大 swap 避免 OOM)
+# zram swap 設定
+uci set system.@system[0].zram_comp_algorithm='zstd'
 case "$BOARD_NAME" in
     linksys,mx4200*)
-        # MX4200: 512MB RAM 但 kernel 保留 ~150MB，可用僅 372MB，設 100%
         uci set system.@system[0].zram_size_mb='372'
-        echo "  ✅ zram swap 設為 372MB (MX4200)"
+        echo "  ✅ zram swap 設為 372MB zstd (MX4200)"
+        ;;
+    *)
+        echo "  ✅ zram swap 壓縮演算法設為 zstd"
         ;;
 esac
 
