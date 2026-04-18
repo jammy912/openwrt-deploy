@@ -28,7 +28,10 @@ lock_check_and_create "$LOCK_NAME" "$EXPIRY_SEC"
 if [ $? -ne 0 ]; then
     exit 0
 fi
-trap "lock_remove $LOCK_NAME" TERM INT EXIT
+trap "lock_remove $LOCK_NAME; rm -f /tmp/cron_global.lock" TERM INT EXIT
+
+# 全域 cron 排隊鎖
+cron_global_lock 60 || { lock_remove "$LOCK_NAME"; exit 0; }
 
 # =====================================================
 # 配置

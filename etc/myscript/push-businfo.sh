@@ -32,6 +32,11 @@
 #   push-businfo.sh 99 "台北車站" "往北投" Taipei              # 明確指定城市
 #   push-businfo.sh 307 "市政府站" "往板橋" auto 10            # 超過10分鐘不推播
 
+# 全域 cron 排隊鎖
+. /etc/myscript/lock_handler.sh
+cron_global_lock 60 || exit 0
+trap 'rm -f /tmp/cron_global.lock' EXIT
+
 # Load push notification function
 . /etc/myscript/push_notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}" # 環境變數覆寫，例如 PUSH_NAMES="admin;ann" push-businfo.sh ...

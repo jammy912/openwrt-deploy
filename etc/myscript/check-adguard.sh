@@ -6,7 +6,11 @@ if [ -f "$LOCK" ]; then
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
+
+# 全域 cron 排隊鎖
+. /etc/myscript/lock_handler.sh
+cron_global_lock 60 || exit 0
 
 # 引入通知器
 . /etc/myscript/push_notify.inc

@@ -17,7 +17,10 @@ if [ $LOCK_STATUS -ne 0 ]; then
     exit 0
 fi
 
-trap "lock_remove $LOCK_NAME" TERM INT EXIT
+trap "lock_remove $LOCK_NAME; rm -f /tmp/cron_global.lock" TERM INT EXIT
+
+# 全域 cron 排隊鎖
+cron_global_lock 60 || { lock_remove "$LOCK_NAME"; exit 0; }
 
 echo "鎖定檢查通過，開始執行同步任務..."
 

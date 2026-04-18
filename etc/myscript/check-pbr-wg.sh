@@ -17,7 +17,11 @@ if [ -f "$LOCK" ]; then
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
+
+# 全域 cron 排隊鎖
+. /etc/myscript/lock_handler.sh
+cron_global_lock 60 || exit 0
 
 # 非主gw 不需要檢查 PBR/WG 狀態
 GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)

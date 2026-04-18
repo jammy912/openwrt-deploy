@@ -32,7 +32,10 @@ if [ -f "$LOCKFILE" ]; then
     rm -f "$LOCKFILE"
 fi
 echo $$ > "$LOCKFILE"
-trap 'rm -f "$LOCKFILE"' EXIT
+trap 'rm -f "$LOCKFILE" /tmp/cron_global.lock' EXIT
+
+# 全域 cron 排隊鎖
+cron_global_lock 60 || exit 0
 
 # --debug 模式: 每步推播 / --dry-run 模式: 只偵測不執行
 DEBUG=0; DRY_RUN=0

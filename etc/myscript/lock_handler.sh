@@ -71,6 +71,33 @@ lock_is_active() {
     return 1
 }
 
+# 函數: 全域 cron 排隊鎖 (一次只跑一個 cron 腳本)
+# 用法: cron_global_lock [超時秒數] (預設 60)
+# 取得鎖後自動在 EXIT 時釋放
+# 返回: 0=取得鎖, 1=超時放棄
+_CRON_GLOBAL_LOCKFILE="/tmp/cron_global.lock"
+cron_global_lock() {
+    _CGL_TIMEOUT=${1:-60}
+    _CGL_WAITED=0
+    while [ -f "$_CRON_GLOBAL_LOCKFILE" ]; do
+        _CGL_PID=$(cat "$_CRON_GLOBAL_LOCKFILE" 2>/dev/null)
+        # 持有者已死，清掉 stale lock
+        if [ -n "$_CGL_PID" ] && ! kill -0 "$_CGL_PID" 2>/dev/null; then
+            rm -f "$_CRON_GLOBAL_LOCKFILE"
+            break
+        fi
+        if [ "$_CGL_WAITED" -ge "$_CGL_TIMEOUT" ]; then
+            logger -t cron-lock "$(basename "$0"): 等待全域鎖超時 (${_CGL_TIMEOUT}s)，放棄"
+            return 1
+        fi
+        sleep 1
+        _CGL_WAITED=$((_CGL_WAITED + 1))
+    done
+    echo $$ > "$_CRON_GLOBAL_LOCKFILE"
+    # 注意: 呼叫端需自行在 trap EXIT 中加入 rm -f /tmp/cron_global.lock
+    return 0
+}
+
 # 函數: 移除鎖定檔案 (不變)
 lock_remove() {
     LOCK_NAME=$1
