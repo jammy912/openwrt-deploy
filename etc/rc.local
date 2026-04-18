@@ -166,6 +166,12 @@ done
     # 建立 agh_startup lock，防止 check-adguard/auto-role 在啟動期間干擾
     . /etc/myscript/lock_handler.sh
     lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+    # AGH 記憶體限制 (避免 OOM)，確保所有機器都有設定
+    uci -q get adguardhome.config.memlimit >/dev/null || uci set adguardhome.config.memlimit='128'
+    uci -q get adguardhome.config.gc >/dev/null || uci set adguardhome.config.gc='50'
+    uci commit adguardhome 2>/dev/null
+    # 修正 GOMEMLIMIT 單位 (套件升級會覆蓋 init.d，每次開機 patch)
+    sed -i 's|GOMEMLIMIT="$memlimit"|GOMEMLIMIT="${memlimit}MiB"|' /etc/init.d/adguardhome
     /etc/init.d/adguardhome enable 2>/dev/null
     /etc/init.d/adguardhome start 2>/dev/null
     logger -t rc.local "AdGuardHome 已啟動"

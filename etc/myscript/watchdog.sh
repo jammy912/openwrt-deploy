@@ -32,8 +32,12 @@ check_ip() {
     fi
 }
 
-# === Load 過高自動重啟 ===
+# === Load 警告 / 過高自動重啟 ===
 LOAD_1M=$(awk -F. '{print $1}' /proc/loadavg)
+if [ "$LOAD_1M" -ge 4 ] && [ "$LOAD_1M" -lt 12 ]; then
+    log "⚠️ Load 偏高 ($(cat /proc/loadavg))"
+    push_notify "⚠️ Load 偏高 ($(cat /proc/loadavg))"
+fi
 if [ "$LOAD_1M" -ge 12 ]; then
     UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
     if [ "$UPTIME_SEC" -le 300 ]; then

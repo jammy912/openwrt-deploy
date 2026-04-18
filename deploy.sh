@@ -1185,7 +1185,9 @@ echo "  AGH yaml 路徑: $AGH_YAML"
 uci set adguardhome.config.memlimit='128'
 uci set adguardhome.config.gc='50'
 uci commit adguardhome
-echo "  ✅ AGH memlimit=128MB gc=50%"
+# 修正 init.d: GOMEMLIMIT 需要帶單位 MiB，否則 Go 當成 bytes
+sed -i 's|GOMEMLIMIT="$memlimit"|GOMEMLIMIT="${memlimit}MiB"|' /etc/init.d/adguardhome
+echo "  ✅ AGH memlimit=128MB gc=50% (init.d patched)"
 
 if [ -n "$AGH_BIN" ]; then
     echo "  📝 初始化 AdGuard Home..."
