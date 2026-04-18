@@ -172,6 +172,19 @@ done
     uci commit adguardhome 2>/dev/null
     # 修正 GOMEMLIMIT 單位 (套件升級會覆蓋 init.d，每次開機 patch)
     sed -i 's|GOMEMLIMIT="$memlimit"|GOMEMLIMIT="${memlimit}MiB"|' /etc/init.d/adguardhome
+    # AGH DoH upstream 域名預解析寫入 /etc/hosts (避免啟動時 DNS 雞生蛋問題)
+    for _w in 1 2 3 4 5 6 7 8 9 10; do
+        ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
+        sleep 3
+    done
+    for _dom in family.adguard-dns.com standard-block.dns.adguard.com family-block.dns.adguard.com unfiltered.adguard-dns.com adguardteam.github.io; do
+        sed -i "/ ${_dom}$/d" /etc/hosts 2>/dev/null
+        _ips=$(nslookup "$_dom" 8.8.8.8 2>/dev/null | awk '/^Address/&&!/8\.8\.8\.8/{print $NF}' | grep -E '^[0-9]+\.')
+        for _ip in $_ips; do
+            echo "$_ip $_dom" >> /etc/hosts
+        done
+    done
+    logger -t rc.local "AGH hosts 預解析完成"
     /etc/init.d/adguardhome enable 2>/dev/null
     /etc/init.d/adguardhome start 2>/dev/null
     logger -t rc.local "AdGuardHome 已啟動"
