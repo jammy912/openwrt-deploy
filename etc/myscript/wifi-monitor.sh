@@ -1,9 +1,5 @@
 #!/bin/sh
 
-# AGH 啟動中 (I/O 高)，所有 cron 暫停
-. /etc/myscript/lock_handler.sh
-lock_is_active "agh_startup" 300 && exit 0
-
 LOCK="/tmp/wifi-monitor.lock"
 
 # 已有實例在跑就跳過

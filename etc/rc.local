@@ -81,6 +81,10 @@ mount --bind /tmp/crontabs_ram /etc/crontabs
 # 防止 reboot cron 造成開機循環
 sed -i '/^[^#].*reboot/d' /etc/crontabs/root
 
+# 確保 cron 服務啟動
+/etc/init.d/cron enable 2>/dev/null
+/etc/init.d/cron start 2>/dev/null
+
 # 清掉 /etc/dnsmasq.d/ 下 dangling symlink (常見: pbr 沒 enable 時 -> /var/run/pbr.dnsmasq)
 # 否則 dnsmasq boot 時 confdir 掃到失效連結會 crash loop
 for _f in /etc/dnsmasq.d/*; do

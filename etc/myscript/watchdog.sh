@@ -1,9 +1,5 @@
 #!/bin/sh
 
-# AGH 啟動中 (I/O 高)，所有 cron 暫停
-. /etc/myscript/lock_handler.sh
-lock_is_active "agh_startup" 300 && exit 0
-
 # 网络连接监控脚本
 # 监控三个关键DNS服务器的连通性
 # 如果三个IP都无法ping通，则自动重启路由器
