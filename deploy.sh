@@ -331,8 +331,7 @@ if [ "$MESH_ROLE" != "client" ]; then
         fi
     fi
     # 其他 gateway 套件
-    pkg_install bind-dig \
-        luci-proto-wireguard \
+    pkg_install luci-proto-wireguard \
         luci-app-pbr luci-i18n-pbr-zh-tw \
         luci-app-ddns luci-i18n-ddns-zh-tw \
         qosify 2>/dev/null

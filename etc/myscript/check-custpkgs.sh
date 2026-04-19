@@ -11,7 +11,7 @@ REQUIRED_PKGS="coreutils-base64 openssl-util curl rsync zram-swap kmod-zram e2fs
 # gateway 額外套件 (必須明確為 gateway 才裝，未設定角色時不裝)
 MESH_ROLE=$(cat /etc/myscript/.mesh_role 2>/dev/null)
 if [ "$MESH_ROLE" = "gateway" ] || [ "$MESH_ROLE" = "hybrid" ]; then
-    REQUIRED_PKGS="$REQUIRED_PKGS adguardhome bind-dig dnsmasq-full luci-proto-wireguard luci-app-pbr luci-i18n-pbr-zh-tw luci-app-ddns luci-i18n-ddns-zh-tw qosify jq iputils-arping"
+    REQUIRED_PKGS="$REQUIRED_PKGS adguardhome dnsmasq-full luci-proto-wireguard luci-app-pbr luci-i18n-pbr-zh-tw luci-app-ddns luci-i18n-ddns-zh-tw qosify jq iputils-arping"
 fi
 
 # 依 .modules 動態加入模組套件
