@@ -358,6 +358,16 @@ else
 fi
 uci commit network
 
+if [ "$NEED_FULL_RESTART_NET" = "1" ]; then
+    log "重啟網路 (batmesh_wire 變更)..."
+    /etc/init.d/network restart
+    NEED_RESTART_NET=0
+    for i in 1 2 3 4 5; do
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
+        sleep 2
+    done
+fi
+
 if [ "$NEED_RESTART_NET" = "1" ]; then
     # 用 ip addr 熱切換 LAN IP，避免 network restart 導致 WiFi 長時間斷線
     OLD_IP=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}')
@@ -691,13 +701,13 @@ if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
     if [ "$WANT_WIRED" = "N" ] && [ "$CUR_WIRE_DISABLED" != "1" ]; then
         uci set network.batmesh_wire.disabled='1'
         uci commit network
-        NEED_RESTART_NET=1
+        NEED_FULL_RESTART_NET=1
         log "有線 mesh ($WIRE_DEV) 已停用 (設定=N)"
         CHANGED=1
     elif [ "$WANT_WIRED" = "Y" ] && [ "$CUR_WIRE_DISABLED" = "1" ]; then
         uci delete network.batmesh_wire.disabled
         uci commit network
-        NEED_RESTART_NET=1
+        NEED_FULL_RESTART_NET=1
         log "有線 mesh ($WIRE_DEV) 已啟用 (設定=Y)"
         CHANGED=1
     fi
