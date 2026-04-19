@@ -61,9 +61,16 @@ if [ -n "$_USB_PART" ] && [ -b "$_USB_PART" ]; then
     if grep -q " /mnt/usb " /proc/mounts; then
         chown adguardhome:adguardhome /mnt/usb 2>/dev/null
         logger -t rc.local "USB ext4 已掛載 /mnt/usb ($_USB_PART)"
-        push_notify "USB 已掛載 /mnt/usb ($_USB_PART) → AGH work-dir"
-        uci set adguardhome.config.work_dir='/mnt/usb'
+        # USB → tmpfs (AGH work-dir 放 RAM，USB 只做持久備份)
+        mkdir -p /tmp/agh_workdir
+        if [ -d /mnt/usb/data ]; then
+            cp -a /mnt/usb/data /tmp/agh_workdir/
+            logger -t rc.local "AGH data 已從 USB 複製到 RAM"
+        fi
+        chown -R adguardhome:adguardhome /tmp/agh_workdir 2>/dev/null
+        uci set adguardhome.config.work_dir='/tmp/agh_workdir'
         uci commit adguardhome 2>/dev/null
+        push_notify "USB 已掛載 /mnt/usb ($_USB_PART) → AGH work-dir (RAM)"
     fi
 fi
 # 有 USB 口的機型找不到可用 USB 時推播提醒
@@ -150,10 +157,10 @@ done
 # 開機同步 Google Sheet 設定 + 啟動 AGH
 (
     /etc/myscript/sync-googleconfig.sh --apply
-    # USB 掛載失敗時退回 NAND work-dir，避免 AGH 寫入空目錄
+    # tmpfs work-dir 不存在時退回 NAND (USB 掛載失敗 = 沒複製 data)
     _AGH_WD=$(uci get adguardhome.config.work_dir 2>/dev/null)
-    if [ "$_AGH_WD" = "/mnt/usb" ] && ! grep -q " /mnt/usb " /proc/mounts; then
-        logger -t rc.local "⚠️ USB 未掛載，AGH work-dir 退回 /var/lib/adguardhome"
+    if [ "$_AGH_WD" = "/tmp/agh_workdir" ] && [ ! -d /tmp/agh_workdir ]; then
+        logger -t rc.local "⚠️ AGH tmpfs work-dir 不存在，退回 /var/lib/adguardhome"
         push_notify "⚠️ USB 未掛載，AGH 退回 NAND"
         uci set adguardhome.config.work_dir='/var/lib/adguardhome'
         uci commit adguardhome
