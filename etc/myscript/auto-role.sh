@@ -761,7 +761,20 @@ apply_5g_channel_policy() {
         if [ "$has_mesh" = "1" ] && [ "$mesh_wireless" = "Y" ] && [ "$mesh_disabled" = "0" ]; then
             tgt_ch="149"; tgt_chs=""
         else
-            tgt_ch="$ap_channel"; tgt_chs="$ap_channels"
+            tgt_ch="$ap_channel"
+            # 過濾掉該 radio 硬體不支援的頻道 (三頻機 phy 各有不同頻段)
+            _phy=$(echo "$radio" | sed 's/radio/phy/')
+            _avail=$(iw phy "$_phy" channels 2>/dev/null | grep -v disabled | grep -oE '\[([0-9]+)\]' | tr -d '[]')
+            tgt_chs=""
+            for _ch in $ap_channels; do
+                echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
+            done
+            tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
+            # 如果指定頻段全不支援，改用該 radio 實際可用的非 DFS 頻道
+            if [ -z "$tgt_chs" ]; then
+                tgt_chs=$(echo "$_avail" | tr '\n' ' ' | sed 's/ $//')
+                log "[channel-policy] $radio 指定頻段不可用，改用硬體可用: [$tgt_chs]"
+            fi
         fi
 
         cur_ch=$(uci get wireless.$radio.channel 2>/dev/null)
