@@ -770,9 +770,12 @@ apply_5g_channel_policy() {
                 echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
             done
             tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
-            # 如果指定頻段全不支援，改用該 radio 實際可用的非 DFS 頻道
+            # 如果指定頻段全不支援，改用非 DFS 可用頻道 (36 40 44 48 149 153 157 161 165)
             if [ -z "$tgt_chs" ]; then
-                tgt_chs=$(echo "$_avail" | tr '\n' ' ' | sed 's/ $//')
+                for _ch in 36 40 44 48 149 153 157 161 165; do
+                    echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
+                done
+                tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
                 log "[channel-policy] $radio 指定頻段不可用，改用硬體可用: [$tgt_chs]"
             fi
         fi
