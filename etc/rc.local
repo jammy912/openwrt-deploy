@@ -187,7 +187,11 @@ done
     logger -t rc.local "AGH hosts 預解析完成"
     /etc/init.d/adguardhome enable 2>/dev/null
     /etc/init.d/adguardhome start 2>/dev/null
-    logger -t rc.local "AdGuardHome 已啟動"
+    # 降低 AGH 的 OOM 優先度 (Go VmSize 1.3GB 是虛擬的，實際 RSS 很小)
+    sleep 2
+    _AGH_PID=$(ps w | grep '/usr/bin/AdGuardHome' | grep -v grep | awk '{print $1}' | head -1)
+    [ -n "$_AGH_PID" ] && echo -200 > /proc/$_AGH_PID/oom_score_adj 2>/dev/null
+    logger -t rc.local "AdGuardHome 已啟動 (oom_score_adj=-200)"
     # check-adguard cron 會自動將 dnsmasq 切到 AGH
 ) &
 

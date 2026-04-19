@@ -88,6 +88,13 @@ test_dns() {
     return 1
 }
 
+# AGH oom_score_adj 保護 (Go VmSize 大但 RSS 小，防止被優先 OOM kill)
+_AGH_PID=$(ps w 2>/dev/null | grep '/usr/bin/AdGuardHome' | grep -v grep | awk '{print $1}' | head -1)
+if [ -n "$_AGH_PID" ] && [ "$(cat /proc/$_AGH_PID/oom_score_adj 2>/dev/null)" != "-200" ]; then
+    echo -200 > /proc/$_AGH_PID/oom_score_adj 2>/dev/null
+    log "AGH oom_score_adj 設為 -200 (PID=$_AGH_PID)"
+fi
+
 # ==============================
 # 主要邏輯
 # ==============================
