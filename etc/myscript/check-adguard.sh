@@ -65,25 +65,15 @@ NEED_RELOAD=0
 # DNS 測試函數
 # ==============================
 test_dns() {
-    # 方法1: 使用 dig 測試，不加 +short 以便檢查狀態
+    # 使用 busybox nslookup (比 dig 輕量，避免 OOM 時被殺)
     local result
-    result=$(dig @"$TEST_DNS" -p "$TEST_PORT" "$TEST_DOMAIN" +time=3 +tries=3 2>&1)
+    result=$(nslookup -port="$TEST_PORT" -timeout=3 "$TEST_DOMAIN" "$TEST_DNS" 2>&1)
     local exitcode=$?
 
-    # 檢查是否有 "connection timed out" 或 "no servers could be reached"
-    if echo "$result" | grep -q "connection timed out\|no servers could be reached"; then
-        return 1
-    fi
+    [ $exitcode -ne 0 ] && return 1
 
-    # 檢查返回碼
-    if [ $exitcode -ne 0 ]; then
-        return 1
-    fi
-
-    # 檢查是否有 ANSWER 或 status: NXDOMAIN (兩者都代表 DNS 服務器有響應)
-    if echo "$result" | grep -q "ANSWER SECTION\|status: NXDOMAIN\|status: NOERROR"; then
-        return 0
-    fi
+    # 有回應 Address 或 canonical name 代表 DNS 服務正常
+    echo "$result" | grep -q "Address\|canonical name" && return 0
 
     return 1
 }
