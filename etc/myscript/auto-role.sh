@@ -324,17 +324,17 @@ if [ "$LAN_MODE" = "static" ]; then
         CHANGED=1
     fi
 else
-    # 非主 gateway / client: 查 DHCP 靜態對應，沒有則用 MAC 算 IP
-    MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null)
-    MY_BR_MAC=$(echo "$MY_BR_MAC" | tr 'A-Z' 'a-z')
-    # 從本地 /etc/config/dhcp 找自己 MAC 的靜態 IP
+    # 非主 gateway / client: 用 hostname 查 DHCP 靜態對應
+    MY_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null)
     SELF_IP=""
-    if [ -n "$MY_BR_MAC" ]; then
-        MATCH_IDX=$(uci show dhcp 2>/dev/null | grep -i "mac='$MY_BR_MAC'" | head -1 | sed "s/\.mac=.*//")
+    if [ -n "$MY_HOSTNAME" ]; then
+        MATCH_IDX=$(uci show dhcp 2>/dev/null | grep -i "name='$MY_HOSTNAME'" | head -1 | sed "s/\.name=.*//")
         [ -n "$MATCH_IDX" ] && SELF_IP=$(uci get "${MATCH_IDX}.ip" 2>/dev/null)
     fi
-    # 沒找到靜態對應，用 MAC 最後字節算
+    # 沒找到，用 br-lan MAC 最後字節算
     if [ -z "$SELF_IP" ]; then
+        MY_BR_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null)
+        MY_BR_MAC=$(echo "$MY_BR_MAC" | tr 'A-Z' 'a-z')
         MAC_LAST=$(echo "$MY_BR_MAC" | awk -F: '{print $NF}')
         SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
     fi
