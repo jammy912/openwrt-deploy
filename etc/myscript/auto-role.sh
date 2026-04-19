@@ -711,6 +711,17 @@ if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
         log "有線 mesh ($WIRE_DEV) 已啟用 (設定=Y)"
         CHANGED=1
     fi
+    # batmesh_wire 設定存在但 netifd 沒載入 → 直接 restart
+    if [ "$WANT_WIRED" = "Y" ] && [ "$CUR_WIRE_DISABLED" != "1" ]; then
+        if ! ifstatus batmesh_wire >/dev/null 2>&1; then
+            log "batmesh_wire 未被 netifd 載入，強制 network restart"
+            /etc/init.d/network restart
+            for i in 1 2 3 4 5; do
+                ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
+                sleep 2
+            done
+        fi
+    fi
 fi
 
 # br-lan 啟用 STP (避免 HUB/多條線造成 L2 迴圈)
