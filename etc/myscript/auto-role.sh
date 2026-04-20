@@ -897,6 +897,17 @@ else
     > "$GWTYPE_FILE"
 fi
 
+# Alfred 廣播 WAN 狀態 + 優先權 + AGH 狀態 (供 mesh 節點互相得知)
+if command -v alfred >/dev/null 2>&1; then
+    _WAN_STATUS="down"
+    [ "$HAS_WAN" = "1" ] && _WAN_STATUS="up"
+    _AGH_STATUS="down"
+    if pgrep -f '/usr/bin/AdGuardHome' >/dev/null 2>&1; then
+        nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
+    fi
+    echo "{\"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}" | alfred -s 64 2>/dev/null
+fi
+
 # =====================
 # wan6 自動管理
 # =====================
