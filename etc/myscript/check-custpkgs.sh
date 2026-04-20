@@ -20,7 +20,7 @@ if [ -f "$MODULES_FILE" ]; then
     grep -q "usb-samba" "$MODULES_FILE" && \
         REQUIRED_PKGS="$REQUIRED_PKGS kmod-usb3 kmod-usb-storage-uas usbutils block-mount mount-utils kmod-fs-ext4 kmod-fs-exfat kmod-fs-ntfs3 ntfs-3g samba4-server luci-app-samba4 luci-i18n-samba4-zh-tw"
     grep -q "batman" "$MODULES_FILE" && \
-        REQUIRED_PKGS="$REQUIRED_PKGS kmod-batman-adv batctl-full luci-proto-batman-adv wpad-openssl"
+        REQUIRED_PKGS="$REQUIRED_PKGS kmod-batman-adv batctl-full luci-proto-batman-adv wpad-openssl alfred"
     grep -q "android-tether" "$MODULES_FILE" && \
         REQUIRED_PKGS="$REQUIRED_PKGS kmod-usb-net kmod-usb-net-rndis kmod-usb-net-cdc-ether usb-modeswitch"
     grep -q "iphone-tether" "$MODULES_FILE" && \

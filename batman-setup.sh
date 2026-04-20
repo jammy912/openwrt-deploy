@@ -262,3 +262,40 @@ echo ""
 echo " 重啟網路生效: /etc/init.d/network restart && wifi reload"
 echo ""
 echo " ⚠️  所有 mesh 節點的 Mesh ID、密碼、Mobility Domain 必須一致"
+
+# =====================
+# Alfred 安裝 (BATMAN 輔助服務)
+# =====================
+echo ""
+echo "📡 安裝 Alfred..."
+apk update 2>/dev/null
+apk del alfred 2>/dev/null
+apk add alfred 2>/dev/null || opkg install alfred 2>/dev/null
+
+# bat0 IPv6 啟用 (Alfred 核心依賴)
+sysctl -w net.ipv6.conf.bat0.disable_ipv6=0 >/dev/null 2>&1
+if ! grep -q "net.ipv6.conf.bat0.disable_ipv6=0" /etc/sysctl.conf 2>/dev/null; then
+    echo "net.ipv6.conf.bat0.disable_ipv6=0" >> /etc/sysctl.conf
+fi
+
+# 重啟 bat0 套用 IPv6
+ip link show bat0 >/dev/null 2>&1 && {
+    ip link set bat0 down
+    ip link set bat0 up
+}
+
+# bat0 加入 lan firewall zone (打通群播)
+if ! uci get firewall.@zone[0].device 2>/dev/null | grep -q 'bat0'; then
+    uci add_list firewall.@zone[0].device='bat0'
+    uci commit firewall
+    /etc/init.d/firewall restart 2>/dev/null
+fi
+
+# Alfred 設定: 監聽 br-lan，底層 mesh 走 bat0
+uci set alfred.alfred.interface='br-lan'
+uci set alfred.alfred.batmanif='bat0'
+uci commit alfred
+
+/etc/init.d/alfred enable 2>/dev/null
+/etc/init.d/alfred start 2>/dev/null
+echo "  ✅ Alfred 已安裝並啟動"
