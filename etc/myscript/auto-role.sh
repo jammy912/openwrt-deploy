@@ -899,6 +899,15 @@ fi
 
 # Alfred 廣播 WAN 狀態 + 優先權 + AGH 狀態 (供 mesh 節點互相得知)
 if command -v alfred >/dev/null 2>&1; then
+    # alfred socket 異常時重啟
+    if ! alfred -r 64 >/dev/null 2>&1; then
+        _err=$(alfred -r 64 2>&1)
+        if echo "$_err" | grep -q "unix socket\|No such file"; then
+            log "alfred socket 異常，重啟 alfred"
+            /etc/init.d/alfred restart 2>/dev/null
+            sleep 2
+        fi
+    fi
     _WAN_STATUS="down"
     [ "$HAS_WAN" = "1" ] && _WAN_STATUS="up"
     _AGH_STATUS="down"
