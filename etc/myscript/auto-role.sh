@@ -170,7 +170,8 @@ if command -v alfred >/dev/null 2>&1; then
     if pgrep -f '/usr/bin/AdGuardHome' >/dev/null 2>&1; then
         nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
     fi
-    _ALFRED_DATA="{\"mac\":\"${MY_MAC}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
+    _LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    _ALFRED_DATA="{\"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
     alfred_try() {
         alfred -r 64 >/dev/null 2>&1 || return 1
         echo "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
