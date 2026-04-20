@@ -47,6 +47,21 @@ for _arg in "$@"; do
 done
 dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
 
+# radio 下排除指定 iface 後，是否還有其他啟用中 (disabled!=1) 的 wifi-iface
+# $1=radio  $2=要排除的 iface
+radio_has_other_active_iface() {
+    local _radio="$1" _skip="$2" _has=0 _sec _dev _dis
+    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/{print $2}'); do
+        [ "$_sec" = "$_skip" ] && continue
+        _dev=$(uci -q get wireless.$_sec.device)
+        [ "$_dev" = "$_radio" ] || continue
+        _dis=$(uci -q get wireless.$_sec.disabled)
+        [ "$_dis" = "1" ] && continue
+        _has=1; break
+    done
+    return $((1 - _has))
+}
+
 # =====================
 # 一次性 fw3→fw4 遷移
 # =====================
@@ -596,9 +611,11 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
             CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
             if [ "$CUR_IOT_DIS" = "1" ]; then
                 uci delete wireless.${IOT_IF}.disabled
+                _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
+                [ -n "$_IOT_RADIO" ] && uci delete wireless.${_IOT_RADIO}.disabled 2>/dev/null
                 uci commit wireless
                 wifi reload
-                log "IOT WiFi ($IOT_IF) 已啟用 (主 gateway)"
+                log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已啟用 (主 gateway)"
             fi
         fi
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
@@ -622,9 +639,17 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
         CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
         if [ "$CUR_IOT_DIS" != "1" ]; then
             uci set wireless.${IOT_IF}.disabled='1'
+            _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
+            if [ -n "$_IOT_RADIO" ]; then
+                if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
+                    log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
+                else
+                    uci set wireless.${_IOT_RADIO}.disabled='1'
+                fi
+            fi
             uci commit wireless
             wifi reload
-            log "IOT WiFi ($IOT_IF) 已停用 (非主 gateway)"
+            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已停用 (非主 gateway)"
         fi
     fi
     dbg "5.非主gateway: 停全部服務+IOT"
@@ -650,9 +675,17 @@ else
         CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
         if [ "$CUR_IOT_DIS" != "1" ]; then
             uci set wireless.${IOT_IF}.disabled='1'
+            _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
+            if [ -n "$_IOT_RADIO" ]; then
+                if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
+                    log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
+                else
+                    uci set wireless.${_IOT_RADIO}.disabled='1'
+                fi
+            fi
             uci commit wireless
             wifi reload
-            log "IOT WiFi ($IOT_IF) 已停用 (client)"
+            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已停用 (client)"
         fi
     fi
     dbg "5.client: 停全部服務+IOT"
@@ -1185,9 +1218,17 @@ else
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
     if [ -n "$IOT_IF" ] && [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
         uci set wireless.${IOT_IF}.disabled='1'
+        _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
+        if [ -n "$_IOT_RADIO" ]; then
+            if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
+                log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
+            else
+                uci set wireless.${_IOT_RADIO}.disabled='1'
+            fi
+        fi
         uci commit wireless
         wifi reload
-        log "fixup: IOT WiFi ($IOT_IF) 不應開啟，已停用"; FIXUP=1
+        log "fixup: IOT WiFi ($IOT_IF+$_IOT_RADIO) 不應開啟，已停用"; FIXUP=1
     fi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"

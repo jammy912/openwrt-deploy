@@ -188,6 +188,21 @@ GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)
 
+# radio 下排除指定 iface 後，是否還有其他啟用中 (disabled!=1) 的 wifi-iface
+# $1=radio  $2=要排除的 iface 名
+radio_has_other_active_iface() {
+    local _radio="$1" _skip="$2" _has=0 _sec _dev _dis
+    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/{print $2}'); do
+        [ "$_sec" = "$_skip" ] && continue
+        _dev=$(uci -q get wireless.$_sec.device)
+        [ "$_dev" = "$_radio" ] || continue
+        _dis=$(uci -q get wireless.$_sec.disabled)
+        [ "$_dis" = "1" ] && continue
+        _has=1; break
+    done
+    return $((1 - _has))
+}
+
 DESIRED_2G_STATUS=$((1 - ENABLE_2G))
 [ "$CURRENT_2G_STATUS" -ne "$DESIRED_2G_STATUS" ] && {
     uci set "wireless.$UCI_IFACE_2G.disabled=$DESIRED_2G_STATUS"
@@ -195,7 +210,11 @@ DESIRED_2G_STATUS=$((1 - ENABLE_2G))
     if [ "$ENABLE_2G" -eq 1 ]; then
         uci delete "wireless.$UCI_RADIO_2G.disabled" 2>/dev/null
     else
-        uci set "wireless.$UCI_RADIO_2G.disabled=1"
+        if radio_has_other_active_iface "$UCI_RADIO_2G" "$UCI_IFACE_2G"; then
+            log "[$UCI_RADIO_2G] 尚有其他啟用 SSID，保留 radio"
+        else
+            uci set "wireless.$UCI_RADIO_2G.disabled=1"
+        fi
     fi
     change_occured=1
     [ "$ENABLE_2G" -eq 1 ] && log "[$UCI_IFACE_2G+$UCI_RADIO_2G] 啟用" || log "[$UCI_IFACE_2G+$UCI_RADIO_2G] 停用"
@@ -204,6 +223,15 @@ DESIRED_2G_STATUS=$((1 - ENABLE_2G))
 DESIRED_5G_STATUS=$((1 - ENABLE_5G))
 [ "$CURRENT_5G_STATUS" -ne "$DESIRED_5G_STATUS" ] && {
     uci set "wireless.$UCI_IFACE_5G.disabled=$DESIRED_5G_STATUS"
+    if [ "$ENABLE_5G" -eq 1 ]; then
+        uci delete "wireless.$UCI_RADIO_5G.disabled" 2>/dev/null
+    else
+        if radio_has_other_active_iface "$UCI_RADIO_5G" "$UCI_IFACE_5G"; then
+            log "[$UCI_RADIO_5G] 尚有其他啟用 SSID，保留 radio"
+        else
+            uci set "wireless.$UCI_RADIO_5G.disabled=1"
+        fi
+    fi
     change_occured=1
     [ "$ENABLE_5G" -eq 1 ] && log "[$UCI_IFACE_5G] 啟用" || log "[$UCI_IFACE_5G] 停用"
 }
