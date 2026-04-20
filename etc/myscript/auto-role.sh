@@ -187,43 +187,32 @@ fi
 # 檢查 mesh 裡有沒有比自己優先的 gateway (改用 alfred -r 64 取代 batctl gwl)
 IS_PRIMARY=1
 if [ "$NEW_ROLE" = "gateway" ]; then
-    # alfred 輸出格式 (每行一筆): "{ <MAC> }, { "xx" "yy" ... }" 其中 xx/yy 是 hex byte
-    # 用 awk 把 hex 還原回字串後解析 JSON
+    # alfred 輸出格式 (每行一筆):
+    #   { "<src_mac>", "{\"mac\":\"...\", \"wan_status\":\"up\", \"priority\":50, ...}\x0a" },
+    # 直接用正則抓 payload 裡的欄位 (不管外層 wrapper)
     ALFRED_RAW=$(alfred -r 64 2>/dev/null)
     dbg "3.alfred_raw_lines=$(echo "$ALFRED_RAW" | wc -l)"
 
     HIGHER=$(echo "$ALFRED_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$(echo "$MY_MAC" | tr 'A-Z' 'a-z')" '
         {
-            # 取出大括號內第一組 MAC (來源 MAC)
-            src_mac = ""
-            if (match($0, /\{ *"[0-9a-fA-F:]+" *\}/)) {
-                s = substr($0, RSTART, RLENGTH)
-                gsub(/[{}" ]/, "", s); src_mac = tolower(s)
+            line = tolower($0)
+            mac = ""
+            if (match(line, /\\"mac\\":\\"[0-9a-f:]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); mac = s
             }
-            # 取出第二個 { ... } 裡所有 hex byte，還原成字串
-            payload = ""
-            rest = $0
-            sub(/^[^}]*\}, *\{/, "", rest)
-            n = split(rest, parts, "\"")
-            for (i = 2; i <= n; i += 2) {
-                if (parts[i] ~ /^[0-9a-fA-F][0-9a-fA-F]$/) {
-                    payload = payload sprintf("%c", strtonum("0x" parts[i]))
-                }
-            }
-            # 從 payload 裡抓 priority + wan_status
             pri = -1
-            if (match(payload, /"priority" *: *-?[0-9]+/)) {
-                s = substr(payload, RSTART, RLENGTH); sub(/.*: */, "", s); pri = s + 0
+            if (match(line, /\\"priority\\":-?[0-9]+/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*:/, "", s); pri = s + 0
             }
             wan = "down"
-            if (match(payload, /"wan_status" *: *"[^"]*"/)) {
-                s = substr(payload, RSTART, RLENGTH); sub(/.*"wan_status" *: *"/, "", s); sub(/".*/, "", s); wan = s
+            if (match(line, /\\"wan_status\\":\\"[a-z]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); wan = s
             }
-            if (src_mac == me_mac) next
+            if (mac == "" || mac == me_mac) next
             if (wan != "up") next
             if (pri < 0) next
             if (pri > me_pri) { found=1; exit }
-            if (pri == me_pri && src_mac < me_mac) { found=1; exit }
+            if (pri == me_pri && mac < me_mac) { found=1; exit }
         }
         END { if (found) print "yes" }
     ')
