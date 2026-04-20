@@ -189,7 +189,7 @@ if command -v alfred >/dev/null 2>&1; then
     _ALFRED_DATA="{\"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
     alfred_try() {
         alfred -r 64 >/dev/null 2>&1 || return 1
-        echo "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
+        printf '%s' "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
         return 0
     }
     for _try in 1 2 3; do
