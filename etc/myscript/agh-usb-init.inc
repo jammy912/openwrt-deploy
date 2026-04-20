@@ -1,7 +1,7 @@
 #!/bin/sh
-# usb-init.inc - USB 自動初始化 + 掛載 (AGH work-dir)
-# 放置位置: /etc/myscript/usb-init.inc
-# 用法: rc.local 中以 `. /etc/myscript/usb-init.inc` source
+# agh-usb-init.inc - USB 自動初始化 + 掛載 (AGH work-dir)
+# 放置位置: /etc/myscript/agh-usb-init.inc
+# 用法: rc.local 中以 `. /etc/myscript/agh-usb-init.inc` source
 # 依賴: push_notify (需先 source push_notify.inc)
 # 僅用於有 USB 口的機型 (e.g. linksys,mx4200)
 #
