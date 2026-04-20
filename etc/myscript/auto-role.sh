@@ -130,7 +130,8 @@ fi
 # 邏輯: priority 大的優先，相同時 MAC 小的優先
 MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 [ -z "$MY_PRI" ] && MY_PRI=50
-MY_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
+MY_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+[ -z "$MY_MAC" ] && MY_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
 
 # 連外健康檢查: WAN 不通時暫時降 priority=0 讓出主 gw。
 # ping IP 避免 DNS 未就緒誤判；失敗後重試 3 次 (間隔 10s)。
@@ -157,38 +158,96 @@ if [ "$UPTIME" -lt 120 ] && [ "$BOOT_DELAY" -gt 0 ]; then
     sleep "$BOOT_DELAY"
 fi
 
-# 設定自己的 gw_bandwidth = priority (讓 batctl gwl 看到)
+# 設定自己的 gw_bandwidth = priority (讓 batctl gwl 看到，保留相容)
 [ "$NEW_ROLE" = "gateway" ] && batctl gw server ${MY_PRI}MBit 2>/dev/null
 
-# 檢查 mesh 裡有沒有比自己優先的 gateway
+# 先廣播自己的狀態到 alfred，讓其他 mesh 節點能讀到
+_HAS_WAN_FOR_ALFRED="${HAS_WAN:-0}"
+if command -v alfred >/dev/null 2>&1; then
+    _WAN_STATUS="down"
+    [ "$_HAS_WAN_FOR_ALFRED" = "1" ] && _WAN_STATUS="up"
+    _AGH_STATUS="down"
+    if pgrep -f '/usr/bin/AdGuardHome' >/dev/null 2>&1; then
+        nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
+    fi
+    _ALFRED_DATA="{\"mac\":\"${MY_MAC}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
+    alfred_try() {
+        alfred -r 64 >/dev/null 2>&1 || return 1
+        echo "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
+        return 0
+    }
+    for _try in 1 2 3; do
+        alfred_try && break
+        log "alfred 異常 (try $_try)，重啟 alfred"
+        /etc/init.d/alfred restart 2>/dev/null
+        sleep 2
+    done
+fi
+
+# 檢查 mesh 裡有沒有比自己優先的 gateway (改用 alfred -r 64 取代 batctl gwl)
 IS_PRIMARY=1
 if [ "$NEW_ROLE" = "gateway" ]; then
-    GWL_RAW=$(batctl gwl 2>/dev/null)
-    GWL_COUNT=$(echo "$GWL_RAW" | grep -c 'MBit')
-    MY_GWMODE=$(batctl gw 2>/dev/null)
-    NEIGHBOR_COUNT=$(batctl n 2>/dev/null | grep -c ':')
-    dbg "3.gwl_raw: count=$GWL_COUNT my_gw=$MY_GWMODE neighbors=$NEIGHBOR_COUNT"
-    [ "$DEBUG" = "1" ] && {
-        GWL_LINES=$(echo "$GWL_RAW" | grep 'MBit' | head -5)
-        [ -n "$GWL_LINES" ] && dbg "3.gwl_entries: $GWL_LINES"
-        [ -z "$GWL_LINES" ] && dbg "3.gwl_entries: (empty)"
-    }
+    # alfred 輸出格式 (每行一筆): "{ <MAC> }, { "xx" "yy" ... }" 其中 xx/yy 是 hex byte
+    # 用 awk 把 hex 還原回字串後解析 JSON
+    ALFRED_RAW=$(alfred -r 64 2>/dev/null)
+    dbg "3.alfred_raw_lines=$(echo "$ALFRED_RAW" | wc -l)"
 
-    # 格式: "95.0/2.0 MBit" → 取 "/" 前的整數部分
-    HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
-        /MBit/ {
-            mac = $1; gsub(/[^0-9a-f:]/, "", mac)
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /\/.*MBit/ || (i<NF && $(i+1)=="MBit")) {
-                    split($i, bw, "/"); split(bw[1], dec, "."); pri=dec[1]; break
+    HIGHER=$(echo "$ALFRED_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$(echo "$MY_MAC" | tr 'A-Z' 'a-z')" '
+        {
+            # 取出大括號內第一組 MAC (來源 MAC)
+            src_mac = ""
+            if (match($0, /\{ *"[0-9a-fA-F:]+" *\}/)) {
+                s = substr($0, RSTART, RLENGTH)
+                gsub(/[{}" ]/, "", s); src_mac = tolower(s)
+            }
+            # 取出第二個 { ... } 裡所有 hex byte，還原成字串
+            payload = ""
+            rest = $0
+            sub(/^[^}]*\}, *\{/, "", rest)
+            n = split(rest, parts, "\"")
+            for (i = 2; i <= n; i += 2) {
+                if (parts[i] ~ /^[0-9a-fA-F][0-9a-fA-F]$/) {
+                    payload = payload sprintf("%c", strtonum("0x" parts[i]))
                 }
             }
-            if (mac == me_mac) next
-            if (pri+0 > me_pri+0) { found=1; exit }
-            if (pri+0 == me_pri+0 && mac < me_mac) { found=1; exit }
+            # 從 payload 裡抓 priority + wan_status
+            pri = -1
+            if (match(payload, /"priority" *: *-?[0-9]+/)) {
+                s = substr(payload, RSTART, RLENGTH); sub(/.*: */, "", s); pri = s + 0
+            }
+            wan = "down"
+            if (match(payload, /"wan_status" *: *"[^"]*"/)) {
+                s = substr(payload, RSTART, RLENGTH); sub(/.*"wan_status" *: *"/, "", s); sub(/".*/, "", s); wan = s
+            }
+            if (src_mac == me_mac) next
+            if (wan != "up") next
+            if (pri < 0) next
+            if (pri > me_pri) { found=1; exit }
+            if (pri == me_pri && src_mac < me_mac) { found=1; exit }
         }
         END { if (found) print "yes" }
     ')
+
+    # 沒有 alfred 資料時 fallback 回 batctl gwl
+    if [ -z "$ALFRED_RAW" ]; then
+        GWL_RAW=$(batctl gwl 2>/dev/null)
+        HIGHER=$(echo "$GWL_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$MY_MAC" '
+            /MBit/ {
+                mac = $1; gsub(/[^0-9a-f:]/, "", mac)
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /\/.*MBit/ || (i<NF && $(i+1)=="MBit")) {
+                        split($i, bw, "/"); split(bw[1], dec, "."); pri=dec[1]; break
+                    }
+                }
+                if (mac == me_mac) next
+                if (pri+0 > me_pri+0) { found=1; exit }
+                if (pri+0 == me_pri+0 && mac < me_mac) { found=1; exit }
+            }
+            END { if (found) print "yes" }
+        ')
+        dbg "3.alfred empty, fallback to batctl gwl"
+    fi
+
     if [ "$HIGHER" = "yes" ]; then
         IS_PRIMARY=0
         log "mesh 有更高優先的 gateway (my_pri=$MY_PRI, my_mac=$MY_MAC)"
@@ -895,26 +954,6 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     echo "$GW_TYPE" > "$GWTYPE_FILE"
 else
     > "$GWTYPE_FILE"
-fi
-
-# Alfred 廣播 WAN 狀態 + 優先權 + AGH 狀態 (供 mesh 節點互相得知)
-if command -v alfred >/dev/null 2>&1; then
-    # alfred socket 異常時重啟
-    if ! alfred -r 64 >/dev/null 2>&1; then
-        _err=$(alfred -r 64 2>&1)
-        if echo "$_err" | grep -q "unix socket\|No such file"; then
-            log "alfred socket 異常，重啟 alfred"
-            /etc/init.d/alfred restart 2>/dev/null
-            sleep 2
-        fi
-    fi
-    _WAN_STATUS="down"
-    [ "$HAS_WAN" = "1" ] && _WAN_STATUS="up"
-    _AGH_STATUS="down"
-    if pgrep -f '/usr/bin/AdGuardHome' >/dev/null 2>&1; then
-        nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
-    fi
-    echo "{\"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}" | alfred -s 64 2>/dev/null
 fi
 
 # =====================
