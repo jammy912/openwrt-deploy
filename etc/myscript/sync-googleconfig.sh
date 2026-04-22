@@ -611,15 +611,22 @@ main() {
         eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
-                h=""; p=""; wl=""; wr=""; gw=""
+                h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
                     if ($i ~ /option wireless_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wl=a[n] }
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
+                    if ($i ~ /option runagh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ra=a[n] }
+                    if ($i ~ /option upstream_dns1/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d1=a[n] }
+                    if ($i ~ /option upstream_dns2/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d2=a[n] }
+                    if ($i ~ /option upstream_dns3/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d3=a[n] }
+                    if ($i ~ /option upstream_dns4/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d4=a[n] }
                 }
-                if (tolower(h) == tolower(host)) { print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw; exit }
+                if (tolower(h) == tolower(host)) {
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_DNS1=" d1 " NEW_DNS2=" d2 " NEW_DNS3=" d3 " NEW_DNS4=" d4; exit
+                }
             }
         ' "$TMP_DECRYPTED")
         [ -z "$NEW_PRI" ] && NEW_PRI=50
@@ -664,6 +671,28 @@ main() {
             else
                 log "🔧 mesh_role_override: 已清除 (hostname=$MY_HOSTNAME)"
             fi
+        fi
+        # 更新 .mesh_runagh (TRUE/FALSE → Y/N)
+        case "$NEW_RUNAGH" in
+            TRUE|true|1|Y|y) NEW_RUNAGH=Y ;;
+            FALSE|false|0|N|n) NEW_RUNAGH=N ;;
+            "") NEW_RUNAGH=Y ;;
+        esac
+        CUR_RUNAGH=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
+        if [ "$NEW_RUNAGH" != "$CUR_RUNAGH" ]; then
+            echo "$NEW_RUNAGH" > /etc/myscript/.mesh_runagh
+            log "🔧 mesh_runagh: $CUR_RUNAGH → $NEW_RUNAGH (hostname=$MY_HOSTNAME)"
+        fi
+        # 更新 .mesh_upstream_dns (一行一組 DNS，空值略過)
+        NEW_DNS=""
+        for _d in "$NEW_DNS1" "$NEW_DNS2" "$NEW_DNS3" "$NEW_DNS4"; do
+            [ -n "$_d" ] && NEW_DNS="${NEW_DNS}${_d}
+"
+        done
+        CUR_DNS=$(cat /etc/myscript/.mesh_upstream_dns 2>/dev/null)
+        if [ "$NEW_DNS" != "$CUR_DNS" ]; then
+            printf '%s' "$NEW_DNS" > /etc/myscript/.mesh_upstream_dns
+            log "🔧 mesh_upstream_dns 已更新 (hostname=$MY_HOSTNAME)"
         fi
     fi
 
