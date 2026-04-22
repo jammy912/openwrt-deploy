@@ -573,25 +573,35 @@ wg_start() {
     done
 }
 
+# .mesh_runagh: Y=本機允許跑 AGH (預設), N=一律不跑
+RUN_AGH=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
+[ -z "$RUN_AGH" ] && RUN_AGH=Y
+
 if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     # 主 gateway: 有變更或主/副切換時啟動服務
     PROMOTED=0
     [ "$PREV_GWTYPE" != "主gw" ] && PROMOTED=1
     if [ "$CHANGED" = "1" ] || [ "$PROMOTED" = "1" ]; then
         svc_enable ddns
-        # 開機早期不啟動 AGH，由 rc.local 延遲 120 秒後統一啟動
-        _UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
-        if [ "$_UPTIME_SEC" -gt 180 ]; then
-            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
-            svc_enable adguardhome
+        if [ "$RUN_AGH" = "N" ]; then
+            svc_disable adguardhome
+            lock_remove "agh_startup" >/dev/null 2>&1
+            log "AGH: .mesh_runagh=N，主 gw 也不啟動 AGH"
         else
-            log "開機早期 (${_UPTIME_SEC}s)，跳過 AGH 啟動 (由 rc.local 延遲處理)"
+            # 開機早期不啟動 AGH，由 rc.local 延遲 120 秒後統一啟動
+            _UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
+            if [ "$_UPTIME_SEC" -gt 180 ]; then
+                lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+                svc_enable adguardhome
+            else
+                log "開機早期 (${_UPTIME_SEC}s)，跳過 AGH 啟動 (由 rc.local 延遲處理)"
+            fi
         fi
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
-        # 恢復 dnsmasq 指向 AGH (從 client 切回時需要)
-        if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" != "1" ]; then
+        # 恢復 dnsmasq 指向 AGH (從 client 切回時需要)；RUN_AGH=N 時略過
+        if [ "$RUN_AGH" != "N" ] && [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" != "1" ]; then
             uci set dhcp.@dnsmasq[0].noresolv='1'
             # server 是 list 不是 option，必須用 add_list (否則 dnsmasq.conf 不帶 upstream)
             uci -q delete dhcp.@dnsmasq[0].server
@@ -1180,7 +1190,12 @@ if [ "$GW_TYPE" = "主gw" ]; then
     if ! pgrep -x dnsmasq >/dev/null 2>&1; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
     fi
-    if ! pgrep -f adguardhome >/dev/null 2>&1; then
+    if [ "$RUN_AGH" = "N" ]; then
+        if pgrep -f adguardhome >/dev/null 2>&1; then
+            svc_disable adguardhome; lock_remove "agh_startup" >/dev/null 2>&1
+            log "fixup: .mesh_runagh=N，停止 AGH"; FIXUP=1
+        fi
+    elif ! pgrep -f adguardhome >/dev/null 2>&1; then
         _FIX_UPTIME=$(awk -F. '{print $1}' /proc/uptime)
         if [ "$_FIX_UPTIME" -le 180 ]; then
             log "fixup: AGH 未運行，但開機早期 (${_FIX_UPTIME}s)，由 rc.local 延遲處理"
