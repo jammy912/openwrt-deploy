@@ -23,7 +23,33 @@ if lock_is_active "agh_startup" 300; then
     exit 0
 fi
 
-# .mesh_runagh=N 本機不跑 AGH → 停掉 & 還原 dnsmasq 走上游 → exit
+TEST_DNS="127.0.0.1"
+TEST_PORT=53535
+# 使用確定存在的域名，確保有正常的 DNS 回應
+TEST_DOMAIN="www.twse.com.tw"
+
+DNS_LIST_FILE=/etc/myscript/.mesh_upstream_dns
+
+# 從 .mesh_upstream_dns 逐一測試，第一個能解 TEST_DOMAIN 就回傳 (印到 stdout)
+pick_upstream_dns() {
+    [ -s "$DNS_LIST_FILE" ] || return 1
+    local _dns _ans
+    while IFS= read -r _dns; do
+        [ -z "$_dns" ] && continue
+        _ans=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_dns" 2>/dev/null \
+            | awk '/^Address/ && !/#/ {print $NF}' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vE '^(0\.|127\.)' \
+            | head -1)
+        if [ -n "$_ans" ]; then
+            echo "$_dns"
+            return 0
+        fi
+    done < "$DNS_LIST_FILE"
+    return 1
+}
+
+# .mesh_runagh=N 本機不跑 AGH → 停掉 & dnsmasq 改指向 .mesh_upstream_dns 第一個可用的
 _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
 [ -z "$_run_agh" ] && _run_agh=Y
 if [ "$_run_agh" = "N" ]; then
@@ -33,12 +59,26 @@ if [ "$_run_agh" = "N" ]; then
         lock_remove "agh_startup" >/dev/null 2>&1
         logger -t adguard-switch ".mesh_runagh=N，AGH 已停用"
     fi
-    if uci -q get dhcp.@dnsmasq[0].server | grep -q "127.0.0.1#53535"; then
-        uci -q delete dhcp.@dnsmasq[0].server
-        uci -q delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
-        uci commit dhcp
-        /etc/init.d/dnsmasq reload
-        logger -t adguard-switch ".mesh_runagh=N，dnsmasq 移除 AGH 轉發"
+    _PICKED=$(pick_upstream_dns)
+    _CUR=$(uci show dhcp.@dnsmasq[0].server 2>/dev/null)
+    if [ -n "$_PICKED" ]; then
+        if ! echo "$_CUR" | grep -q "'$_PICKED'" || echo "$_CUR" | grep -q "127.0.0.1#53535"; then
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci -q add_list dhcp.@dnsmasq[0].server="$_PICKED"
+            uci set dhcp.@dnsmasq[0].noresolv='1'
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload
+            logger -t adguard-switch ".mesh_runagh=N，dnsmasq upstream → $_PICKED"
+        fi
+    else
+        # 都無回應 → 清空 server 表，讓 dnsmasq 走 WAN resolv.conf
+        if echo "$_CUR" | grep -q "127.0.0.1#53535"; then
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci -q delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload
+            logger -t adguard-switch ".mesh_runagh=N，.mesh_upstream_dns 全無回應，退回 WAN resolv"
+        fi
     fi
     exit 0
 fi
@@ -46,13 +86,6 @@ fi
 # 非主 gw 不用 AGH，跳過檢查
 _gw_type=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
 [ "$_gw_type" != "主gw" ] && exit 0
-
-TEST_DNS="127.0.0.1"
-TEST_PORT=53535
-# 使用確定存在的域名，確保有正常的 DNS 回應
-TEST_DOMAIN="www.twse.com.tw"
-
-DNS_LIST_FILE=/etc/myscript/.mesh_upstream_dns
 
 log() {
     echo "$1"
@@ -92,25 +125,6 @@ test_dns() {
     # 有回應 Address 或 canonical name 代表 DNS 服務正常
     echo "$result" | grep -q "Address\|canonical name" && return 0
 
-    return 1
-}
-
-# 從 .mesh_upstream_dns 逐一測試，第一個能解 TEST_DOMAIN 就回傳 (印到 stdout)
-pick_upstream_dns() {
-    [ -s "$DNS_LIST_FILE" ] || return 1
-    local _dns _ans
-    while IFS= read -r _dns; do
-        [ -z "$_dns" ] && continue
-        _ans=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_dns" 2>/dev/null \
-            | awk '/^Address/ && !/#/ {print $NF}' \
-            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
-            | grep -vE '^(0\.|127\.)' \
-            | head -1)
-        if [ -n "$_ans" ]; then
-            echo "$_dns"
-            return 0
-        fi
-    done < "$DNS_LIST_FILE"
     return 1
 }
 
