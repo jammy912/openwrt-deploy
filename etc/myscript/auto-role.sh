@@ -148,6 +148,14 @@ MY_PRI=$(cat /etc/myscript/.mesh_priority 2>/dev/null)
 MY_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null)
 [ -z "$MY_MAC" ] && MY_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
 
+# 裝置唯一 ID: sha256(hostname + wan_mac + machine-id + board_name) 前 16 字元
+_ID_HOSTNAME=$(uci -q get system.@system[0].hostname)
+_ID_WANMAC=$(cat /sys/class/net/wan/address 2>/dev/null)
+_ID_MACHINE=$(cat /etc/machine-id 2>/dev/null)
+_ID_BOARD=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+MY_ID=$(printf '%s|%s|%s|%s' "$_ID_HOSTNAME" "$_ID_WANMAC" "$_ID_MACHINE" "$_ID_BOARD" \
+    | sha256sum | cut -c1-16)
+
 # 連外健康檢查: WAN 不通時暫時降 priority=0 讓出主 gw。
 # ping IP 避免 DNS 未就緒誤判；失敗後重試 3 次 (間隔 10s)。
 if [ "$NEW_ROLE" = "gateway" ]; then
@@ -186,7 +194,7 @@ if command -v alfred >/dev/null 2>&1; then
         nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
     fi
     _LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
-    _ALFRED_DATA="{\"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
+    _ALFRED_DATA="{\"id\":\"${MY_ID}\", \"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
     alfred_try() {
         alfred -r 64 >/dev/null 2>&1 || return 1
         printf '%s' "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
@@ -209,9 +217,16 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     ALFRED_RAW=$(alfred -r 64 2>/dev/null)
     dbg "3.alfred_raw_lines=$(echo "$ALFRED_RAW" | wc -l)"
 
-    HIGHER=$(echo "$ALFRED_RAW" | awk -v me_pri="$MY_PRI" -v me_mac="$(echo "$MY_MAC" | tr 'A-Z' 'a-z')" '
+    HIGHER=$(echo "$ALFRED_RAW" | awk \
+        -v me_pri="$MY_PRI" \
+        -v me_mac="$(echo "$MY_MAC" | tr 'A-Z' 'a-z')" \
+        -v me_id="$MY_ID" '
         {
             line = tolower($0)
+            id = ""
+            if (match(line, /\\"id\\":\\"[0-9a-f]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); id = s
+            }
             mac = ""
             if (match(line, /\\"mac\\":\\"[0-9a-f:]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); mac = s
@@ -224,7 +239,9 @@ if [ "$NEW_ROLE" = "gateway" ]; then
             if (match(line, /\\"wan_status\\":\\"[a-z]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); wan = s
             }
-            if (mac == "" || mac == me_mac) next
+            # 排除自己: 優先用 id (穩定跨重啟)，沒 id 才退回 MAC
+            if (id != "" && id == me_id) next
+            if (id == "" && (mac == "" || mac == me_mac)) next
             if (wan != "up") next
             if (pri < 0) next
             if (pri > me_pri) { found=1; exit }

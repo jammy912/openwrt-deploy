@@ -77,6 +77,11 @@ lock_is_active() {
 # 返回: 0=取得鎖, 1=超時放棄
 _CRON_GLOBAL_LOCKFILE="/tmp/cron_global.lock"
 cron_global_lock() {
+    # 全域鎖暫時停用 (效能無虞，不需要序列化)
+    # 要重新啟用: 把 CRON_GLOBAL_LOCK_ENABLED 設為 1
+    rm -f "$_CRON_GLOBAL_LOCKFILE" 2>/dev/null
+    return 0
+
     _CGL_TIMEOUT=${1:-60}
     _CGL_WAITED=0
     while [ -f "$_CRON_GLOBAL_LOCKFILE" ]; do
