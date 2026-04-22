@@ -142,7 +142,8 @@ fi
 # ==============================
 # 主要邏輯
 # ==============================
-if test_dns; then
+# 整點 cron 暴衝時 AGH 可能一時回不了,retry 2 次吸收抖動
+if test_dns || (sleep 2 && test_dns) || (sleep 2 && test_dns); then
     # AdGuardHome 正常
     if [ -n "$CURRENT_ADG" ]; then
         log "✅ AdGuardHome 正常且已啟用,無需切換"
