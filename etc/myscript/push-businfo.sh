@@ -32,10 +32,7 @@
 #   push-businfo.sh 99 "台北車站" "往北投" Taipei              # 明確指定城市
 #   push-businfo.sh 307 "市政府站" "往板橋" auto 10            # 超過10分鐘不推播
 
-# 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
-cron_global_lock 60 || exit 0
-trap 'rm -f /tmp/cron_global.lock' EXIT
+# 公車到站有時效性,不納入全域 cron 鎖 (被 60 秒鎖卡住會錯過報時)
 
 # Load push notification function
 . /etc/myscript/push_notify.inc
