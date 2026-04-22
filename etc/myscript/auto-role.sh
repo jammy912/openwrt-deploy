@@ -1240,7 +1240,9 @@ else
     if pgrep -f adguardhome >/dev/null 2>&1; then
         svc_disable adguardhome; lock_remove "agh_startup" >/dev/null 2>&1; log "fixup: AGH 不應運行 ($GW_TYPE)，已停止"; FIXUP=1
     fi
-    if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+    # 只有 dnsmasq 仍指向本機 AGH (127.0.0.1#53535) 才清 (副gw 降級後殘留)
+    # 其他情況 (例如 runagh=N 時 check-adguard 設的外部 DNS) 不碰
+    if uci -q show dhcp.@dnsmasq[0].server 2>/dev/null | grep -q "127.0.0.1#53535"; then
         uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
         uci delete dhcp.@dnsmasq[0].server 2>/dev/null
         uci commit dhcp
