@@ -29,10 +29,116 @@ TEST_PORT=53535
 TEST_DOMAIN="www.twse.com.tw"
 
 DNS_LIST_FILE=/etc/myscript/.mesh_upstream_dns
+STICKY_FILE=/tmp/.agh_active_upstream
+STICKY_FAIL_MAX=3
+LATENCY_MAX_MS=200
 
 log() {
     echo "$1"
     logger -t adguard-switch "$1"
+}
+
+# 讀 alfred type 64,解出 peer (自己以外) 的 ip + agh_status,輸出 "ip agh_status" 一行一筆
+parse_peers() {
+    local _my_id
+    _my_id=$(cat /etc/myscript/.mesh_id 2>/dev/null)
+    alfred -r 64 2>/dev/null | awk -v me_id="$_my_id" '
+        {
+            line = tolower($0)
+            id = ""
+            if (match(line, /\\"id\\":\\"[0-9a-f]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); id = s
+            }
+            ip = ""
+            if (match(line, /\\"ip\\":\\"[0-9.]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); ip = s
+            }
+            agh = "down"
+            if (match(line, /\\"agh_status\\":\\"[a-z]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); agh = s
+            }
+            if (id != "" && id == me_id) next
+            if (ip == "") next
+            print ip, agh
+        }
+    '
+}
+
+# 對 peer 的 :53 跑 3 次 nslookup,取最小毫秒 (全失敗 echo 9999)
+probe_dnsmasq() {
+    local _ip="$1" _best=9999 _t0 _t1 _dt _ok _i
+    [ -z "$_ip" ] && { echo 9999; return; }
+    for _i in 1 2 3; do
+        _t0=$(date +%s%N)
+        _ok=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_ip" 2>/dev/null | grep -c 'Address\|canonical')
+        _t1=$(date +%s%N)
+        [ "$_ok" -gt 0 ] || continue
+        _dt=$(( (_t1 - _t0) / 1000000 ))
+        [ $_dt -lt $_best ] && _best=$_dt
+    done
+    echo $_best
+}
+
+# 測自己的 AGH (127.0.0.1:53535) 是否健康 (布林)
+test_local_agh() {
+    nslookup -port=53535 -timeout=3 "$TEST_DOMAIN" 127.0.0.1 2>/dev/null | grep -q 'Address\|canonical'
+}
+
+# 決定最佳 upstream,輸出 "KIND|target|failcount" (KIND=SELF/PEER/DNS/NONE)
+pick_upstream() {
+    local _run_agh _sticky_kind _sticky_target _sticky_fc _ms _best_ip _best_ms _peers
+    _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
+    [ -z "$_run_agh" ] && _run_agh=Y
+
+    # 1. SELF
+    if [ "$_run_agh" = "Y" ] && test_local_agh; then
+        echo "SELF|127.0.0.1#53535|0"; return
+    fi
+
+    # 2. Sticky PEER (只測當前選中的)
+    if [ -f "$STICKY_FILE" ]; then
+        _sticky_kind=$(cut -d'|' -f1 "$STICKY_FILE" 2>/dev/null)
+        _sticky_target=$(cut -d'|' -f2 "$STICKY_FILE" 2>/dev/null)
+        _sticky_fc=$(cut -d'|' -f3 "$STICKY_FILE" 2>/dev/null)
+        [ -z "$_sticky_fc" ] && _sticky_fc=0
+        if [ "$_sticky_kind" = "PEER" ] && [ -n "$_sticky_target" ]; then
+            _ms=$(probe_dnsmasq "$_sticky_target")
+            if [ "$_ms" -lt $LATENCY_MAX_MS ]; then
+                # 還確認 alfred 上它仍 agh=up
+                if parse_peers | awk -v ip="$_sticky_target" '$1==ip && $2=="up"{f=1} END{exit !f}'; then
+                    echo "PEER|$_sticky_target|0"; return
+                fi
+            fi
+            _sticky_fc=$((_sticky_fc + 1))
+            if [ "$_sticky_fc" -lt $STICKY_FAIL_MAX ]; then
+                echo "PEER|$_sticky_target|$_sticky_fc"; return
+            fi
+        fi
+    fi
+
+    # 3. Rescan PEER (只挑 agh=up,選延遲最低)
+    _best_ip=""
+    _best_ms=$LATENCY_MAX_MS
+    _peers=$(parse_peers | awk '$2=="up"{print $1}')
+    for _ip in $_peers; do
+        _ms=$(probe_dnsmasq "$_ip")
+        if [ "$_ms" -lt "$_best_ms" ]; then
+            _best_ms=$_ms
+            _best_ip=$_ip
+        fi
+    done
+    if [ -n "$_best_ip" ]; then
+        echo "PEER|$_best_ip|0"; return
+    fi
+
+    # 4. 外部 DNS fallback (.mesh_upstream_dns,依序 1=雲端 AGH,2=8.8.8.8)
+    _picked=$(pick_upstream_dns)
+    if [ -n "$_picked" ]; then
+        echo "DNS|$_picked|0"; return
+    fi
+
+    # 5. NONE (全掛)
+    echo "NONE||0"
 }
 
 # 從 .mesh_upstream_dns 逐一測試，第一個能解 TEST_DOMAIN 就回傳 (印到 stdout)
@@ -211,3 +317,7 @@ if [ "$NEED_RELOAD" = "1" ]; then
     /etc/init.d/firewall reload
     log "✅ 設定已更新並重載服務"
 fi
+
+# [Commit A 乾跑] 不套用,只 log 新邏輯會選什麼 upstream (方便對照舊邏輯)
+_DRY_DECISION=$(pick_upstream 2>/dev/null)
+log "🔬 dry-run pick_upstream → $_DRY_DECISION"
