@@ -189,8 +189,10 @@ _HAS_WAN_FOR_ALFRED="${HAS_WAN:-0}"
 if command -v alfred >/dev/null 2>&1; then
     _WAN_STATUS="down"
     [ "$_HAS_WAN_FOR_ALFRED" = "1" ] && _WAN_STATUS="up"
+    # agh_status=up 的定義: dnsmasq 真的把 upstream 指向本機 AGH,且 AGH 有回應
+    # (避免 AGH 活著但 dnsmasq 已被 check-adguard fallback 到外部時誤導 peer)
     _AGH_STATUS="down"
-    if pgrep -f '/usr/bin/AdGuardHome' >/dev/null 2>&1; then
+    if uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | grep -q '127.0.0.1#53535'; then
         nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
     fi
     _LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
