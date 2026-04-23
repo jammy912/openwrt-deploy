@@ -102,18 +102,26 @@ done
 dbg "0.網路就緒 (等待${i}s)"
 
 # =====================
-# 1. 檢查 override (Google Sheet GW Mode)
+# 1. 角色決策優先序:
+#    a. .mesh_role_override (Google Sheet GW Mode,臨時強切)
+#    b. .mesh_role (部署時釘死: gateway/client 直接用;hybrid 才自動偵測)
+#    c. WAN 狀態 (hybrid/未設定時使用)
 # =====================
 OVERRIDE=$(cat /etc/myscript/.mesh_role_override 2>/dev/null)
 OVERRIDE_LOWER=$(echo "$OVERRIDE" | tr 'A-Z' 'a-z')
+FIXED_ROLE=$(cat /etc/myscript/.mesh_role 2>/dev/null)
 
 if [ "$OVERRIDE_LOWER" = "gateway" ] || [ "$OVERRIDE_LOWER" = "client" ]; then
     NEW_ROLE="$OVERRIDE_LOWER"
     log "override 強制角色: $NEW_ROLE (來自 .mesh_role_override)"
     dbg "1.override=$NEW_ROLE"
+elif [ "$FIXED_ROLE" = "gateway" ] || [ "$FIXED_ROLE" = "client" ]; then
+    # deploy 時釘死的角色 (client 沒裝 gateway 套件,不能被自動升級)
+    NEW_ROLE="$FIXED_ROLE"
+    dbg "1.固定角色: $NEW_ROLE (來自 .mesh_role)"
 else
     # =====================
-    # 1b. 檢查 WAN 狀態 (自動偵測)
+    # 1b. 檢查 WAN 狀態 (hybrid 自動偵測)
     # =====================
     WAN_IF=$(uci get network.wan.device 2>/dev/null || echo "wan")
     WAN_IP=$(uci get network.wan.ipaddr 2>/dev/null)
@@ -136,7 +144,7 @@ else
     else
         NEW_ROLE="client"
     fi
-    dbg "1.自動偵測 WAN_IP=$WAN_IP HAS_WAN=$HAS_WAN → $NEW_ROLE"
+    dbg "1.hybrid 自動偵測 WAN_IP=$WAN_IP HAS_WAN=$HAS_WAN → $NEW_ROLE"
 fi
 
 # =====================
