@@ -858,7 +858,8 @@ apply_5g_channel_policy() {
                     echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
                 done
                 tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
-                log "[channel-policy] $radio 指定頻段不可用，改用硬體可用: [$tgt_chs]"
+                # 此 fallback 在 radio 不支援指定頻段時會每分鐘觸發 (例如主gw 想要低頻
+                # 但 radio2 只支援高頻),訊息無變化不再 log,只在實際 uci 會變時 (L871/880) log
             fi
         fi
 
