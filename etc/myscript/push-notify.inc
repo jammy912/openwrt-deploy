@@ -63,3 +63,48 @@ push_notify() {
     done
 }
 
+
+# -----------------------------
+# 函數：queue_push <event> [reason] [detail]
+#   在 reboot / 無網路情境下，把訊息寫成 JSON 檔進 .pushqueue/，
+#   開機後由 push-queue.sh 逐筆送出後刪除。
+#   JSON 欄位: ts / ts_iso / host / event / reason / detail
+# -----------------------------
+PUSH_QUEUE_DIR="${PUSH_QUEUE_DIR:-/etc/myscript/.pushqueue}"
+
+queue_push() {
+    local event="$1"
+    local reason="$2"
+    local detail="$3"
+    [ -z "$event" ] && return 0
+
+    mkdir -p "$PUSH_QUEUE_DIR" 2>/dev/null
+
+    local ts ts_iso host fname tmp
+    ts=$(date +%s)
+    ts_iso=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')
+    host=$(uci get system.@system[0].hostname 2>/dev/null || hostname)
+    fname="${PUSH_QUEUE_DIR}/$(date +%Y%m%d-%H%M%S)-$$-${event}.json"
+    tmp="${fname}.tmp"
+
+    # JSON 字串跳脫：反斜線、雙引號、換行
+    _jesc() {
+        printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+            | awk 'BEGIN{ORS=""} {if(NR>1)print "\\n"; print}'
+    }
+
+    {
+        printf '{'
+        printf '"ts":%s,'          "$ts"
+        printf '"ts_iso":"%s",'    "$(_jesc "$ts_iso")"
+        printf '"host":"%s",'      "$(_jesc "$host")"
+        printf '"event":"%s",'     "$(_jesc "$event")"
+        printf '"reason":"%s",'    "$(_jesc "$reason")"
+        printf '"detail":"%s"'     "$(_jesc "$detail")"
+        printf '}\n'
+    } > "$tmp" && mv "$tmp" "$fname"
+
+    sync 2>/dev/null
+    echo "$fname"
+}
+

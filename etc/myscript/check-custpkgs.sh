@@ -305,6 +305,7 @@ main() {
     # 有安裝過套件（return 0 且確實有缺少）才重開機
     if [ $result -eq 0 ] && [ -n "$INSTALLED_FLAG" ] && [ "$NO_REBOOT" = "0" ]; then
         log "🔄 套件安裝完成，10 秒後重新開機..."
+        queue_push "reboot-custpkgs" "packages-installed" "${INSTALLED_FLAG}"
         sleep 10
         reboot
     fi

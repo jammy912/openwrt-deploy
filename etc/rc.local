@@ -54,6 +54,9 @@ esac
 
 /etc/myscript/check-custpkgs.sh &
 
+# 開機後，等網路穩定再把 .pushqueue 內累積的 reboot log 逐一送給 admin
+/etc/myscript/push-queue.sh &
+
 # hybrid 模式: 開機自動偵測角色
 [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" = "hybrid" ] && /etc/myscript/auto-role.sh
 

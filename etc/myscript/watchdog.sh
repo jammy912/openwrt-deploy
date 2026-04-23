@@ -57,7 +57,9 @@ if [ "$LOAD_1M" -ge 12 ]; then
         log "⚠️ Load 高但套件安裝中 ($(cat /proc/loadavg))，跳過重啟"
     else
         log "⚠️ Load 過高 ($(cat /proc/loadavg))，重啟路由器"
+        # 即時 push + queue 雙保險 (load 高可能伴隨網路異常)
         push_notify "⚠️ Load 過高 ($(cat /proc/loadavg))，重啟中"
+        queue_push "reboot-watchdog" "load-high" "loadavg=$(cat /proc/loadavg)"
         sleep 3
         reboot
     fi
@@ -117,7 +119,8 @@ if [ $failed_count -gt 0 ]; then
             exit 0
         fi
         log "⚠️ 重试仍全失败，执行重启..."
-        push_notify "⚠️ 网络持续中断！路由器即将重启"
+        # 網路已斷，即時 push 幾乎必失敗 → 寫 queue 讓開機後補送
+        queue_push "reboot-watchdog" "all-dns-down" "failed=${failed_ips}"
         sleep 5
         log "🔄 执行重启..."
         reboot
