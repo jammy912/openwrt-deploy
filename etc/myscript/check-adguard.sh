@@ -397,6 +397,22 @@ verify_dnsmasq() {
     nslookup -timeout=3 "$TEST_DOMAIN" 127.0.0.1 2>/dev/null | grep -q 'Address\|canonical'
 }
 
+# 帶重試的驗證：用漸進式 backoff,避免 dnsmasq/AGH 還在暖機就誤判壞掉
+# $1=tries (預設 3)  $2=sleeps (空白分隔的秒數,預設 "2 3 5")
+# 任一次成功即回 0
+verify_dnsmasq_retry() {
+    local tries="${1:-3}" sleeps="${2:-2 3 5}" i=0
+    # 先試一次不 sleep
+    verify_dnsmasq && return 0
+    for s in $sleeps; do
+        i=$((i + 1))
+        [ "$i" -ge "$tries" ] && break
+        sleep "$s"
+        verify_dnsmasq && return 0
+    done
+    return 1
+}
+
 # ==============================
 # 主要邏輯
 # ==============================
@@ -417,15 +433,48 @@ apply_upstream "$TARGET" "$KIND"
 
 # 端到端 sanity: NONE 已經是 fallback 不檢查;其他都驗 dnsmasq 真的能解
 # 失敗 → restart dnsmasq (reload 不會清 server-dead 標記,要 restart 才行)
-if [ "$KIND" != "NONE" ] && ! verify_dnsmasq; then
+#
+# 防誤報策略:
+#   1) restart 前先 retry 2 次 (2s+3s),避免瞬斷抖動造成不必要的 restart
+#   2) restart 後 retry 3 次漸進 (2s+3s+5s≈10s),給 dnsmasq/AGH 暖機時間
+#   3) 最終仍失敗前診斷: AGH 本體 / upstream 連不連得到,把原因寫進訊息
+if [ "$KIND" != "NONE" ] && ! verify_dnsmasq_retry 2 "2 3"; then
     log "⚠️ dnsmasq 端到端驗證失敗 (KIND=$KIND target=$TARGET),restart dnsmasq"
     /etc/init.d/dnsmasq restart
-    sleep 2
-    if verify_dnsmasq; then
+    if verify_dnsmasq_retry 3 "2 3 5"; then
         log "✅ dnsmasq restart 後恢復"
         push_notify "dns-recover: dnsmasq restart 後恢復 (KIND=$KIND)"
     else
-        log "❌ dnsmasq restart 後仍無法解析"
-        push_notify "dns-broken: dnsmasq restart 後仍無法解析 (KIND=$KIND target=$TARGET)"
+        # 診斷:找出真正故障點
+        _diag=""
+        case "$KIND" in
+            SELF)
+                if test_local_agh; then
+                    _diag="AGH_ok,dnsmasq_broken"
+                else
+                    _diag="AGH_dead"
+                fi
+                ;;
+            PEER|DNS)
+                # TARGET 可能多個 IP,空白分隔
+                _up_ok=0
+                for _t in $TARGET; do
+                    _host=$(echo "$_t" | cut -d'#' -f1)
+                    _port=$(echo "$_t" | awk -F'#' '{print ($2)?$2:53}')
+                    if nslookup -port="$_port" -timeout=2 "$TEST_DOMAIN" "$_host" 2>/dev/null \
+                         | grep -q 'Address\|canonical'; then
+                        _up_ok=1; break
+                    fi
+                done
+                if [ "$_up_ok" = "1" ]; then
+                    _diag="upstream_ok,dnsmasq_broken"
+                else
+                    _diag="upstream_dead"
+                fi
+                ;;
+            *) _diag="unknown" ;;
+        esac
+        log "❌ dnsmasq restart 後仍無法解析 ($_diag)"
+        push_notify "dns-broken: $_diag (KIND=$KIND target=$TARGET)"
     fi
 fi
