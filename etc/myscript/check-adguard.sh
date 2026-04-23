@@ -38,16 +38,45 @@ log() {
     logger -t adguard-switch "$1"
 }
 
+# 自身識別: sha256(hostname+wan_mac+machine-id+board_name) 前 16 字 (同 auto-role.sh:156)
+my_id() {
+    local h w m b
+    h=$(uci -q get system.@system[0].hostname)
+    w=$(cat /sys/class/net/wan/address 2>/dev/null)
+    m=$(cat /etc/machine-id 2>/dev/null)
+    b=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+    printf '%s|%s|%s|%s' "$h" "$w" "$m" "$b" | sha256sum | cut -c1-16
+}
+my_mac() {
+    local _mac
+    _mac=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+    [ -z "$_mac" ] && _mac=$(cat /sys/class/net/eth0/address 2>/dev/null)
+    echo "$_mac" | tr 'A-Z' 'a-z'
+}
+my_ip() {
+    ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1
+}
+
 # 讀 alfred type 64,解出 peer (自己以外) 的 ip + agh_status,輸出 "ip agh_status" 一行一筆
+# 三重排除自己: id (優先,穩定跨重啟) / mac / ip
 parse_peers() {
-    local _my_id
-    _my_id=$(cat /etc/myscript/.mesh_id 2>/dev/null)
-    alfred -r 64 2>/dev/null | awk -v me_id="$_my_id" '
+    local _me_id _me_mac _me_ip
+    _me_id=$(my_id)
+    _me_mac=$(my_mac)
+    _me_ip=$(my_ip)
+    alfred -r 64 2>/dev/null | awk \
+        -v me_id="$_me_id" \
+        -v me_mac="$_me_mac" \
+        -v me_ip="$_me_ip" '
         {
             line = tolower($0)
             id = ""
             if (match(line, /\\"id\\":\\"[0-9a-f]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); id = s
+            }
+            mac = ""
+            if (match(line, /\\"mac\\":\\"[0-9a-f:]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); mac = s
             }
             ip = ""
             if (match(line, /\\"ip\\":\\"[0-9.]+\\"/)) {
@@ -57,7 +86,10 @@ parse_peers() {
             if (match(line, /\\"agh_status\\":\\"[a-z]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); agh = s
             }
+            # 排除自己 (三重)
             if (id != "" && id == me_id) next
+            if (mac != "" && mac == me_mac) next
+            if (ip != "" && ip == me_ip) next
             if (ip == "") next
             print ip, agh
         }
