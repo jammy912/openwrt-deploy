@@ -69,28 +69,31 @@ rm -f /tmp/luci-indexcache
 (sleep 30 && /etc/init.d/uhttpd restart) & 
 
 
-sleep 60
+# WG handshake 檢查搬入背景,不擋 procd init (原本 foreground 會拖 ~90s)
+(
+    sleep 60
 
-# WG endpoint hostname → /etc/hosts (用 upstream_dns 清單)
-[ -x /etc/myscript/wg-dns-hosts.sh ] && /etc/myscript/wg-dns-hosts.sh
+    # WG endpoint hostname → /etc/hosts (用 upstream_dns 清單)
+    [ -x /etc/myscript/wg-dns-hosts.sh ] && /etc/myscript/wg-dns-hosts.sh
 
-for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
-  hs=$(wg show $iface latest-handshakes | awk '{if($2>max) max=$2} END{print max}')
-  hs=${hs:-0}  # 保險，空值設為0
+    for iface in $(uci show network | grep "=interface" | cut -d. -f2 | cut -d= -f1 | grep '^wg'); do
+      hs=$(wg show $iface latest-handshakes | awk '{if($2>max) max=$2} END{print max}')
+      hs=${hs:-0}  # 保險，空值設為0
 
-  now=$(date +%s)
-  diff=$((now - hs))
+      now=$(date +%s)
+      diff=$((now - hs))
 
-  if [ "$hs" -eq 0 ] || [ "$diff" -gt 180 ]; then
-    logger -t rc.local "$iface handshake stale ($diff sec), restarting..."
-    ifdown $iface
-    sleep 2
-    ifup $iface
-    push_notify "ifup-$iface"
-  else
-    logger -t rc.local "$iface handshake OK ($diff sec)"
-  fi
-done
+      if [ "$hs" -eq 0 ] || [ "$diff" -gt 180 ]; then
+        logger -t rc.local "$iface handshake stale ($diff sec), restarting..."
+        ifdown $iface
+        sleep 2
+        ifup $iface
+        push_notify "ifup-$iface"
+      else
+        logger -t rc.local "$iface handshake OK ($diff sec)"
+      fi
+    done
+) &
 
 # 開機同步 Google Sheet 設定 + 啟動 AGH
 (
