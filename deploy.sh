@@ -749,6 +749,8 @@ if [ "$MESH_ROLE" != "client" ]; then
     # allservers=1: 對 upstream server list 並發查詢,取首個回應
     #               配合 check-adguard 可能寫入多個 fallback DNS
     uci set dhcp.@dnsmasq[0].allservers='1'
+    # cachesize=10000: ~1MB RAM,家用多 client 時 hit rate 更高 (預設 1000)
+    uci set dhcp.@dnsmasq[0].cachesize='10000'
     uci delete dhcp.@dnsmasq[0].interface 2>/dev/null
     uci add_list dhcp.@dnsmasq[0].interface='lan'
     uci add_list dhcp.@dnsmasq[0].interface='wg1'
