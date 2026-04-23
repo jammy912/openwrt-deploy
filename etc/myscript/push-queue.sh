@@ -100,20 +100,29 @@ send_one() {
     [ -n "$detail" ] && msg="${msg} | ${detail}"
     [ -n "$ts_iso" ] && msg="${msg} @ ${ts_iso}"
 
-    # 送出前再驗一次網路 (curl 失敗不會讓 push_notify 非 0)
+    # 送出前再驗一次網路
     if ! net_ready; then
         log "送出前網路中斷，保留: $(basename "$f")"
         return 1
     fi
 
-    if push_notify "$msg"; then
-        log "已送出並刪除: $(basename "$f")"
-        rm -f "$f"
-        return 0
-    else
-        log "push_notify 失敗 (通常是 PUSH_KEYS 空)，保留: $(basename "$f")"
+    # 先驗 PUSH_KEYS 是否有內容 (ash 的 function return code 不可靠，
+    # push_notify 在 curl 成功送出後有時仍回傳非 0，會造成永遠刪不掉)
+    local _probe_keys=""
+    local _old_ifs="$IFS"; IFS=";"
+    for _pn in $PUSH_NAMES; do
+        [ -s "/etc/myscript/.secrets/pushkey.${_pn}" ] && _probe_keys="y"
+    done
+    IFS="$_old_ifs"
+    if [ -z "$_probe_keys" ]; then
+        log "PUSH_NAMES='${PUSH_NAMES}' 無對應 pushkey 檔，保留: $(basename "$f")"
         return 1
     fi
+
+    push_notify "$msg"
+    log "已送出並刪除: $(basename "$f")"
+    rm -f "$f"
+    return 0
 }
 
 process_queue() {
