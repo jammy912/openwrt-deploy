@@ -173,19 +173,28 @@ pick_upstream() {
     echo "NONE||0"
 }
 
-# 從 .mesh_upstream_dns 逐一測試，第一個能解 TEST_DOMAIN 就回傳 (印到 stdout)
+# 從 .mesh_upstream_dns 逐一測試,第一個有任一 DNS 能解 TEST_DOMAIN 的那行就回傳
+# 一行支援多 DNS (空白/逗號/分號分隔),例如 "8.8.8.8 8.8.4.4" 或 "8.8.8.8,8.8.4.4"
+# 回傳格式: 以空白分隔的 IP 列表 (供 apply_upstream 逐個 add_list)
 pick_upstream_dns() {
     [ -s "$DNS_LIST_FILE" ] || return 1
-    local _dns _ans
-    while IFS= read -r _dns; do
-        [ -z "$_dns" ] && continue
-        _ans=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_dns" 2>/dev/null \
-            | awk '/^Address/ && !/#/ {print $NF}' \
-            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
-            | grep -vE '^(0\.|127\.)' \
-            | head -1)
-        if [ -n "$_ans" ]; then
-            echo "$_dns"
+    local _line _normalized _dns _ans _any_ok
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        # 正規化: 逗號/分號 → 空白,壓縮多重空白
+        _normalized=$(echo "$_line" | tr ',;' '  ' | awk '{$1=$1; print}')
+        [ -z "$_normalized" ] && continue
+        _any_ok=0
+        for _dns in $_normalized; do
+            _ans=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_dns" 2>/dev/null \
+                | awk '/^Address/ && !/#/ {print $NF}' \
+                | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+                | grep -vE '^(0\.|127\.)' \
+                | head -1)
+            [ -n "$_ans" ] && _any_ok=1 && break
+        done
+        if [ "$_any_ok" = "1" ]; then
+            echo "$_normalized"
             return 0
         fi
     done < "$DNS_LIST_FILE"
@@ -263,12 +272,15 @@ ensure_agh_state() {
 }
 
 # 套用 upstream 到 dnsmasq (只在值不同時才動 uci)
-# $1: target 字串 (例如 "127.0.0.1#53535" / "192.168.1.4" / "8.8.8.8" / 空=走 WAN resolv)
+# $1: target 字串 - 可以是單個 (例如 "127.0.0.1#53535" / "192.168.1.4")
+#                   或空白分隔多個 (例如 "8.8.8.8 8.8.4.4")
+#                   空 = 走 WAN resolv
 # $2: KIND (SELF/PEER/DNS/NONE) - 決定 firewall redirect 開關
 apply_upstream() {
-    local _target="$1" _kind="$2" _cur _need_reload=0 _need_fw=0 _cur_fw_state _want_fw
+    local _target="$1" _kind="$2" _cur _need_reload=0 _need_fw=0 _cur_fw_state _want_fw _dns
 
-    _cur=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | head -1)
+    # 當前 uci server list (以空白合併成一行,方便比對)
+    _cur=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ' | awk '{$1=$1; print}')
 
     # Firewall redirect: 只有 SELF (本機 AGH 接管 client :53) 時才開
     case "$_kind" in
@@ -286,9 +298,13 @@ apply_upstream() {
             log "⚠️ 無任何 upstream 可用,退回 WAN resolv"
         fi
     else
+        # 正規化 target (把 , ; 也當空白) 以便比對
+        _target=$(echo "$_target" | tr ',;' '  ' | awk '{$1=$1; print}')
         if [ "$_cur" != "$_target" ]; then
             uci -q delete dhcp.@dnsmasq[0].server
-            uci add_list dhcp.@dnsmasq[0].server="$_target"
+            for _dns in $_target; do
+                uci add_list dhcp.@dnsmasq[0].server="$_dns"
+            done
             uci set dhcp.@dnsmasq[0].noresolv='1'
             uci commit dhcp
             _need_reload=1
