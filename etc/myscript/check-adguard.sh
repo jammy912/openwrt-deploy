@@ -125,36 +125,60 @@ test_local_agh() {
     nslookup -port=53535 -timeout=3 "$TEST_DOMAIN" 127.0.0.1 2>/dev/null | grep -q 'Address\|canonical'
 }
 
+# 快速測 DNS target (含空白分隔的多 IP,任一通就算通)
+# 只做單次 timeout=2 nslookup,供 sticky 快速續用判斷
+probe_dns_target() {
+    local _target="$1" _dns _ans
+    [ -z "$_target" ] && return 1
+    for _dns in $_target; do
+        _ans=$(nslookup -timeout=2 "$TEST_DOMAIN" "$_dns" 2>/dev/null \
+            | awk '/^Address/ && !/#/ {print $NF}' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vE '^(0\.|127\.)' \
+            | head -1)
+        [ -n "$_ans" ] && return 0
+    done
+    return 1
+}
+
 # 決定最佳 upstream,輸出 "KIND|target|failcount" (KIND=SELF/PEER/DNS/NONE)
 pick_upstream() {
-    local _run_agh _sticky_kind _sticky_target _sticky_fc _ms _best_ip _best_ms _peers
+    local _run_agh _sticky_kind _sticky_target _sticky_fc _ms _best_ip _best_ms _peers _minute _force_rescan
     _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
     [ -z "$_run_agh" ] && _run_agh=Y
+
+    # 整點強制全面重選,避免 sticky 長期鎖在次佳選擇 (例如 peer 恢復後 sticky 仍在 DNS)
+    _minute=$(date '+%M')
+    _force_rescan=0
+    [ "$_minute" = "00" ] && _force_rescan=1
 
     # 1. SELF
     if [ "$_run_agh" = "Y" ] && test_local_agh; then
         echo "SELF|127.0.0.1#53535|0"; return
     fi
 
-    # 2. Sticky PEER (只測當前選中的)
-    if [ -f "$STICKY_FILE" ]; then
+    # 2. Sticky: 讀檔,依 kind 分支 (整點時跳過,強制重選)
+    _sticky_kind=""; _sticky_target=""; _sticky_fc=0
+    if [ "$_force_rescan" = "0" ] && [ -f "$STICKY_FILE" ]; then
         _sticky_kind=$(cut -d'|' -f1 "$STICKY_FILE" 2>/dev/null)
         _sticky_target=$(cut -d'|' -f2 "$STICKY_FILE" 2>/dev/null)
         _sticky_fc=$(cut -d'|' -f3 "$STICKY_FILE" 2>/dev/null)
         [ -z "$_sticky_fc" ] && _sticky_fc=0
-        if [ "$_sticky_kind" = "PEER" ] && [ -n "$_sticky_target" ]; then
-            _ms=$(probe_dnsmasq "$_sticky_target")
-            if [ "$_ms" -lt $LATENCY_MAX_MS ]; then
-                # 還確認 alfred 上它仍 agh=up
-                if parse_peers | awk -v ip="$_sticky_target" '$1==ip && $2=="up"{f=1} END{exit !f}'; then
-                    echo "PEER|$_sticky_target|0"; return
-                fi
-            fi
-            _sticky_fc=$((_sticky_fc + 1))
-            if [ "$_sticky_fc" -lt $STICKY_FAIL_MAX ]; then
-                echo "PEER|$_sticky_target|$_sticky_fc"; return
+    fi
+
+    # 2a. Sticky PEER (只測當前選中的,需同時 alfred agh=up)
+    if [ "$_sticky_kind" = "PEER" ] && [ -n "$_sticky_target" ]; then
+        _ms=$(probe_dnsmasq "$_sticky_target")
+        if [ "$_ms" -lt $LATENCY_MAX_MS ]; then
+            if parse_peers | awk -v ip="$_sticky_target" '$1==ip && $2=="up"{f=1} END{exit !f}'; then
+                echo "PEER|$_sticky_target|0"; return
             fi
         fi
+        _sticky_fc=$((_sticky_fc + 1))
+        if [ "$_sticky_fc" -lt $STICKY_FAIL_MAX ]; then
+            echo "PEER|$_sticky_target|$_sticky_fc"; return
+        fi
+        # failcount 達標 → 放棄 sticky,繼續往下 rescan
     fi
 
     # 3. Rescan PEER (只挑 agh=up,選延遲最低)
@@ -172,7 +196,18 @@ pick_upstream() {
         echo "PEER|$_best_ip|0"; return
     fi
 
-    # 4. 外部 DNS fallback (.mesh_upstream_dns,依序 1=雲端 AGH,2=8.8.8.8)
+    # 4a. Sticky DNS (前輪選定的 DNS 還通就續用,不重測 .mesh_upstream_dns 整串)
+    if [ "$_sticky_kind" = "DNS" ] && [ -n "$_sticky_target" ]; then
+        if probe_dns_target "$_sticky_target"; then
+            echo "DNS|$_sticky_target|0"; return
+        fi
+        _sticky_fc=$((_sticky_fc + 1))
+        if [ "$_sticky_fc" -lt $STICKY_FAIL_MAX ]; then
+            echo "DNS|$_sticky_target|$_sticky_fc"; return
+        fi
+    fi
+
+    # 4b. 重選 DNS (.mesh_upstream_dns 依序測,第一行有任一 DNS 通的整行)
     _picked=$(pick_upstream_dns)
     if [ -n "$_picked" ]; then
         echo "DNS|$_picked|0"; return
