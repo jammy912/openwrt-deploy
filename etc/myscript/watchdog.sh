@@ -37,6 +37,55 @@ check_ip() {
     fi
 }
 
+# 收集重開前網路診斷資訊
+# 輸出：/tmp/watchdog-netdiag-<ts>.log  (reboot 後仍可能殘留可查)
+# 回傳：stdout 為精簡單行摘要 (供 queue_push detail 用)
+collect_netdiag() {
+    local out="$1"
+    local lan_ip wan_gw wan_if
+    lan_ip=$(uci get network.lan.ipaddr 2>/dev/null)
+    wan_gw=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $3; exit}')
+    wan_if=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $5; exit}')
+
+    {
+        echo "=== watchdog netdiag @ $(date -Iseconds 2>/dev/null || date) ==="
+        echo "[uptime]    $(uptime)"
+        echo "[loadavg]   $(cat /proc/loadavg)"
+        echo "[routes]"
+        ip -4 route show default
+        echo
+        echo "[ping LAN self $lan_ip]"
+        ping -c 2 -W 2 "$lan_ip" 2>&1
+        echo "[ping WAN gw $wan_gw via $wan_if]"
+        if [ -n "$wan_gw" ]; then
+            ping -c 2 -W 2 "$wan_gw" 2>&1
+        else
+            echo "(無 WAN default gateway)"
+        fi
+        echo "[ping 8.8.8.8 via $wan_if]"
+        if [ -n "$wan_if" ]; then
+            ping -c 2 -W 2 -I "$wan_if" 8.8.8.8 2>&1
+        else
+            ping -c 2 -W 2 8.8.8.8 2>&1
+        fi
+        echo "[traceroute 8.8.8.8 (max 12 hop, 2s)]"
+        traceroute -n -w 2 -q 1 -m 12 8.8.8.8 2>&1
+        echo "=== end ==="
+    } >"$out" 2>&1
+
+    # 精簡摘要：各段 loss% + traceroute 最後一跳 (去雙引號，方便 queue_push detail)
+    local lan_loss wan_loss ext_loss tr_last
+    lan_loss=$(awk '/ping LAN self/,/ping WAN gw/ {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
+    wan_loss=$(awk '/ping WAN gw/,/ping 8.8.8.8/   {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
+    ext_loss=$(awk '/ping 8.8.8.8/,/traceroute/     {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
+    tr_last=$(awk '/^ *[0-9]+ +/ {hop=$1; ip=$2} END{print hop" "ip}' "$out")
+    printf 'lan=%s(loss=%s) gw=%s(loss=%s) wan_if=%s ext=8.8.8.8(loss=%s) tr_last=%s' \
+        "$lan_ip" "${lan_loss:-NA}" \
+        "$wan_gw" "${wan_loss:-NA}" \
+        "$wan_if" "${ext_loss:-NA}" \
+        "${tr_last:-NA}"
+}
+
 # === Load 警告 / 過高自動重啟 ===
 LOAD_1M=$(awk -F. '{print $1}' /proc/loadavg)
 if [ "$LOAD_1M" -ge 4 ] && [ "$LOAD_1M" -lt 12 ]; then
@@ -119,8 +168,13 @@ if [ $failed_count -gt 0 ]; then
             exit 0
         fi
         log "⚠️ 重试仍全失败，执行重启..."
+        # 收集重開前網路診斷 (LAN/WAN gw/外網/traceroute)
+        NETDIAG_LOG="/tmp/watchdog-netdiag-$(date +%Y%m%d-%H%M%S).log"
+        NETDIAG_SUMMARY=$(collect_netdiag "$NETDIAG_LOG")
+        log "netdiag: $NETDIAG_SUMMARY"
+        log "完整診斷 → $NETDIAG_LOG"
         # 網路已斷，即時 push 幾乎必失敗 → 寫 queue 讓開機後補送
-        queue_push "reboot-watchdog" "all-dns-down" "failed=${failed_ips}"
+        queue_push "reboot-watchdog" "all-dns-down" "failed=${failed_ips}| ${NETDIAG_SUMMARY}"
         sleep 5
         log "🔄 执行重启..."
         reboot
