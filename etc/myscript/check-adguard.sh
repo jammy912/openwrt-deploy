@@ -160,6 +160,10 @@ pick_upstream_dns() {
     return 1
 }
 
+# [Commit A 乾跑] 在任何 exit 0 之前先 log 新邏輯會選什麼 (對照舊邏輯實際做什麼)
+_DRY_DECISION=$(pick_upstream 2>/dev/null)
+log "🔬 dry-run pick_upstream → $_DRY_DECISION"
+
 # .mesh_runagh=N 本機不跑 AGH → 停掉 & dnsmasq 改指向 .mesh_upstream_dns 第一個可用的
 _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
 [ -z "$_run_agh" ] && _run_agh=Y
@@ -317,7 +321,3 @@ if [ "$NEED_RELOAD" = "1" ]; then
     /etc/init.d/firewall reload
     log "✅ 設定已更新並重載服務"
 fi
-
-# [Commit A 乾跑] 不套用,只 log 新邏輯會選什麼 upstream (方便對照舊邏輯)
-_DRY_DECISION=$(pick_upstream 2>/dev/null)
-log "🔬 dry-run pick_upstream → $_DRY_DECISION"
