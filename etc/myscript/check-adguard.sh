@@ -147,10 +147,13 @@ pick_upstream() {
     _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
     [ -z "$_run_agh" ] && _run_agh=Y
 
-    # 整點強制全面重選,避免 sticky 長期鎖在次佳選擇 (例如 peer 恢復後 sticky 仍在 DNS)
+    # 每 10 分鐘 (5/15/25/35/45/55 分) 強制全面重選,避免 sticky 長期鎖在次佳選擇
+    # 避開 00 分 (整點 cron 擁擠) 和主要 cron tick
     _minute=$(date '+%M')
     _force_rescan=0
-    [ "$_minute" = "00" ] && _force_rescan=1
+    case "$_minute" in
+        05|15|25|35|45|55) _force_rescan=1 ;;
+    esac
 
     # 1. SELF
     if [ "$_run_agh" = "Y" ] && test_local_agh; then
