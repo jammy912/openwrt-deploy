@@ -390,6 +390,13 @@ apply_upstream() {
     [ "$_need_reload" = "1" ] && /etc/init.d/dnsmasq reload
 }
 
+# 端到端驗 dnsmasq 自己 (127.0.0.1:53),抓「config 對但 server pool 被標 dead」的情況
+# (例如 rebind protection 砍掉某個 reply → upstream 進 EDE 14 (Not Ready) 永久 REFUSED)
+# 回 0 = OK, 回 1 = 壞掉
+verify_dnsmasq() {
+    nslookup -timeout=3 "$TEST_DOMAIN" 127.0.0.1 2>/dev/null | grep -q 'Address\|canonical'
+}
+
 # ==============================
 # 主要邏輯
 # ==============================
@@ -407,3 +414,18 @@ esac
 
 log "pick: $DECISION"
 apply_upstream "$TARGET" "$KIND"
+
+# 端到端 sanity: NONE 已經是 fallback 不檢查;其他都驗 dnsmasq 真的能解
+# 失敗 → restart dnsmasq (reload 不會清 server-dead 標記,要 restart 才行)
+if [ "$KIND" != "NONE" ] && ! verify_dnsmasq; then
+    log "⚠️ dnsmasq 端到端驗證失敗 (KIND=$KIND target=$TARGET),restart dnsmasq"
+    /etc/init.d/dnsmasq restart
+    sleep 2
+    if verify_dnsmasq; then
+        log "✅ dnsmasq restart 後恢復"
+        push_notify "dns-recover: dnsmasq restart 後恢復 (KIND=$KIND)"
+    else
+        log "❌ dnsmasq restart 後仍無法解析"
+        push_notify "dns-broken: dnsmasq restart 後仍無法解析 (KIND=$KIND target=$TARGET)"
+    fi
+fi
