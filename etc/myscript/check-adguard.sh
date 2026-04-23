@@ -9,15 +9,15 @@ echo $$ > "$LOCK"
 trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
 
 # 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # AGH 正在啟動中 (rc.local/auto-role 建立的 lock)，跳過檢查
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 if lock_is_active "agh_startup" 120; then
     logger -t adguard-switch "agh_startup lock 有效，跳過檢查"
     exit 0

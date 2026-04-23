@@ -12,8 +12,8 @@
 #   .mesh_wireless  - 無線 mesh (Y/N)
 #   .mesh_wired     - 有線 mesh (Y/N)
 
-. /etc/myscript/push_notify.inc 2>/dev/null
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/push-notify.inc 2>/dev/null
+. /etc/myscript/lock-handler.sh
 # auto-role 不受 agh_startup lock 限制 (它自己要判斷角色+停 AGH)
 
 PUSH_NAMES="jammy"

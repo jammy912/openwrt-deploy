@@ -1,12 +1,12 @@
 #!/bin/sh
 
 # 引入鎖定處理器
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 LOCK_NAME="sync-googleconfig"
 EXPIRY_SEC=300 # 5 分鐘
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # 執行鎖定檢查並創建鎖定檔案

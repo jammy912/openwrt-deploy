@@ -1,6 +1,6 @@
 
 #!/bin/sh
-# check_qosify.sh
+# check-qosify.sh
 # 檢查 qosify 規則在各介面是否生效
 
 echo "==== QoSify 規則檢查 ===="

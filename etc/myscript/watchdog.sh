@@ -5,12 +5,12 @@
 # 如果三个IP都无法ping通，则自动重启路由器
 
 # 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 trap 'rm -f /tmp/cron_global.lock' EXIT
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # 定义要监控的IP地址

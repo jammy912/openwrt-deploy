@@ -2,7 +2,7 @@
 # the system init finished. By default this file does nothing.
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 
@@ -96,7 +96,7 @@ done
 (
     /etc/myscript/sync-googleconfig.sh --apply
     # 建立 agh_startup lock，防止 check-adguard/auto-role 在啟動期間干擾
-    . /etc/myscript/lock_handler.sh
+    . /etc/myscript/lock-handler.sh
     lock_check_and_create "agh_startup" 120 >/dev/null 2>&1
 	
     # AGH 記憶體限制 (避免 OOM)，確保所有機器都有設定

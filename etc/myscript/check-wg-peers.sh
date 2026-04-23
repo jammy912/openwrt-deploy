@@ -12,11 +12,11 @@
 # 建議 cron: */1 * * * * /etc/myscript/check-wg-peers.sh wg1
 
 # 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 trap 'rm -f /tmp/cron_global.lock' EXIT
 
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 
 WG_IFACE="${1:-wg1}"

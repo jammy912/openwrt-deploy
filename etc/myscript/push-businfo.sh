@@ -35,7 +35,7 @@
 # 公車到站有時效性,不納入全域 cron 鎖 (被 60 秒鎖卡住會錯過報時)
 
 # Load push notification function
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}" # 環境變數覆寫，例如 PUSH_NAMES="admin;ann" push-businfo.sh ...
 HOSTNAME=""
 

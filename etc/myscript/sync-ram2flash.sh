@@ -6,7 +6,7 @@
 
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 push_notify "SyncRam2Flash"

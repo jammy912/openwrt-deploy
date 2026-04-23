@@ -1,8 +1,8 @@
 
 
 #!/bin/sh
-# push_notify.inc - 多通道通知模組 (PushDeer + LINE Notify)
-# 放置位置：/etc/myscript/push_notify.inc
+# push-notify.inc - 多通道通知模組 (PushDeer + LINE Notify)
+# 放置位置：/etc/myscript/push-notify.inc
 
 # 通知服務設定
 # 代號對應 /etc/myscript/.secrets/pushkey.<代號> 檔案

@@ -3,7 +3,7 @@
 # USB 全部卸載腳本（含重試與 push_notify）
 
 # 1️⃣ 載入推播功能
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # 2️⃣ 設定 USB 掛載目錄

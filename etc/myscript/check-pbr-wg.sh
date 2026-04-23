@@ -20,7 +20,7 @@ echo $$ > "$LOCK"
 trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
 
 # 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 
 # 非主gw 不需要檢查 PBR/WG 狀態
@@ -28,7 +28,7 @@ GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
 [ "$GW_TYPE" != "主gw" ] && exit 0
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # --- 設定 ---

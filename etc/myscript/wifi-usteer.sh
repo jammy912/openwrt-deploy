@@ -5,7 +5,7 @@
 # 若所有值與目前相同，不做任何變更也不重啟
 
 # 全域 cron 排隊鎖
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 trap 'rm -f /tmp/cron_global.lock' EXIT
 

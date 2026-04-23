@@ -15,12 +15,12 @@ if [ "$_SYNC_DEPLOY_RELAUNCHED" != "1" ]; then
 fi
 
 # 引入鎖定處理器
-. /etc/myscript/lock_handler.sh
+. /etc/myscript/lock-handler.sh
 LOCK_NAME="sync-deploy"
 EXPIRY_SEC=120
 
 # 引入通知器
-. /etc/myscript/push_notify.inc
+. /etc/myscript/push-notify.inc
 PUSH_NAMES="admin"
 
 # 執行鎖定檢查

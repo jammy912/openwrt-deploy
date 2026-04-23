@@ -859,14 +859,14 @@ main() {
             if [ "$_still_bad" -eq 1 ]; then
                 # 第二步：wifi restart 救不回，reboot
                 log "[嚴重] wifi restart 無效，即將 reboot"
-                . /etc/myscript/push_notify.inc 2>/dev/null
+                . /etc/myscript/push-notify.inc 2>/dev/null
                 PUSH_NAMES="admin"
                 push_notify "WiFi異常: Channel 0, wifi restart 無效, 請手動 reboot" 2>/dev/null
                 # sleep 3
                 # reboot  # 暫時註解，排查 Lucy 連線問題
             else
                 log "[修復] wifi restart 成功修復 Channel 0"
-                . /etc/myscript/push_notify.inc 2>/dev/null
+                . /etc/myscript/push-notify.inc 2>/dev/null
                 PUSH_NAMES="admin"
                 push_notify "WiFi異常: Channel 0, 已透過 wifi restart 修復" 2>/dev/null
             fi
