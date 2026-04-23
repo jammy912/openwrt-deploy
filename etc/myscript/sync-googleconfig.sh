@@ -619,13 +619,16 @@ main() {
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                     if ($i ~ /option runagh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ra=a[n] }
-                    if ($i ~ /option upstream_dns1/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d1=a[n] }
-                    if ($i ~ /option upstream_dns2/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d2=a[n] }
-                    if ($i ~ /option upstream_dns3/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d3=a[n] }
-                    if ($i ~ /option upstream_dns4/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); d4=a[n] }
+                    # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
+                    # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
+                    if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
+                    if ($i ~ /option upstream_dns2/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns2[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d2=v }
+                    if ($i ~ /option upstream_dns3/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns3[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d3=v }
+                    if ($i ~ /option upstream_dns4/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns4[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d4=v }
                 }
                 if (tolower(h) == tolower(host)) {
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_DNS1=" d1 " NEW_DNS2=" d2 " NEW_DNS3=" d3 " NEW_DNS4=" d4; exit
+                    # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")

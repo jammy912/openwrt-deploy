@@ -746,11 +746,14 @@ if [ "$MESH_ROLE" != "client" ]; then
     uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
     uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
     uci set dhcp.@dnsmasq[0].confdir='/etc/dnsmasq.d'
+    # allservers=1: 對 upstream server list 並發查詢,取首個回應
+    #               配合 check-adguard 可能寫入多個 fallback DNS
+    uci set dhcp.@dnsmasq[0].allservers='1'
     uci delete dhcp.@dnsmasq[0].interface 2>/dev/null
     uci add_list dhcp.@dnsmasq[0].interface='lan'
     uci add_list dhcp.@dnsmasq[0].interface='wg1'
     uci commit dhcp
-    echo "  ✅ dnsmasq DNS → 8.8.8.8 / 1.1.1.1 (AdGuard Home 啟動後由 check-adguard.sh 自動切換)"
+    echo "  ✅ dnsmasq DNS → 8.8.8.8 / 1.1.1.1 (allservers=1,AdGuard Home 啟動後由 check-adguard.sh 自動切換)"
 fi
 
 # qosify template (sync-googleconfig 需要)
