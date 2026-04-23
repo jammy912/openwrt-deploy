@@ -350,6 +350,7 @@ apply_upstream() {
             uci commit dhcp
             _need_reload=1
             log "⚠️ 無任何 upstream 可用,退回 WAN resolv"
+            push_notify "dns-switch: $_cur → WAN resolv (NONE)"
         fi
     else
         # 正規化 target (把 , ; 也當空白) 以便比對
@@ -363,6 +364,7 @@ apply_upstream() {
             uci commit dhcp
             _need_reload=1
             log "🔀 dnsmasq upstream → $_target ($_kind)"
+            push_notify "dns-switch: ${_cur:-<none>} → $_target ($_kind)"
         fi
     fi
 
