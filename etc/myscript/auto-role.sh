@@ -600,38 +600,10 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     [ "$PREV_GWTYPE" != "主gw" ] && PROMOTED=1
     if [ "$CHANGED" = "1" ] || [ "$PROMOTED" = "1" ]; then
         svc_enable ddns
-        if [ "$RUN_AGH" = "N" ]; then
-            svc_disable adguardhome
-            lock_remove "agh_startup" >/dev/null 2>&1
-            log "AGH: .mesh_runagh=N，主 gw 也不啟動 AGH"
-        else
-            # 開機早期不啟動 AGH，由 rc.local 延遲 120 秒後統一啟動
-            _UPTIME_SEC=$(awk -F. '{print $1}' /proc/uptime)
-            if [ "$_UPTIME_SEC" -gt 180 ]; then
-                lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
-                svc_enable adguardhome
-            else
-                log "開機早期 (${_UPTIME_SEC}s)，跳過 AGH 啟動 (由 rc.local 延遲處理)"
-            fi
-        fi
+        # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理 (每分鐘 cron)
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
-        # 恢復 dnsmasq 指向 AGH (從 client 切回時需要)；RUN_AGH=N 時略過
-        if [ "$RUN_AGH" != "N" ] && [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" != "1" ]; then
-            uci set dhcp.@dnsmasq[0].noresolv='1'
-            # server 是 list 不是 option，必須用 add_list (否則 dnsmasq.conf 不帶 upstream)
-            uci -q delete dhcp.@dnsmasq[0].server
-            uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#53535'
-            uci commit dhcp
-            # 等 AGH listen 53535 再 restart dnsmasq，避免 dnsmasq 標記 upstream dead → REFUSED
-            for _i in 1 2 3 4 5 6 7 8 9 10; do
-                netstat -lnu 2>/dev/null | grep -q ":53535 " && break
-                sleep 1
-            done
-            /etc/init.d/dnsmasq restart
-            log "dnsmasq: 恢復 AGH 轉發 (主 gateway, 等 AGH ready ${_i}s)"
-        fi
         # 開啟 IOT WiFi
         IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
         if [ -n "$IOT_IF" ]; then
@@ -651,10 +623,8 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     fi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
-    # 非主 gateway: 停全部服務 + IOT WiFi + AGH
+    # 非主 gateway: 停全部服務 + IOT WiFi (AGH 由 check-adguard 管)
     svc_disable ddns
-    svc_disable adguardhome
-    lock_remove "agh_startup" >/dev/null 2>&1
     # 副gw 不需 PBR 路由分流，但 /etc/dnsmasq.d/pbr -> /var/run/pbr.dnsmasq
     # 若 symlink target 不存在 dnsmasq 會 crash，touch 空檔即可
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
@@ -681,22 +651,12 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     fi
     dbg "5.非主gateway: 停全部服務+IOT"
 else
-    # client: 停全部服務 + IOT WiFi + AGH (DNS 直接走主 GW)
+    # client: 停全部服務 + IOT WiFi (AGH 與 dnsmasq upstream 由 check-adguard 管)
     svc_disable ddns
     # client 不需 PBR，touch 空檔防 dnsmasq crash
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
-    svc_disable adguardhome
-    lock_remove "agh_startup" >/dev/null 2>&1
     wg_stop
-    # dnsmasq 直接用主 GW 的 DNS，不經 AGH
-    if [ "$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
-        uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
-        uci delete dhcp.@dnsmasq[0].server 2>/dev/null
-        uci commit dhcp
-        /etc/init.d/dnsmasq restart
-        log "dnsmasq: 移除 AGH 轉發，改用 resolv (client)"
-    fi
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
     if [ -n "$IOT_IF" ]; then
         CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
@@ -1207,23 +1167,7 @@ if [ "$GW_TYPE" = "主gw" ]; then
     if ! pgrep -x dnsmasq >/dev/null 2>&1; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
     fi
-    if [ "$RUN_AGH" = "N" ]; then
-        if pgrep -f adguardhome >/dev/null 2>&1; then
-            svc_disable adguardhome; lock_remove "agh_startup" >/dev/null 2>&1
-            log "fixup: .mesh_runagh=N，停止 AGH"; FIXUP=1
-        fi
-    elif ! pgrep -f adguardhome >/dev/null 2>&1; then
-        _FIX_UPTIME=$(awk -F. '{print $1}' /proc/uptime)
-        if [ "$_FIX_UPTIME" -le 180 ]; then
-            log "fixup: AGH 未運行，但開機早期 (${_FIX_UPTIME}s)，由 rc.local 延遲處理"
-        elif lock_is_active "agh_startup" 300; then
-            # agh_startup lock 有效 → 正在啟動中或剛被 OOM kill，不搶啟動
-            log "fixup: AdGuardHome 未運行，agh_startup lock 有效，跳過"
-        else
-            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
-            /etc/init.d/adguardhome start 2>/dev/null; log "fixup: AdGuardHome 未運行，已啟動"; FIXUP=1
-        fi
-    fi
+    # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
 else
     # 副 gw / client: WG/pbr/qosify/IOT 不該跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
@@ -1236,19 +1180,7 @@ else
         log "fixup: touch /var/run/pbr.dnsmasq (防 dnsmasq crash)"
         FIXUP=1
     fi
-    # 副 gw / client: AGH 不該跑 (DNS 直接走主 GW)
-    if pgrep -f adguardhome >/dev/null 2>&1; then
-        svc_disable adguardhome; lock_remove "agh_startup" >/dev/null 2>&1; log "fixup: AGH 不應運行 ($GW_TYPE)，已停止"; FIXUP=1
-    fi
-    # 只有 dnsmasq 仍指向本機 AGH (127.0.0.1#53535) 才清 (副gw 降級後殘留)
-    # 其他情況 (例如 runagh=N 時 check-adguard 設的外部 DNS) 不碰
-    if uci -q show dhcp.@dnsmasq[0].server 2>/dev/null | grep -q "127.0.0.1#53535"; then
-        uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
-        uci delete dhcp.@dnsmasq[0].server 2>/dev/null
-        uci commit dhcp
-        /etc/init.d/dnsmasq restart
-        log "fixup: dnsmasq 移除 AGH 轉發 (client)"; FIXUP=1
-    fi
+    # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
     IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
     if [ -n "$IOT_IF" ] && [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
         uci set wireless.${IOT_IF}.disabled='1'

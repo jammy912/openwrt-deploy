@@ -192,164 +192,146 @@ pick_upstream_dns() {
     return 1
 }
 
-# [Commit A 乾跑] 在任何 exit 0 之前先 log 新邏輯會選什麼 (對照舊邏輯實際做什麼)
-_DRY_DECISION=$(pick_upstream 2>/dev/null)
-log "🔬 dry-run pick_upstream → $_DRY_DECISION"
-
-# .mesh_runagh=N 本機不跑 AGH → 停掉 & dnsmasq 改指向 .mesh_upstream_dns 第一個可用的
-_run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
-[ -z "$_run_agh" ] && _run_agh=Y
-if [ "$_run_agh" = "N" ]; then
-    if pgrep -f adguardhome >/dev/null 2>&1; then
-        /etc/init.d/adguardhome stop 2>/dev/null
-        /etc/init.d/adguardhome disable 2>/dev/null
-        lock_remove "agh_startup" >/dev/null 2>&1
-        log "🛑 .mesh_runagh=N，AGH 已停用"
-    fi
-    _PICKED=$(pick_upstream_dns)
-    _CUR=$(uci show dhcp.@dnsmasq[0].server 2>/dev/null)
-    if [ -n "$_PICKED" ]; then
-        if ! echo "$_CUR" | grep -q "'$_PICKED'" || echo "$_CUR" | grep -q "127.0.0.1#53535"; then
-            uci -q delete dhcp.@dnsmasq[0].server
-            uci -q add_list dhcp.@dnsmasq[0].server="$_PICKED"
-            uci set dhcp.@dnsmasq[0].noresolv='1'
-            uci commit dhcp
-            /etc/init.d/dnsmasq reload
-            log "🔀 .mesh_runagh=N，dnsmasq upstream → $_PICKED"
-        else
-            log "✅ .mesh_runagh=N，dnsmasq 已指向 $_PICKED，無需切換"
-        fi
-    else
-        # 都無回應 → 清空 server 表，讓 dnsmasq 走 WAN resolv.conf
-        if echo "$_CUR" | grep -q "127.0.0.1#53535" || [ -n "$_CUR" ]; then
-            uci -q delete dhcp.@dnsmasq[0].server
-            uci -q delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
-            uci commit dhcp
-            /etc/init.d/dnsmasq reload
-            log "⚠️ .mesh_runagh=N，.mesh_upstream_dns 全無回應，退回 WAN resolv"
-        else
-            log "✅ .mesh_runagh=N，.mesh_upstream_dns 全無回應 (已在 WAN resolv)"
-        fi
-    fi
-    exit 0
-fi
-
-# 非主 gw 不用 AGH，跳過檢查
-_gw_type=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
-[ "$_gw_type" != "主gw" ] && exit 0
-
+# 切 firewall redirect 的 adgh_* 規則 (SELF 時開,其他時關)
 toggle_firewall_rules() {
-    local state="$1"
+    local state="$1" sec rule_name
     for sec in $(uci show firewall | grep "=redirect" | cut -d'=' -f1); do
         rule_name=$(uci -q get $sec.name)
         case "$rule_name" in
-            adgh_*)
-                uci set $sec.enabled="$state"
-                ;;
+            adgh_*) uci set $sec.enabled="$state" ;;
         esac
     done
 }
 
-# 取得目前 dnsmasq 設定
-CURRENT_SERVERS=$(uci show dhcp.@dnsmasq[0].server 2>/dev/null)
-CURRENT_ADG=$(echo "$CURRENT_SERVERS" | grep -w "127.0.0.1#53535")
+# 對齊 AGH process 狀態 (runagh=Y → 確保在跑; runagh=N → 確保停)
+# 含整點重啟失敗的 AGH
+ensure_agh_state() {
+    local _run_agh _pid _current_minute
+    _run_agh=$(cat /etc/myscript/.mesh_runagh 2>/dev/null)
+    [ -z "$_run_agh" ] && _run_agh=Y
 
-# 標記是否需要提交變更
-NEED_RELOAD=0
+    if [ "$_run_agh" = "N" ]; then
+        # 不該跑,停掉
+        if pgrep -f adguardhome >/dev/null 2>&1; then
+            /etc/init.d/adguardhome stop 2>/dev/null
+            /etc/init.d/adguardhome disable 2>/dev/null
+            lock_remove "agh_startup" >/dev/null 2>&1
+            log "🛑 .mesh_runagh=N,AGH 已停用"
+        fi
+        return
+    fi
 
-# ==============================
-# DNS 測試函數
-# ==============================
-test_dns() {
-    # 使用 busybox nslookup (比 dig 輕量，避免 OOM 時被殺)
-    local result
-    result=$(nslookup -port="$TEST_PORT" -timeout=3 "$TEST_DOMAIN" "$TEST_DNS" 2>&1)
-    local exitcode=$?
+    # runagh=Y: 該跑,對齊狀態
+    # oom_score_adj 保護 (Go VmSize 大但 RSS 小,防 OOM 優先擊殺)
+    _pid=$(ps w 2>/dev/null | grep '/usr/bin/AdGuardHome' | grep -v grep | awk '{print $1}' | head -1)
+    if [ -n "$_pid" ] && [ "$(cat /proc/$_pid/oom_score_adj 2>/dev/null)" != "-200" ]; then
+        echo -200 > /proc/$_pid/oom_score_adj 2>/dev/null
+        log "AGH oom_score_adj 設為 -200 (PID=$_pid)"
+    fi
 
-    [ $exitcode -ne 0 ] && return 1
+    # AGH 沒跑 → 啟動 (避開開機早期 180s、避開 agh_startup lock 內)
+    if ! pgrep -f adguardhome >/dev/null 2>&1; then
+        _uptime=$(awk -F. '{print $1}' /proc/uptime)
+        if [ "$_uptime" -le 180 ]; then
+            log "AGH 未運行,開機早期 (${_uptime}s),由 rc.local 延遲處理"
+            return
+        fi
+        if lock_is_active "agh_startup" 300; then
+            log "AGH 未運行,agh_startup lock 有效,跳過啟動"
+            return
+        fi
+        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+        /etc/init.d/adguardhome enable 2>/dev/null
+        /etc/init.d/adguardhome start 2>/dev/null
+        log "AGH 未運行,已啟動"
+        return
+    fi
 
-    # 有回應 Address 或 canonical name 代表 DNS 服務正常
-    echo "$result" | grep -q "Address\|canonical name" && return 0
-
-    return 1
+    # AGH 有跑但自己 test 不通 → 整點試一次重啟 (retry 3 次吸收抖動)
+    if ! (test_local_agh || (sleep 2 && test_local_agh) || (sleep 2 && test_local_agh)); then
+        _current_minute=$(date '+%M')
+        if [ "$_current_minute" = "00" ]; then
+            log "⚠️ 整點 AGH 無回應,嘗試重啟"
+            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+            /etc/init.d/adguardhome stop 2>/dev/null
+            sleep 2
+            /etc/init.d/adguardhome start 2>/dev/null
+        else
+            log "⚠️ AGH process 在跑但 :53535 無回應 (非整點不動,留給整點處理)"
+        fi
+    fi
 }
 
-# AGH oom_score_adj 保護 (Go VmSize 大但 RSS 小，防止被優先 OOM kill)
-_AGH_PID=$(ps w 2>/dev/null | grep '/usr/bin/AdGuardHome' | grep -v grep | awk '{print $1}' | head -1)
-if [ -n "$_AGH_PID" ] && [ "$(cat /proc/$_AGH_PID/oom_score_adj 2>/dev/null)" != "-200" ]; then
-    echo -200 > /proc/$_AGH_PID/oom_score_adj 2>/dev/null
-    log "AGH oom_score_adj 設為 -200 (PID=$_AGH_PID)"
-fi
+# 套用 upstream 到 dnsmasq (只在值不同時才動 uci)
+# $1: target 字串 (例如 "127.0.0.1#53535" / "192.168.1.4" / "8.8.8.8" / 空=走 WAN resolv)
+# $2: KIND (SELF/PEER/DNS/NONE) - 決定 firewall redirect 開關
+apply_upstream() {
+    local _target="$1" _kind="$2" _cur _need_reload=0 _need_fw=0 _cur_fw_state _want_fw
+
+    _cur=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | head -1)
+
+    # Firewall redirect: 只有 SELF (本機 AGH 接管 client :53) 時才開
+    case "$_kind" in
+        SELF) _want_fw=1 ;;
+        *)    _want_fw=0 ;;
+    esac
+
+    if [ -z "$_target" ]; then
+        # NONE: 清空 server,走 WAN resolv
+        if [ -n "$_cur" ] || [ "$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci -q delete dhcp.@dnsmasq[0].noresolv
+            uci commit dhcp
+            _need_reload=1
+            log "⚠️ 無任何 upstream 可用,退回 WAN resolv"
+        fi
+    else
+        if [ "$_cur" != "$_target" ]; then
+            uci -q delete dhcp.@dnsmasq[0].server
+            uci add_list dhcp.@dnsmasq[0].server="$_target"
+            uci set dhcp.@dnsmasq[0].noresolv='1'
+            uci commit dhcp
+            _need_reload=1
+            log "🔀 dnsmasq upstream → $_target ($_kind)"
+        fi
+    fi
+
+    # firewall redirect: 任一 adgh_* rule 狀態跟期望不同就 toggle (一次全刷)
+    _cur_fw_state=0
+    for sec in $(uci show firewall | grep "=redirect" | cut -d'=' -f1); do
+        _rn=$(uci -q get "$sec".name)
+        case "$_rn" in
+            adgh_*)
+                _en=$(uci -q get "$sec".enabled 2>/dev/null || echo 1)
+                _cur_fw_state="$_en"
+                break
+                ;;
+        esac
+    done
+    if [ "$_cur_fw_state" != "$_want_fw" ]; then
+        toggle_firewall_rules "$_want_fw"
+        uci commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+        log "firewall adgh_* rules → enabled=$_want_fw"
+    fi
+
+    [ "$_need_reload" = "1" ] && /etc/init.d/dnsmasq reload
+}
 
 # ==============================
 # 主要邏輯
 # ==============================
-# 整點 cron 暴衝時 AGH 可能一時回不了,retry 2 次吸收抖動
-if test_dns || (sleep 2 && test_dns) || (sleep 2 && test_dns); then
-    # AdGuardHome 正常
-    if [ -n "$CURRENT_ADG" ]; then
-        log "✅ AdGuardHome 正常且已啟用,無需切換"
-        exit 0
-    fi
+ensure_agh_state
 
-    log "✅ AdGuardHome 正常,切換 dnsmasq 指向 127.0.0.1#53535"
-    uci -q delete dhcp.@dnsmasq[0].server
-    uci -q add_list dhcp.@dnsmasq[0].server="127.0.0.1#53535"
-    uci set dhcp.@dnsmasq[0].noresolv='1'
-    toggle_firewall_rules 1
-    NEED_RELOAD=1
+DECISION=$(pick_upstream)
+KIND=$(echo "$DECISION" | cut -d'|' -f1)
+TARGET=$(echo "$DECISION" | cut -d'|' -f2)
 
-    push_notify "Adguard Home UP"
-else
-    # AdGuardHome 異常
+# sticky: SELF 時不寫 (沒意義),其他都寫
+case "$KIND" in
+    SELF) rm -f "$STICKY_FILE" ;;
+    *)    echo "$DECISION" > "$STICKY_FILE" ;;
+esac
 
-    # 取得目前的分鐘數 (00-59)
-    CURRENT_MINUTE=$(date '+%M')
-
-    # 如果分鐘數是 '00',代表是整點,嘗試重啟
-    if [ "$CURRENT_MINUTE" = "00" ]; then
-        log "⚠️ 整點嘗試重啟 AdguardHome"
-        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
-        /etc/init.d/adguardhome stop
-        sleep 2
-        /etc/init.d/adguardhome start
-        sleep 3
-
-        # 重啟後再檢查一次
-        if test_dns; then
-            log "✅ AdguardHome 重啟成功"
-            exit 0
-        fi
-    fi
-
-    # 從 .mesh_upstream_dns 挑第一個能解析的
-    PICKED_DNS=$(pick_upstream_dns)
-    if [ -z "$PICKED_DNS" ]; then
-        log "⚠️ .mesh_upstream_dns 全部無回應，無法切換"
-        exit 0
-    fi
-
-    # 已指向同一個 upstream 就不重設
-    CUR_CLEAN=$(echo "$CURRENT_SERVERS" | grep -w "$PICKED_DNS" | grep -v "127.0.0.1#53535")
-    if [ -n "$CUR_CLEAN" ] && [ -z "$CURRENT_ADG" ]; then
-        log "⚠️ 已指向 WAN 上游 $PICKED_DNS，無需切換"
-        exit 0
-    fi
-
-    log "⚠️ AdGuardHome 無法使用,切換 dnsmasq 上游 DNS → $PICKED_DNS"
-    uci -q delete dhcp.@dnsmasq[0].server
-    uci -q add_list dhcp.@dnsmasq[0].server="$PICKED_DNS"
-    toggle_firewall_rules 0
-    NEED_RELOAD=1
-
-    push_notify "Adguard Home Down"
-fi
-
-# 只在有變更時才提交並 reload
-if [ "$NEED_RELOAD" = "1" ]; then
-    uci commit dhcp
-    uci commit firewall
-    /etc/init.d/dnsmasq reload
-    /etc/init.d/firewall reload
-    log "✅ 設定已更新並重載服務"
-fi
+log "pick: $DECISION"
+apply_upstream "$TARGET" "$KIND"
