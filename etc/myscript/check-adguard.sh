@@ -59,6 +59,7 @@ my_ip() {
 
 # 讀 alfred type 64,解出 peer (自己以外) 的 ip + agh_status,輸出 "ip agh_status" 一行一筆
 # 三重排除自己: id (優先,穩定跨重啟) / mac / ip
+# 同一個 id 多個廣播 (例如 .5 同時用兩個介面發) → 用 ts 取最新那筆
 parse_peers() {
     local _me_id _me_mac _me_ip
     _me_id=$(my_id)
@@ -86,12 +87,25 @@ parse_peers() {
             if (match(line, /\\"agh_status\\":\\"[a-z]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); agh = s
             }
+            ts = 0
+            if (match(line, /\\"ts\\":[0-9]+/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*:/, "", s); ts = s + 0
+            }
             # 排除自己 (三重)
             if (id != "" && id == me_id) next
             if (mac != "" && mac == me_mac) next
             if (ip != "" && ip == me_ip) next
             if (ip == "") next
-            print ip, agh
+            # 用 id 去重取最新 ts;沒 id 的退回用 ip 為 key (向後相容)
+            key = (id != "") ? id : ip
+            if (!(key in best_ts) || ts >= best_ts[key]) {
+                best_ts[key] = ts
+                best_ip[key] = ip
+                best_agh[key] = agh
+            }
+        }
+        END {
+            for (k in best_ip) print best_ip[k], best_agh[k]
         }
     '
 }

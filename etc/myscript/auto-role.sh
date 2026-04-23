@@ -204,7 +204,8 @@ if command -v alfred >/dev/null 2>&1; then
         nslookup -port=53535 -timeout=2 www.twse.com.tw 127.0.0.1 >/dev/null 2>&1 && _AGH_STATUS="up"
     fi
     _LAN_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
-    _ALFRED_DATA="{\"id\":\"${MY_ID}\", \"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\"}"
+    _TS=$(date +%s)
+    _ALFRED_DATA="{\"id\":\"${MY_ID}\", \"mac\":\"${MY_MAC}\", \"ip\":\"${_LAN_IP}\", \"wan_status\":\"${_WAN_STATUS}\", \"priority\":${MY_PRI}, \"agh_status\":\"${_AGH_STATUS}\", \"ts\":${_TS}}"
     alfred_try() {
         alfred -r 64 >/dev/null 2>&1 || return 1
         printf '%s' "$_ALFRED_DATA" | alfred -s 64 2>/dev/null || return 1
