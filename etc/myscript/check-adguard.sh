@@ -96,11 +96,20 @@ parse_peers() {
     '
 }
 
-# 對 peer 的 :53 跑 3 次 nslookup,取最小毫秒 (全失敗 echo 9999)
+# 對 peer 的 :53 跑 nslookup 取延遲 (全失敗 echo 9999)
+# 策略: 第一次 timeout=2 快速 fail (掛掉 2s 就放棄);
+#       活著再跑第 2、3 次 timeout=3 取最小值 (量延遲抖動)
 probe_dnsmasq() {
     local _ip="$1" _best=9999 _t0 _t1 _dt _ok _i
     [ -z "$_ip" ] && { echo 9999; return; }
-    for _i in 1 2 3; do
+    # 第一次: 短 timeout 快速判活
+    _t0=$(date +%s%N)
+    _ok=$(nslookup -timeout=2 "$TEST_DOMAIN" "$_ip" 2>/dev/null | grep -c 'Address\|canonical')
+    _t1=$(date +%s%N)
+    [ "$_ok" -gt 0 ] || { echo 9999; return; }
+    _best=$(( (_t1 - _t0) / 1000000 ))
+    # 活著就再量 2 次取最小
+    for _i in 2 3; do
         _t0=$(date +%s%N)
         _ok=$(nslookup -timeout=3 "$TEST_DOMAIN" "$_ip" 2>/dev/null | grep -c 'Address\|canonical')
         _t1=$(date +%s%N)
