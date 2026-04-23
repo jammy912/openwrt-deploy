@@ -40,31 +40,41 @@ check_ip() {
 # 收集重開前網路診斷資訊
 # 輸出：/tmp/watchdog-netdiag-<ts>.log  (reboot 後仍可能殘留可查)
 # 回傳：stdout 為精簡單行摘要 (供 queue_push detail 用)
+#
+# 角色判斷：
+#   gateway/hybrid-gw 節點：default route 從實體 wan 出 → 診斷 WAN gw/ext
+#   client/mesh 節點    ：default route 走 br-lan (上游為 mesh gw) → 診斷 mesh gw
 collect_netdiag() {
     local out="$1"
-    local lan_ip wan_gw wan_if
-    lan_ip=$(uci get network.lan.ipaddr 2>/dev/null)
-    wan_gw=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $3; exit}')
-    wan_if=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $5; exit}')
+    local self_ip def_gw def_if role
+    self_ip=$(uci get network.lan.ipaddr 2>/dev/null)
+    def_gw=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $3; exit}')
+    def_if=$(ip -4 route show default | awk '/^default/ && $5!~/^wg/ {print $5; exit}')
+
+    # 若 default 從 br-lan 出 = client 節點，WAN 對它來說就是上游 mesh gw
+    case "$def_if" in
+        br-lan|br-*) role="client" ;;
+        wan|eth*|wwan*) role="gateway" ;;
+        *) role="unknown" ;;
+    esac
 
     {
         echo "=== watchdog netdiag @ $(date -Iseconds 2>/dev/null || date) ==="
+        echo "[role]      $role (def_if=$def_if def_gw=$def_gw self=$self_ip)"
         echo "[uptime]    $(uptime)"
         echo "[loadavg]   $(cat /proc/loadavg)"
         echo "[routes]"
         ip -4 route show default
         echo
-        echo "[ping LAN self $lan_ip]"
-        ping -c 2 -W 2 "$lan_ip" 2>&1
-        echo "[ping WAN gw $wan_gw via $wan_if]"
-        if [ -n "$wan_gw" ]; then
-            ping -c 2 -W 2 "$wan_gw" 2>&1
+        echo "[ping default gw $def_gw]"
+        if [ -n "$def_gw" ]; then
+            ping -c 2 -W 2 "$def_gw" 2>&1
         else
-            echo "(無 WAN default gateway)"
+            echo "(無 default gateway — 路由表異常)"
         fi
-        echo "[ping 8.8.8.8 via $wan_if]"
-        if [ -n "$wan_if" ]; then
-            ping -c 2 -W 2 -I "$wan_if" 8.8.8.8 2>&1
+        echo "[ping 8.8.8.8 via $def_if]"
+        if [ -n "$def_if" ]; then
+            ping -c 2 -W 2 -I "$def_if" 8.8.8.8 2>&1
         else
             ping -c 2 -W 2 8.8.8.8 2>&1
         fi
@@ -73,16 +83,30 @@ collect_netdiag() {
         echo "=== end ==="
     } >"$out" 2>&1
 
-    # 精簡摘要：各段 loss% + traceroute 最後一跳 (去雙引號，方便 queue_push detail)
-    local lan_loss wan_loss ext_loss tr_last
-    lan_loss=$(awk '/ping LAN self/,/ping WAN gw/ {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
-    wan_loss=$(awk '/ping WAN gw/,/ping 8.8.8.8/   {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
-    ext_loss=$(awk '/ping 8.8.8.8/,/traceroute/     {if(/packet loss/){sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}}' "$out")
-    tr_last=$(awk '/^ *[0-9]+ +/ {hop=$1; ip=$2} END{print hop" "ip}' "$out")
-    printf 'lan=%s(loss=%s) gw=%s(loss=%s) wan_if=%s ext=8.8.8.8(loss=%s) tr_last=%s' \
-        "$lan_ip" "${lan_loss:-NA}" \
-        "$wan_gw" "${wan_loss:-NA}" \
-        "$wan_if" "${ext_loss:-NA}" \
+    # 精簡摘要：default gw loss% + 外網 loss% + traceroute 最後有效 hop
+    local gw_loss ext_loss tr_last
+    gw_loss=$(awk '
+        /^\[ping default gw/ {flag=1; next}
+        /^\[ping 8.8.8.8/    {flag=0}
+        flag && /packet loss/ {sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}
+    ' "$out")
+    ext_loss=$(awk '
+        /^\[ping 8.8.8.8/ {flag=1; next}
+        /^\[traceroute/   {flag=0}
+        flag && /packet loss/ {sub(/.*received, /,""); sub(/ packet.*/,""); print; exit}
+    ' "$out")
+    # traceroute 區塊內，hop 行格式：" N  X.X.X.X  ..."；超時則 "*"。只抓有 IP 的最後一跳。
+    tr_last=$(awk '
+        /^\[traceroute/ {flag=1; next}
+        /^=== end ===/  {flag=0}
+        flag && /^ *[0-9]+ +[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {hop=$1; ip=$2}
+        END{if(hop) print hop" "ip; else print "none"}
+    ' "$out")
+
+    printf 'role=%s def_if=%s gw=%s(loss=%s) ext=8.8.8.8(loss=%s) tr_last=%s' \
+        "$role" "$def_if" \
+        "$def_gw" "${gw_loss:-NA}" \
+        "${ext_loss:-NA}" \
         "${tr_last:-NA}"
 }
 
