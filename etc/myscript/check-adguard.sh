@@ -18,7 +18,7 @@ PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
 # AGH 正在啟動中 (rc.local/auto-role 建立的 lock)，跳過檢查
 . /etc/myscript/lock_handler.sh
-if lock_is_active "agh_startup" 300; then
+if lock_is_active "agh_startup" 120; then
     logger -t adguard-switch "agh_startup lock 有效，跳過檢查"
     exit 0
 fi
@@ -238,18 +238,13 @@ ensure_agh_state() {
         log "AGH oom_score_adj 設為 -200 (PID=$_pid)"
     fi
 
-    # AGH 沒跑 → 啟動 (避開開機早期 180s、避開 agh_startup lock 內)
+    # AGH 沒跑 → 啟動 (procd 原本會自動啟,這裡是異常情境的補救)
     if ! pgrep -f adguardhome >/dev/null 2>&1; then
-        _uptime=$(awk -F. '{print $1}' /proc/uptime)
-        if [ "$_uptime" -le 180 ]; then
-            log "AGH 未運行,開機早期 (${_uptime}s),由 rc.local 延遲處理"
-            return
-        fi
-        if lock_is_active "agh_startup" 300; then
+        if lock_is_active "agh_startup" 120; then
             log "AGH 未運行,agh_startup lock 有效,跳過啟動"
             return
         fi
-        lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+        lock_check_and_create "agh_startup" 120 >/dev/null 2>&1
         /etc/init.d/adguardhome enable 2>/dev/null
         /etc/init.d/adguardhome start 2>/dev/null
         log "AGH 未運行,已啟動"
@@ -261,7 +256,7 @@ ensure_agh_state() {
         _current_minute=$(date '+%M')
         if [ "$_current_minute" = "00" ]; then
             log "⚠️ 整點 AGH 無回應,嘗試重啟"
-            lock_check_and_create "agh_startup" 300 >/dev/null 2>&1
+            lock_check_and_create "agh_startup" 120 >/dev/null 2>&1
             /etc/init.d/adguardhome stop 2>/dev/null
             sleep 2
             /etc/init.d/adguardhome start 2>/dev/null
