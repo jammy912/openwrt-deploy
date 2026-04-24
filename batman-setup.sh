@@ -189,6 +189,10 @@ echo "  ✅ Mesh 介面: $MESH_IFACE (on $RADIO_5G)"
 uci set network.bat0=interface
 uci set network.bat0.proto='batadv'
 uci set network.bat0.routing_algo='BATMAN_IV'
+# 強制 multicast flood: 沒 IGMP Querier 時,batman-adv 預設會優化掉
+# mDNS/Bonjour (224.0.0.251) 等 link-local multicast,造成 Apple 裝置
+# 判定「網路不同」(HomePod/iPhone 找不到彼此)。小網路直接 flood。
+uci set network.bat0.multicast_forceflood='1'
 
 # batmesh: 將 mesh 無線介面掛到 bat0
 uci set network.batmesh=interface
