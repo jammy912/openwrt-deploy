@@ -81,6 +81,15 @@ for SECTION in $SECTIONS; do
 
     log " -> 正在檢查策略 '$POLICY_NAME' (介面: $INTERFACE)..."
 
+    # 無 endpoint 的 passive wg peer (等別人連進來的那種) 跳過健康檢查:
+    # ping 必定失敗,整點 ifdown/ifup 也沒用 (沒 endpoint 連不出去),
+    # 反而會觸發 firewall reload → dnsmasq SIGTERM 的連鎖反應。
+    if [ "${INTERFACE#wg}" != "$INTERFACE" ] && \
+       ! wg show "$INTERFACE" endpoints 2>/dev/null | awk '{print $2}' | grep -qv '^(none)$'; then
+        log "    跳過: $INTERFACE 無 endpoint (passive peer)"
+        continue
+    fi
+
     # 使用指定的介面執行 PING 測試
     if ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP >/dev/null 2>&1; then
         # --- PING 成功 ---
