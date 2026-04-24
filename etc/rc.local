@@ -10,6 +10,23 @@ mkdir -p /tmp/config_ram
 
 cp -a /etc/config/* /tmp/config_ram/
 
+# alfred config self-heal: 部分機型 image build 不含 alfred,後續 apk add 會把 config
+# 寫進已被 bind 到 tmpfs 的 /etc/config/,重開後消失。這裡在 bind mount 前補上。
+if [ ! -s /tmp/config_ram/alfred ] && [ -x /usr/sbin/alfred ]; then
+    cat > /tmp/config_ram/alfred <<'EOF'
+
+config alfred 'alfred'
+	option interface 'br-lan'
+	option mode 'master'
+	option batmanif 'bat0'
+	option start_vis '1'
+	option run_facters '1'
+	option disabled '0'
+
+EOF
+    logger -t rc.local "alfred config 缺檔,已補上預設內容"
+fi
+
 mount --bind /tmp/config_ram /etc/config
 # USB 初始化 (僅 MX4200 有 USB 口)
 case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
