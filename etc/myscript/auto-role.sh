@@ -245,6 +245,10 @@ if [ "$NEW_ROLE" = "gateway" ]; then
             if (match(line, /\\"mac\\":\\"[0-9a-f:]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); mac = s
             }
+            ip = ""
+            if (match(line, /\\"ip\\":\\"[0-9.]+\\"/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); ip = s
+            }
             pri = -1
             if (match(line, /\\"priority\\":-?[0-9]+/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*:/, "", s); pri = s + 0
@@ -258,10 +262,9 @@ if [ "$NEW_ROLE" = "gateway" ]; then
             if (id == "" && (mac == "" || mac == me_mac)) next
             if (wan != "up") next
             if (pri < 0) next
-            if (pri > me_pri) { found=1; exit }
-            if (pri == me_pri && mac < me_mac) { found=1; exit }
+            if (pri > me_pri) { print "yes " pri " " mac " " ip; exit }
+            if (pri == me_pri && mac < me_mac) { print "yes " pri " " mac " " ip; exit }
         }
-        END { if (found) print "yes" }
     ')
 
     # 沒有 alfred 資料時 fallback 回 batctl gwl
@@ -276,18 +279,23 @@ if [ "$NEW_ROLE" = "gateway" ]; then
                     }
                 }
                 if (mac == me_mac) next
-                if (pri+0 > me_pri+0) { found=1; exit }
-                if (pri+0 == me_pri+0 && mac < me_mac) { found=1; exit }
+                if (pri+0 > me_pri+0) { print "yes " pri " " mac " -"; exit }
+                if (pri+0 == me_pri+0 && mac < me_mac) { print "yes " pri " " mac " -"; exit }
             }
-            END { if (found) print "yes" }
         ')
         dbg "3.alfred empty, fallback to batctl gwl"
     fi
 
-    if [ "$HIGHER" = "yes" ]; then
-        IS_PRIMARY=0
-        log "mesh 有更高優先的 gateway (my_pri=$MY_PRI, my_mac=$MY_MAC)"
-    fi
+    # HIGHER 格式: "yes <winner_pri> <winner_mac> <winner_ip>" (fallback ip="-")
+    case "$HIGHER" in
+        yes*)
+            IS_PRIMARY=0
+            W_PRI=$(echo "$HIGHER" | awk '{print $2}')
+            W_MAC=$(echo "$HIGHER" | awk '{print $3}')
+            W_IP=$(echo "$HIGHER" | awk '{print $4}')
+            log "mesh 有更高優先的 gateway: $W_IP($W_MAC) pri=$W_PRI (我=$MY_PRI $MY_MAC)"
+            ;;
+    esac
 fi
 
 # ARP DAD 防撞: 判定為主但自己還沒是 .1 → 用 arping -D (source 0.0.0.0) 探測
