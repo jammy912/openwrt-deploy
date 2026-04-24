@@ -189,10 +189,6 @@ echo "  ✅ Mesh 介面: $MESH_IFACE (on $RADIO_5G)"
 uci set network.bat0=interface
 uci set network.bat0.proto='batadv'
 uci set network.bat0.routing_algo='BATMAN_IV'
-# BLA 在同時存在 wifi mesh + 有線 HUB 的拓撲下會誤判 loop,
-# 把某方向封包丟掉 (觀察到 .1↔.4 單向不通)。關閉交由 batman-adv
-# 本身 hop count / client announcement 防 loop。
-uci set network.bat0.bridge_loop_avoidance='0'
 
 # batmesh: 將 mesh 無線介面掛到 bat0
 uci set network.batmesh=interface
