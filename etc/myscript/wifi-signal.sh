@@ -844,8 +844,10 @@ main() {
         done
         if [ "$_ch0_found" -eq 1 ]; then
             # 第一步：嘗試 wifi restart
+            # sleep 延長到 45s: mesh point 重 peer + auth 要 30-60s,
+            # 10s 太短會在 mesh 還沒收斂時誤判「restart 無效」
             log "[修復] 嘗試 wifi down/up 修復..."
-            wifi down; sleep 5; wifi up; sleep 10
+            wifi down; sleep 5; wifi up; sleep 45
 
             # 再次檢查
             _still_bad=0
