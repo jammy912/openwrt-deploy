@@ -181,10 +181,13 @@ if [ "$NEW_ROLE" = "gateway" ]; then
 fi
 
 # 開機延遲: priority 越低等越久，讓高 priority 的先搶主 gw
-BOOT_DELAY=$(( (600 - MY_PRI) / 10 ))
+# 公式 60 + (100-pri)*3: pri=60→180s, pri=50→210s, pri=40→240s
+# 差距 30s 足以讓高 pri 先寫 alfred,低 pri 讀到後不誤搶
+BOOT_DELAY=$(( 60 + (100 - MY_PRI) * 3 ))
 [ "$BOOT_DELAY" -lt 0 ] && BOOT_DELAY=0
 UPTIME=$(awk -F. '{print $1}' /proc/uptime)
-if [ "$UPTIME" -lt 120 ] && [ "$BOOT_DELAY" -gt 0 ]; then
+# 門檻動態配合 BOOT_DELAY+30,避免第二輪 cron 跳過 sleep 提早自升
+if [ "$UPTIME" -lt "$((BOOT_DELAY + 30))" ] && [ "$BOOT_DELAY" -gt 0 ]; then
     log "開機延遲 ${BOOT_DELAY}s (pri=${MY_PRI}, uptime=${UPTIME}s)"
     sleep "$BOOT_DELAY"
 fi
