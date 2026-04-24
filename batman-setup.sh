@@ -292,8 +292,14 @@ if ! uci get firewall.@zone[0].device 2>/dev/null | grep -q 'bat0'; then
 fi
 
 # Alfred 設定: 監聽 br-lan，底層 mesh 走 bat0
+# apk 預設 disabled='1' 且缺 mode,必須補齊否則 daemon 不會 spawn
+uci set alfred.alfred=alfred
 uci set alfred.alfred.interface='br-lan'
+uci set alfred.alfred.mode='master'
 uci set alfred.alfred.batmanif='bat0'
+uci set alfred.alfred.start_vis='1'
+uci set alfred.alfred.run_facters='1'
+uci set alfred.alfred.disabled='0'
 uci commit alfred
 
 /etc/init.d/alfred enable 2>/dev/null
