@@ -58,6 +58,21 @@ collect_netdiag() {
         *) role="unknown" ;;
     esac
 
+    # client 細化探點 (供 detail 摘要用)
+    local bat_n_count="" mesh_sta_count="" lan_gw_loss=""
+    if [ "$role" = "client" ]; then
+        bat_n_count=$(batctl n 2>/dev/null | awk 'NR>2 && NF>0' | wc -l)
+        for _msh in mesh0 mesh1 mesh2; do
+            ip link show "$_msh" >/dev/null 2>&1 || continue
+            local _c
+            _c=$(iw dev "$_msh" station dump 2>/dev/null | grep -c '^Station')
+            mesh_sta_count="${mesh_sta_count}${_msh}=${_c} "
+        done
+        if [ -n "$def_gw" ]; then
+            lan_gw_loss=$(ping -c 2 -W 2 "$def_gw" 2>&1 | awk '/packet loss/{sub(/.*received, /,"");sub(/ packet.*/,"");print;exit}')
+        fi
+    fi
+
     {
         echo "=== watchdog netdiag @ $(date -Iseconds 2>/dev/null || date) ==="
         echo "[role]      $role (def_if=$def_if def_gw=$def_gw self=$self_ip)"
@@ -66,6 +81,32 @@ collect_netdiag() {
         echo "[routes]"
         ip -4 route show default
         echo
+        echo "[ip rule]"
+        ip rule show 2>&1
+        echo
+        echo "[ifstatus wan]"
+        ifstatus wan 2>&1 | head -40
+        echo "[ifstatus wan6]"
+        ifstatus wan6 2>&1 | head -20
+        echo
+        echo "[wg peers]"
+        wg show all latest-handshakes 2>&1
+        wg show all endpoints 2>&1
+        echo
+        if command -v batctl >/dev/null 2>&1; then
+            echo "[batctl n (鄰居)]"
+            batctl n 2>&1
+            echo "[batctl o (originators, top 20)]"
+            batctl o 2>&1 | head -22
+            echo
+        fi
+        if [ "$role" = "client" ]; then
+            echo "[client 細化]"
+            echo "  bat_n_count   = $bat_n_count"
+            echo "  mesh_sta      = $mesh_sta_count"
+            echo "  lan_gw_loss   = $lan_gw_loss"
+            echo
+        fi
         echo "[ping default gw $def_gw]"
         if [ -n "$def_gw" ]; then
             ping -c 2 -W 2 "$def_gw" 2>&1
@@ -80,8 +121,15 @@ collect_netdiag() {
         fi
         echo "[traceroute 8.8.8.8 (max 12 hop, 2s)]"
         traceroute -n -w 2 -q 1 -m 12 8.8.8.8 2>&1
+        echo
+        echo "[logread tail -100]"
+        logread 2>&1 | tail -100
         echo "=== end ==="
     } >"$out" 2>&1
+
+    # 同步寫一份「最後 snapshot」固定路徑;reboot 後仍可查
+    cp -f "$out" /etc/myscript/.last_reboot_snapshot.log 2>/dev/null
+    sync 2>/dev/null
 
     # 精簡摘要：default gw loss% + 外網 loss% + traceroute 最後有效 hop
     local gw_loss ext_loss tr_last
@@ -103,11 +151,22 @@ collect_netdiag() {
         END{if(hop) print hop" "ip; else print "none"}
     ' "$out")
 
-    printf 'role=%s def_if=%s gw=%s(loss=%s) ext=8.8.8.8(loss=%s) tr_last=%s' \
-        "$role" "$def_if" \
-        "$def_gw" "${gw_loss:-NA}" \
-        "${ext_loss:-NA}" \
-        "${tr_last:-NA}"
+    if [ "$role" = "client" ]; then
+        printf 'role=%s def_if=%s gw=%s(loss=%s) ext=8.8.8.8(loss=%s) tr_last=%s bat_n=%s mesh=%slan_gw=%s' \
+            "$role" "$def_if" \
+            "$def_gw" "${gw_loss:-NA}" \
+            "${ext_loss:-NA}" \
+            "${tr_last:-NA}" \
+            "${bat_n_count:-NA}" \
+            "${mesh_sta_count:-NA }" \
+            "${lan_gw_loss:-NA}"
+    else
+        printf 'role=%s def_if=%s gw=%s(loss=%s) ext=8.8.8.8(loss=%s) tr_last=%s' \
+            "$role" "$def_if" \
+            "$def_gw" "${gw_loss:-NA}" \
+            "${ext_loss:-NA}" \
+            "${tr_last:-NA}"
+    fi
 }
 
 # === Load 警告 / 過高自動重啟 ===
@@ -199,6 +258,25 @@ if [ $failed_count -gt 0 ]; then
         log "完整診斷 → $NETDIAG_LOG"
         # 網路已斷，即時 push 幾乎必失敗 → 寫 queue 讓開機後補送
         queue_push "reboot-watchdog" "all-dns-down" "failed=${failed_ips}| ${NETDIAG_SUMMARY}"
+
+        # 額外推一筆 snapshot 關鍵段 (route + wg handshakes + batctl n),
+        # 控制長度避免被通知服務截斷
+        SNAP_TAIL=$(awk '
+            /^\[routes\]/        {sec="route"; print; next}
+            /^\[wg peers\]/      {sec="wg";    print; next}
+            /^\[batctl n/        {sec="batn";  print; next}
+            /^\[ip rule\]/       {sec="";      next}
+            /^\[ifstatus/        {sec="";      next}
+            /^\[batctl o/        {sec="";      next}
+            /^\[client 細化\]/   {sec="cli";   print; next}
+            /^\[ping/            {sec="";      next}
+            /^\[logread/         {sec="";      next}
+            /^\[traceroute/      {sec="";      next}
+            /^=== end ===/       {exit}
+            sec!="" {print}
+        ' "$NETDIAG_LOG" | head -c 800)
+        queue_push "reboot-snapshot-tail" "" "$SNAP_TAIL"
+
         sleep 5
         log "🔄 执行重启..."
         reboot

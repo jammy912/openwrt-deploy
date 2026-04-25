@@ -1,0 +1,10 @@
+#!/bin/sh
+# 把 wan/wan6/pppoe-wan 的 ifup/ifdown/iface_update 寫到 syslog,
+# 用來事後對照 watchdog reboot 前的時間軸。
+# 低 overhead;只記事件,不做動作。
+
+case "$INTERFACE" in
+    wan|wan6|wwan|pppoe-wan)
+        logger -t WAN_TRACE "$ACTION $INTERFACE dev=$DEVICE"
+        ;;
+esac
