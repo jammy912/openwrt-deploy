@@ -165,11 +165,12 @@ MY_ID=$(printf '%s|%s|%s|%s' "$_ID_HOSTNAME" "$_ID_WANMAC" "$_ID_MACHINE" "$_ID_
     | sha256sum | cut -c1-16)
 
 # 連外健康檢查: WAN 不通時暫時降 priority=0 讓出主 gw。
-# ping IP 避免 DNS 未就緒誤判；失敗後重試 3 次 (間隔 10s)。
+# ping IP 避免 DNS 未就緒誤判;失敗後重試 3 次 (間隔 10s)。
+# -I wan 強制走 WAN 介面,避免 default route 暫時被 wg 介面搶走時假成功/假失敗。
 if [ "$NEW_ROLE" = "gateway" ]; then
     _wan_ok=0
     for _try in 1 2 3; do
-        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        if ping -c 1 -W 3 -I wan 8.8.8.8 >/dev/null 2>&1; then
             _wan_ok=1; break
         fi
         [ "$_try" -lt 3 ] && sleep 10
