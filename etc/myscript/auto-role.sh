@@ -128,12 +128,12 @@ else
     # 動態取得 WAN IP（DHCP 模式）
     [ -z "$WAN_IP" ] && WAN_IP=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
 
+    # 有 WAN_IP 就先當 gateway。實際連外健康檢查交給後段 (line ~169)
+    # 重試 3 次失敗會把 priority 降為 0 讓出主 gw。
+    # 不在這裡 ping 一次就判死,避免 boot 期間 pbr/firewall reload 短暫丟包誤判 client。
     HAS_WAN=0
     if [ -n "$WAN_IP" ] && [ "$WAN_IP" != "0.0.0.0" ]; then
-        # 確認能上網
-        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-            HAS_WAN=1
-        fi
+        HAS_WAN=1
     fi
 
     # =====================
