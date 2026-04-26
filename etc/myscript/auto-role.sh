@@ -166,17 +166,22 @@ MY_ID=$(printf '%s|%s|%s|%s' "$_ID_HOSTNAME" "$_ID_WANMAC" "$_ID_MACHINE" "$_ID_
 
 # 連外健康檢查: WAN 不通時暫時降 priority=0 讓出主 gw。
 # ping IP 避免 DNS 未就緒誤判;失敗後重試 3 次 (間隔 10s)。
-# -I wan 強制走 WAN 介面,避免 default route 暫時被 wg 介面搶走時假成功/假失敗。
+# -I <wan_dev> 強制走 WAN 實體介面 (eth1/wan/...),避免 default route
+# 暫時被 wg 介面搶走時假成功/假失敗。WAN 介面名稱動態取自 ifstatus
+# (RAX3000Z=eth1, MX4200=wan)。
 if [ "$NEW_ROLE" = "gateway" ]; then
+    _WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    [ -z "$_WAN_DEV" ] && _WAN_DEV=$(uci -q get network.wan.device)
+    [ -z "$_WAN_DEV" ] && _WAN_DEV="wan"
     _wan_ok=0
     for _try in 1 2 3; do
-        if ping -c 1 -W 3 -I wan 8.8.8.8 >/dev/null 2>&1; then
+        if ping -c 1 -W 3 -I "$_WAN_DEV" 8.8.8.8 >/dev/null 2>&1; then
             _wan_ok=1; break
         fi
         [ "$_try" -lt 3 ] && sleep 10
     done
     if [ "$_wan_ok" = "0" ]; then
-        log "⚠️ 連外異常 (ping 8.8.8.8 重試 3 次失敗)，暫時降 priority 0"
+        log "⚠️ 連外異常 (ping 8.8.8.8 via $_WAN_DEV 重試 3 次失敗)，暫時降 priority 0"
         MY_PRI=0
     fi
 fi
