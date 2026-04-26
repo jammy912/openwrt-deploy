@@ -724,17 +724,23 @@ adjust_radio_power_proportional() {
     local THRESHOLD=$3
     local LOW_PWR=$4
     local HIGH_PWR=$5
+    local _bk
+    case "$BAND_NAME" in
+        5GHz*) _bk="5G" ;;
+        2.4GHz*|2G*) _bk="2G" ;;
+        *) _bk="5G" ;;
+    esac
 
     # 獲取最弱信號，如果沒有監控的客戶端，則返回-1表示無人
     local SIGNAL=$(get_weakest_signal "$UCI_RADIO" | tr -d '[:space:]')
-    
-    
+
+
     local CURRENT_PWR=$(uci get "wireless.$UCI_RADIO.txpower" 2>/dev/null || echo "$LOW_PWR")
-    
+
     # 如果沒有監控中的客戶端，則執行降功率邏輯
     if [ "$SIGNAL" -eq -1 ]; then
         log "[功率調整] $BAND_NAME: 沒有找到監控中的客戶端。"
-        
+
         # 檢查是否有任何客戶端連線 (即使不是監控中的)
         local any_client_connected=$(get_clients_on_radio "$UCI_RADIO")
         if [ -n "$any_client_connected" ]; then
@@ -743,9 +749,13 @@ adjust_radio_power_proportional() {
                 log "[功率調整] $BAND_NAME: 有非監控客戶端連線，將功率降至最低 $LOW_PWR"
                 uci set "wireless.$UCI_RADIO.txpower=$LOW_PWR"
                 change_occured=1
+                dbg_set "$_bk" "weak=- cur=${CURRENT_PWR} → 非監控→${LOW_PWR}"
             else
                 log "[功率調整] $BAND_NAME: 功率已是最低 $LOW_PWR，無需調整"
+                dbg_set "$_bk" "weak=- cur=${CURRENT_PWR} → 非監控,已最低"
             fi
+        else
+            dbg_set "$_bk" "weak=- cur=${CURRENT_PWR} → 無人"
         fi
         # 如果連普通客戶端都沒有，則由 'check_no_clients_power_reduction' 處理，此處跳過
         return
@@ -760,6 +770,7 @@ adjust_radio_power_proportional() {
     # 檢查信號是否在遲滯區間內，如果是，則不調整
     if [ "$SIGNAL" -ge $((THRESHOLD - HYSTERESIS)) ] && [ "$SIGNAL" -le $((THRESHOLD + HYSTERESIS)) ]; then
         log "[功率調整] $BAND_NAME 信號在遲滯範圍內 ($((THRESHOLD - HYSTERESIS)) ~ $((THRESHOLD + HYSTERESIS)))，不調整"
+        dbg_set "$_bk" "weak=${SIGNAL} cur=${CURRENT_PWR} thr=${THRESHOLD}±${HYSTERESIS} → 遲滯內,不動"
         return
     fi
 
@@ -793,55 +804,95 @@ adjust_radio_power_proportional() {
         uci set "wireless.$UCI_RADIO.txpower=$NEW_PWR"
         change_occured=1
         log "[功率調整] $BAND_NAME 比例調整: 差距=$SIGNAL_DIFF, 調整量=$ADJUSTMENT, 功率 $CURRENT_PWR -> $NEW_PWR"
+        dbg_set "$_bk" "weak=${SIGNAL} cur=${CURRENT_PWR} thr=${THRESHOLD} → ${NEW_PWR}(${ADJUSTMENT:+$ADJUSTMENT})"
     else
         log "[功率調整] $BAND_NAME 發射功率已達最佳 ($CURRENT_PWR)，無需變更"
+        dbg_set "$_bk" "weak=${SIGNAL} cur=${CURRENT_PWR} thr=${THRESHOLD} → 已達邊界(${NEW_PWR})"
     fi
 }
 
 
 # =====================
-# DEBUG_PUSH: 推播本次監控裝置 + dBm + 過濾標記 (debug 用)
-# 標記:
-#   KEPT  = 納入功率計算
-#   WEAK  = 訊號 < IGNORE_BELOW_DBM,不納入
-#   SKIP  = USE_HEARING_MAP=1 時被遠端 AP 擇強過濾掉
-#   N/A   = 找不到 dBm 資料 (可能 probe-only / 已斷線)
+# DEBUG_PUSH: 推播 wifi-signal 一輪結果 (debug 用)
+# 內容:
+#   - 模式標頭 (mode/hm/ignore)
+#   - 各 band: 最弱訊號 / 當前功率 / 閾值 / 決策
+#   - 監控裝置列表: name(MAC尾4) dBm 標記 [hm=L?/R?]
+# 標記: K=KEPT W=WEAK(<ignore) S=SKIP(被遠端AP擇強) N=N/A
 # =====================
-debug_push_monitored() {
+# 給 main() 收集決策用 (功率調整時 set, debug push 時印)
+DBG_5G="" ; DBG_2G=""
+dbg_set() {
+    eval "DBG_$1=\"\$2\""
+}
+debug_push_summary() {
     [ "$DEBUG_PUSH" != "1" ] && return
-    [ -z "$MONITORED_MACS" ] && return
 
     . /etc/myscript/push-notify.inc 2>/dev/null
     PUSH_NAMES="${PUSH_NAMES:-admin}"
 
+    local _hm="off"
+    [ "$USE_HEARING_MAP" = "1" ] && _hm="ON"
+    local _mode="嚴格"
+    [ "$MONITOR_MODE" = "1" ] && _mode="廣泛"
+    local _msg="📡 wifi-signal mode=${_mode} hm=${_hm} ignore<${IGNORE_BELOW_DBM}"
+    [ -n "$DBG_5G" ] && _msg="${_msg}
+[5G] ${DBG_5G}"
+    [ -n "$DBG_2G" ] && _msg="${_msg}
+[2G] ${DBG_2G}"
+
+    if [ -z "$MONITORED_MACS" ]; then
+        _msg="${_msg}
+(無監控裝置)"
+        push_notify "$_msg"
+        return
+    fi
+
     # 一次撈完 hostapd 各 AP 的 assoclist (mac → dbm)
     local _all_iw=""
     for _ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
-        _mode=$(iw dev "$_ifc" info 2>/dev/null | awk '/type/{print $2; exit}')
-        [ "$_mode" = "AP" ] || continue
+        _mode2=$(iw dev "$_ifc" info 2>/dev/null | awk '/type/{print $2; exit}')
+        [ "$_mode2" = "AP" ] || continue
         _all_iw="$_all_iw
 $(iwinfo "$_ifc" assoclist 2>/dev/null | awk '
             /([0-9A-F]{2}:){5}[0-9A-F]{2}/ { mac=toupper($1); rssi=$2; print mac, rssi }')"
     done
 
-    # 從 dhcp.leases 拉 MAC → name 對應
-    local _msg="📡 wifi-signal debug (IGNORE_BELOW_DBM=$IGNORE_BELOW_DBM)"
-    local mac name dbm tag
+    local mac name dbm tag hm_info hm_r lsig rsig macshort
     for mac in $MONITORED_MACS; do
         name=$(awk -v m="$(echo "$mac" | tr 'A-Z' 'a-z')" \
             'tolower($2)==m {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)
         [ -z "$name" ] && name="?"
+        # MAC 尾 4 字 (xx:xx → 去 :)
+        macshort=$(echo "$mac" | awk -F: '{printf "%s%s", $5, $6}')
+
         dbm=$(echo "$_all_iw" | awk -v m="$mac" '$1==m {print $2; exit}')
-        if [ -z "$dbm" ]; then
-            tag="N/A"
-            dbm="-"
-        elif [ "$dbm" -lt "$IGNORE_BELOW_DBM" ]; then
-            tag="WEAK"
-        else
-            tag="KEPT"
+        hm_info=""
+        if [ -n "$HEARING_MAP_JSON" ]; then
+            hm_r=$(hm_lookup_mac "$mac")
+            lsig=$(echo "$hm_r" | awk '{print $2}')
+            rsig=$(echo "$hm_r" | awk '{print $3}')
+            case "$hm_r" in
+                SKIP*) tag="S"; hm_info=" hm=L${lsig}/R${rsig}" ;;
+                WEAK*) tag="W"; hm_info=" hm=L${lsig}" ;;
+                NOLOCAL*) tag="N"; hm_info=" hm=NoLocal" ;;
+                NOTFOUND*) hm_info=" hm=NotFound" ;;
+                KEEP*) hm_info=" hm=L${lsig}/R${rsig}" ;;
+                KEEPLOCAL*) hm_info=" hm=L${lsig}" ;;
+            esac
+        fi
+        if [ -z "$tag" ]; then
+            if [ -z "$dbm" ]; then
+                tag="N"; dbm="-"
+            elif [ "$dbm" -lt "$IGNORE_BELOW_DBM" ] 2>/dev/null; then
+                tag="W"
+            else
+                tag="K"
+            fi
         fi
         _msg="${_msg}
-${tag} ${name}(${mac##*:}) ${dbm}dBm"
+${tag} ${name}(${macshort}) ${dbm}${hm_info}"
+        tag=""
     done
     push_notify "$_msg"
 }
@@ -853,8 +904,6 @@ ${tag} ${name}(${mac##*:}) ${dbm}dBm"
 main() {
     # (此處應貼上您 V7.2 版本中從 "Enable / Disable 介面" 到 "無人降功率" 結束的所有函式和邏輯)
 
-    debug_push_monitored
-
     if [ "$ENABLE_2G" -eq 1 ] && [ ! -f "$STATE_2G_BOOST" ]; then
         adjust_radio_power_proportional "2.4GHz" "$UCI_RADIO_2G" $THRESHOLD_2G $LOW_PWR_2G $HIGH_PWR_2G
     fi
@@ -862,6 +911,9 @@ main() {
     if [ "$ENABLE_5G" -eq 1 ] && [ ! -f "$STATE_5G_BOOST" ]; then
         adjust_radio_power_proportional "5GHz" "$UCI_RADIO_5G" $THRESHOLD_5G $LOW_PWR_5G $HIGH_PWR_5G
     fi
+
+    # debug 推播 (在功率決策後,才有 DBG_5G/DBG_2G 內容)
+    debug_push_summary
 
     # =====================
     # 儲存本次客戶端狀態
