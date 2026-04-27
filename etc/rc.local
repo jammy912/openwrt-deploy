@@ -122,15 +122,7 @@ rm -f /tmp/luci-indexcache
     # 建立 agh_startup lock，防止 check-adguard/auto-role 在啟動期間干擾
     . /etc/myscript/lock-handler.sh
     lock_check_and_create "agh_startup" 120 >/dev/null 2>&1
-	
-    # AGH 記憶體限制 (避免 OOM)，確保所有機器都有設定
-    uci -q get adguardhome.config.memlimit >/dev/null || uci set adguardhome.config.memlimit='128'
-    uci -q get adguardhome.config.gc >/dev/null || uci set adguardhome.config.gc='50'
-    uci commit adguardhome 2>/dev/null
-    
-	# 修正 GOMEMLIMIT 單位 (套件升級會覆蓋 init.d，每次開機 patch)
-    sed -i 's|GOMEMLIMIT="$memlimit"|GOMEMLIMIT="${memlimit}MiB"|' /etc/init.d/adguardhome
-    
+
 	# AGH DoH upstream 域名預解析寫入 /etc/hosts (避免啟動時 DNS 雞生蛋問題)
     for _w in 1 2 3 4 5 6 7 8 9 10; do
         ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break
