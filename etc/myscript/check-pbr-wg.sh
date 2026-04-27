@@ -49,6 +49,11 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
 }
 
+# 切換事件強制寫 logread，不受 QUIET_MODE 影響
+log_event() {
+    logger -t PBR_HealthCheck "$1"
+}
+
 # 從 ip rule 動態查出介面對應的 fwmark 與 priority
 # 輸出: "<prio> <fwmark> <mask> <table>"，查無則空
 get_iface_rule() {
@@ -89,8 +94,10 @@ for SECTION in $SECTIONS; do
     log " -> 正在檢查策略 '$POLICY_NAME' (介面: $INTERFACE)..."
 
     # 無 endpoint 的 passive wg peer 跳過
-    if [ "${INTERFACE#wg}" != "$INTERFACE" ] && \
-       ! wg show "$INTERFACE" endpoints 2>/dev/null | awk '{print $2}' | grep -qv '^(none)$'; then
+    # 用 UCI grep 查（wg show 在介面 down 時會失敗，不可靠）
+    _has_endpoint=$(uci show network 2>/dev/null | grep "@wireguard_${INTERFACE}\[" | \
+        grep "endpoint_host" | grep -v "=''$" | wc -l)
+    if [ "$_has_endpoint" = "0" ]; then
         log "    跳過: $INTERFACE 無 endpoint (passive peer)"
         continue
     fi
@@ -123,8 +130,10 @@ for SECTION in $SECTIONS; do
                     _fm=$(awk '{print $2}' "$RULE_CACHE")
                     _tbl=$(awk '{print $3}' "$RULE_CACHE")
                     ip rule add prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
+                    log_event "[UP] $INTERFACE ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
                     log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
                 else
+                    log_event "[UP] $INTERFACE ping 恢復但無 rule cache，等下次 pbr reload"
                     log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
                 fi
             fi
@@ -155,6 +164,7 @@ for SECTION in $SECTIONS; do
             _fm=$(awk '{print $2}' "$RULE_CACHE")
             _tbl=$(awk '{print $3}' "$RULE_CACHE")
             ip rule del prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
+            log_event "[DOWN] $INTERFACE ip rule 已移除 (prio=$_prio fwmark=$_fm) → 流量切回 wan"
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
@@ -171,6 +181,7 @@ for SECTION in $SECTIONS; do
 
         # 整點：背景重啟 tunnel，流量已切 wan 不影響上網
         if [ "$CURRENT_MINUTE" = "00" ]; then
+            log_event "[DOWN] $INTERFACE 整點重啟 tunnel（背景，流量續走 wan）"
             log "    *** 整點重啟 $INTERFACE tunnel（背景執行，流量續走 wan）..."
             (ifdown $INTERFACE; sleep 3; ifup $INTERFACE) &
         fi
