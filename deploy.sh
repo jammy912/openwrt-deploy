@@ -1026,8 +1026,8 @@ esac
 uci set system.@system[0].zram_comp_algorithm='zstd'
 case "$BOARD_NAME" in
     linksys,mx4200*)
-        uci set system.@system[0].zram_size_mb='372'
-        echo "  ✅ zram swap 設為 372MB zstd (MX4200)"
+        uci set system.@system[0].zram_size_mb='256'
+        echo "  ✅ zram swap 設為 256MB zstd (MX4200)"
         ;;
     *)
         echo "  ✅ zram swap 壓縮演算法設為 zstd"
