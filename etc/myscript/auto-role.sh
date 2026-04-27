@@ -237,10 +237,13 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     ALFRED_RAW=$(alfred -r 64 2>/dev/null)
     dbg "3.alfred_raw_lines=$(echo "$ALFRED_RAW" | wc -l)"
 
+    _NOW_TS=$(date +%s)
     HIGHER=$(echo "$ALFRED_RAW" | awk \
         -v me_pri="$MY_PRI" \
         -v me_mac="$(echo "$MY_MAC" | tr 'A-Z' 'a-z')" \
-        -v me_id="$MY_ID" '
+        -v me_id="$MY_ID" \
+        -v now_ts="$_NOW_TS" \
+        -v stale_sec=300 '
         {
             line = tolower($0)
             id = ""
@@ -263,9 +266,15 @@ if [ "$NEW_ROLE" = "gateway" ]; then
             if (match(line, /\\"wan_status\\":\\"[a-z]+\\"/)) {
                 s = substr(line, RSTART, RLENGTH); sub(/.*\\":\\"/, "", s); sub(/\\".*/, "", s); wan = s
             }
+            ts = 0
+            if (match(line, /\\"ts\\":[0-9]+/)) {
+                s = substr(line, RSTART, RLENGTH); sub(/.*:/, "", s); ts = s + 0
+            }
             # 排除自己: 優先用 id (穩定跨重啟)，沒 id 才退回 MAC
             if (id != "" && id == me_id) next
             if (id == "" && (mac == "" || mac == me_mac)) next
+            # 過期資料 (對方關機後 alfred 可能殘留): 5 分鐘沒更新就忽略
+            if (ts > 0 && (now_ts - ts) > stale_sec) next
             if (wan != "up") next
             if (pri < 0) next
             if (pri > me_pri) { print "yes " pri " " mac " " ip; exit }

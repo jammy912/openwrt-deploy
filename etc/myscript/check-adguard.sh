@@ -68,7 +68,9 @@ parse_peers() {
     alfred -r 64 2>/dev/null | awk \
         -v me_id="$_me_id" \
         -v me_mac="$_me_mac" \
-        -v me_ip="$_me_ip" '
+        -v me_ip="$_me_ip" \
+        -v now_ts="$(date +%s)" \
+        -v stale_sec=300 '
         {
             line = tolower($0)
             id = ""
@@ -96,6 +98,8 @@ parse_peers() {
             if (mac != "" && mac == me_mac) next
             if (ip != "" && ip == me_ip) next
             if (ip == "") next
+            # 過期資料 (對方關機後 alfred 殘留): 5 分鐘沒更新就忽略
+            if (ts > 0 && (now_ts - ts) > stale_sec) next
             # 用 id 去重取最新 ts;沒 id 的退回用 ip 為 key (向後相容)
             key = (id != "") ? id : ip
             if (!(key in best_ts) || ts >= best_ts[key]) {
