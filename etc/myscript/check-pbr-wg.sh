@@ -99,6 +99,18 @@ for SECTION in $SECTIONS; do
         # --- PING 成功 ---
         log "    狀態: 連線正常 (UP)"
 
+        # ping 成功時順手更新 cache，確保 fwmark 永遠是最新值
+        if rule_exists "$INTERFACE"; then
+            RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
+            ip rule list | awk -v tbl="pbr_${INTERFACE}" '
+                $0 ~ "lookup " tbl "$" {
+                    prio=$1+0
+                    for(i=1;i<=NF;i++) if($i=="fwmark"){fm=$(i+1)}
+                    print prio, fm, tbl
+                    exit
+                }' > "$RULE_CACHE"
+        fi
+
         CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
         if [ "$CURRENT_STATUS" = "0" ]; then
             # ip rule 加回（若不存在）— 從 /tmp/check-pbr-wg.$INTERFACE.rule 讀取
