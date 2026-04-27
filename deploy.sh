@@ -527,8 +527,10 @@ fi
 # hotplug.d
 mkdir -p /etc/hotplug.d/block /etc/hotplug.d/iface
 cp "$DEPLOY_DIR/etc/hotplug.d/block/99-samba-auto-share" /etc/hotplug.d/block/
+cp "$DEPLOY_DIR/etc/hotplug.d/iface/00-wan-trace" /etc/hotplug.d/iface/
 cp "$DEPLOY_DIR/etc/hotplug.d/iface/99-pbr-cust" /etc/hotplug.d/iface/
 chmod +x /etc/hotplug.d/block/99-samba-auto-share
+chmod +x /etc/hotplug.d/iface/00-wan-trace
 chmod +x /etc/hotplug.d/iface/99-pbr-cust
 echo "  ✅ hotplug.d"
 
