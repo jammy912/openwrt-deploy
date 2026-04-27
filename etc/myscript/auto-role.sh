@@ -1256,7 +1256,17 @@ else
     # (usteerd 存活但已從 hostapd disconnect，自己不會重連)
     _ust_ap=$(ubus call usteer local_info 2>/dev/null | grep -c 'ssid')
     if [ "$_ust_ap" -eq 0 ]; then
-        /etc/init.d/usteer restart >/dev/null 2>&1
-        log "fixup: usteer 無本地 AP，已 restart"
+        # ACS 進行中時 hostapd 尚未 ENABLED，local_info 會回傳 ssid=0 屬正常
+        # 此時若 restart usteer 會再次觸發 ACS → Channel 0 → wifi down/up 惡性循環
+        _acs_running=$(logread -l 50 2>/dev/null | awk '
+            /ACS-STARTED/  { started=1 }
+            /ACS-COMPLETED/ { started=0 }
+            END { print started+0 }')
+        if [ "${_acs_running:-0}" -eq 1 ]; then
+            log "fixup: usteer 無本地 AP，但 ACS 進行中，跳過 restart"
+        else
+            /etc/init.d/usteer restart >/dev/null 2>&1
+            log "fixup: usteer 無本地 AP，已 restart"
+        fi
     fi
 fi
