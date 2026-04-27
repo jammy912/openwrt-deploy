@@ -85,7 +85,7 @@ if [ -z "$SECTIONS" ]; then
     exit 0
 fi
 
-CURRENT_MINUTE=$(date '+%M')
+CURRENT_HHMM=$(date '+%H%M')
 
 for SECTION in $SECTIONS; do
     INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
@@ -180,7 +180,7 @@ for SECTION in $SECTIONS; do
         fi
 
         # 整點：背景重啟 tunnel，流量已切 wan 不影響上網
-        if [ "$CURRENT_MINUTE" = "00" ]; then
+        if [ "$CURRENT_HHMM" = "0400" ]; then
             log_event "[DOWN] $INTERFACE 整點重啟 tunnel（背景，流量續走 wan）"
             log "    *** 整點重啟 $INTERFACE tunnel（背景執行，流量續走 wan）..."
             (ifdown $INTERFACE; sleep 3; ifup $INTERFACE) &
@@ -229,7 +229,7 @@ if [ -f "$DBR_CONF" ]; then
                 log "${DR_IFACE} DOWN → 移除 domain routing"
                 push_notify "${DR_IFACE}_DomainRoute_Down"
             fi
-            if [ "$CURRENT_MINUTE" = "00" ]; then
+            if [ "$CURRENT_HHMM" = "0400" ]; then
                 log "${DR_IFACE} 整點重啟（背景）..."
                 (ifdown "$DR_IFACE"; sleep 3; ifup "$DR_IFACE") &
             fi
