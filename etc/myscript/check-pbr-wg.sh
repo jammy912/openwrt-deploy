@@ -19,7 +19,7 @@ if [ -f "$LOCK" ]; then
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
+trap 'rm -f "$LOCK" /tmp/cron_global.lock /tmp/check-pbr-wg.*.cr_done' EXIT
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -182,7 +182,12 @@ for SECTION in $SECTIONS; do
                     log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
                 fi
             fi
-            custrule_add "$INTERFACE"
+            # custrule_add 每個介面只跑一次（多個 SECTION 同介面時防重複）
+            _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
+            if [ ! -f "$_cr_done_flag" ]; then
+                custrule_add "$INTERFACE"
+                touch "$_cr_done_flag"
+            fi
             uci delete pbr.${SECTION}.enabled
             uci commit pbr
             push_notify "${INTERFACE}_UP"
@@ -214,8 +219,12 @@ for SECTION in $SECTIONS; do
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
-        # CustRule per-IP rule 一併移除
-        custrule_del "$INTERFACE"
+        # custrule_del 每個介面只跑一次（多個 SECTION 同介面時防重複）
+        _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
+        if [ ! -f "$_cr_done_flag" ]; then
+            custrule_del "$INTERFACE"
+            touch "$_cr_done_flag"
+        fi
 
         # uci 同步狀態
         CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
