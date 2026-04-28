@@ -263,53 +263,68 @@ display_bus_eta() {
         return 1
     fi
 
-    # Filter bus data - get first matching record only
-    local bus
-    bus=$(echo "$bus_data" | jq -c "[.[] | select(.StopName.Zh_tw == \"$TARGET_STOP\" and .Direction == $TARGET_DIRECTION)] | sort_by(.EstimateTime // 999999) | .[0]")
+    # Filter bus data - get first two matches sorted by ETA
+    local bus_list
+    bus_list=$(echo "$bus_data" | jq -c "[.[] | select(.StopName.Zh_tw == \"$TARGET_STOP\" and .Direction == $TARGET_DIRECTION)] | sort_by(.EstimateTime // 999999) | .[0:2]")
 
-    if [ "$bus" = "null" ] || [ -z "$bus" ]; then
+    if [ "$bus_list" = "null" ] || [ -z "$bus_list" ] || [ "$bus_list" = "[]" ]; then
         # return 2 表示找不到站，讓 main 可以觸發自動搜尋
         return 2
     fi
 
-    local eta_seconds
-    local stop_status
+    local first_bus second_bus
+    first_bus=$(echo "$bus_list" | jq -c '.[0]')
+    second_bus=$(echo "$bus_list" | jq -c '.[1]')
 
-    eta_seconds=$(echo "$bus" | jq -r '.EstimateTime // "null"')
-    stop_status=$(echo "$bus" | jq -r '.StopStatus // 0')
-
-    local eta_text
-
-    if [ "$eta_seconds" = "null" ] || [ -z "$eta_seconds" ]; then
-        case $stop_status in
-            1) eta_text="尚未發車" ;;
-            3) eta_text="末班車已過" ;;
-            *) eta_text="等待發車" ;;
-        esac
-    else
-        # Safely handle numeric comparisons
-        if [ "$eta_seconds" -eq 0 ] 2>/dev/null; then
+    eta_to_text() {
+        local eta_seconds="$1"
+        local stop_status="$2"
+        local eta_text
+        if [ "$eta_seconds" = "null" ] || [ -z "$eta_seconds" ]; then
+            case $stop_status in
+                1) eta_text="尚未發車" ;;
+                3) eta_text="末班車已過" ;;
+                *) eta_text="等待發車" ;;
+            esac
+        elif [ "$eta_seconds" -eq 0 ] 2>/dev/null; then
             eta_text="進站中"
         elif [ "$eta_seconds" -lt 60 ] 2>/dev/null; then
             eta_text="即將到達(${eta_seconds}秒)"
         else
-            local minutes=$((eta_seconds / 60))
-            local seconds=$((eta_seconds % 60))
-            eta_text="${minutes}分${seconds}秒"
+            eta_text="$((eta_seconds / 60))分$((eta_seconds % 60))秒"
         fi
-    fi
+        echo "$eta_text"
+    }
+
+    local eta1 status1 text1
+    eta1=$(echo "$first_bus" | jq -r '.EstimateTime // "null"')
+    status1=$(echo "$first_bus" | jq -r '.StopStatus // 0')
+    text1=$(eta_to_text "$eta1" "$status1")
 
     # 超過指定分鐘數則不推播
-    if [ -n "$MAX_MINUTES" ] && [ "$eta_seconds" != "null" ] && [ -n "$eta_seconds" ]; then
+    if [ -n "$MAX_MINUTES" ] && [ "$eta1" != "null" ] && [ -n "$eta1" ]; then
         local max_sec=$((MAX_MINUTES * 60))
-        if [ "$eta_seconds" -gt "$max_sec" ] 2>/dev/null; then
-            [ "$DEBUG" -eq 1 ] && echo "Debug: ETA ${eta_seconds}s > ${max_sec}s, 不推播" >&2
+        if [ "$eta1" -gt "$max_sec" ] 2>/dev/null; then
+            [ "$DEBUG" -eq 1 ] && echo "Debug: ETA ${eta1}s > ${max_sec}s, 不推播" >&2
             return 0
         fi
     fi
 
+    local msg="$TARGET_ROUTE$DIRECTION_TEXT $text1"
+
+    # 若有後一台，附加在同一則訊息
+    if [ "$second_bus" != "null" ] && [ -n "$second_bus" ]; then
+        local eta2 status2 text2
+        eta2=$(echo "$second_bus" | jq -r '.EstimateTime // "null"')
+        status2=$(echo "$second_bus" | jq -r '.StopStatus // 0')
+        text2=$(eta_to_text "$eta2" "$status2")
+        msg="${msg} / ${text2}"
+    fi
+
+    msg="${msg} @$TARGET_STOP"
+
     # Send push notification
-    push_notify "$TARGET_ROUTE$DIRECTION_TEXT $eta_text @$TARGET_STOP"
+    push_notify "$msg"
 }
 
 # --- Main Execution ---

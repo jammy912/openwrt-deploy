@@ -1187,7 +1187,7 @@ AGH_BIN=$(command -v AdGuardHome 2>/dev/null || which AdGuardHome 2>/dev/null ||
 echo "  AGH yaml 路徑: $AGH_YAML"
 # AGH 首次安裝不會自動產生 yaml (會進入 setup wizard)
 # 需要透過 install API 完成初始設定
- 
+
 # 修正 init.d: GOMEMLIMIT 需要帶單位 MiB，否則 Go 當成 bytes
 sed -i 's|GOMEMLIMIT="$memlimit"|GOMEMLIMIT="${memlimit}MiB"|' /etc/init.d/adguardhome
 echo "  ✅ AGH memlimit=128MB gc=50% (init.d patched)"
