@@ -10,6 +10,7 @@
 #   - PING 成功: ip rule add 加回（無感）+ uci delete enabled
 #   - 整點且持續失敗: 背景 ifdown/ifup 重建 tunnel，ifup 完成後
 #     由本腳本下一輪 ping 成功時自動加回 ip rule
+#   - 1小時內 DOWN 超過 5 次: 停用該介面 PBR 規則 24 小時
 #   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面
 #================================================================
 
@@ -38,6 +39,9 @@ TARGET_IP="8.8.8.8"
 PING_COUNT=3
 PING_TIMEOUT=5
 QUIET_MODE=0
+DOWN_THRESHOLD=5      # 1小時內 DOWN 幾次觸發停用
+DOWN_WINDOW=3600      # 滑動視窗秒數
+DISABLE_DURATION=86400 # 停用秒數（24小時）
 
 if [ "$1" = "--quiet" ] || [ "$1" = "-q" ]; then
     QUIET_MODE=1
@@ -52,6 +56,58 @@ log() {
 # 切換事件強制寫 logread，不受 QUIET_MODE 影響
 log_event() {
     logger -t PBR_HealthCheck "$1"
+}
+
+# 記錄一次 DOWN 事件時間戳，並清除視窗外舊記錄
+record_down_event() {
+    local iface="$1"
+    local downlog="/tmp/check-pbr-wg.${iface}.downlog"
+    local now=$(date '+%s')
+    local cutoff=$((now - DOWN_WINDOW))
+    echo "$now" >> "$downlog"
+    # 只保留視窗內的記錄
+    awk -v cutoff="$cutoff" '$1 > cutoff' "$downlog" > "${downlog}.tmp" && mv "${downlog}.tmp" "$downlog"
+}
+
+# 檢查是否觸發高頻停用，或是否已到恢復時間
+# 回傳 0 = 正常可用，1 = 目前在停用期（跳過 ping）
+check_flap_disable() {
+    local iface="$1"
+    local downlog="/tmp/check-pbr-wg.${iface}.downlog"
+    local disabled_until_file="/tmp/check-pbr-wg.${iface}.disabled_until"
+    local now=$(date '+%s')
+
+    # 檢查是否在停用期
+    if [ -f "$disabled_until_file" ]; then
+        local until=$(cat "$disabled_until_file")
+        if [ "$now" -lt "$until" ]; then
+            local remain=$(( (until - now) / 3600 ))
+            log "    [$iface] 高頻停用中，剩餘約 ${remain} 小時，跳過"
+            return 1
+        else
+            # 停用到期，自動恢復
+            rm -f "$disabled_until_file" "$downlog"
+            log_event "[FLAP] $iface 停用期滿，自動恢復"
+            log "    [$iface] 停用期滿，已自動恢復"
+            push_notify "${iface}_FlapDisable_Recovered"
+        fi
+    fi
+
+    # 檢查視窗內 DOWN 次數是否超標
+    if [ -f "$downlog" ]; then
+        local cutoff=$((now - DOWN_WINDOW))
+        local count=$(awk -v cutoff="$cutoff" '$1 > cutoff' "$downlog" | wc -l)
+        if [ "$count" -ge "$DOWN_THRESHOLD" ]; then
+            local until=$((now + DISABLE_DURATION))
+            echo "$until" > "$disabled_until_file"
+            log_event "[FLAP] $iface 1小時內 DOWN ${count} 次，停用 PBR 24 小時"
+            log "    [$iface] 高頻異常（${count} 次/小時），停用 PBR 規則 24 小時"
+            push_notify "${iface}_FlapDisable_24h"
+            return 1
+        fi
+    fi
+
+    return 0
 }
 
 # 從 ip rule 動態查出介面對應的 fwmark 與 priority
@@ -147,6 +203,13 @@ for SECTION in $SECTIONS; do
         continue
     fi
 
+    # 高頻停用檢查：停用中則跳過此介面
+    if ! check_flap_disable "$INTERFACE"; then
+        echo "skip" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
+        continue
+    fi
+
     log " -> 正在檢查介面: $INTERFACE ..."
     if ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP >/dev/null 2>&1; then
         echo "up" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
@@ -192,6 +255,9 @@ for SECTION in $SECTIONS; do
     else
         echo "down" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
         log "    狀態: 連線中斷 (DOWN)"
+
+        # 記錄 DOWN 事件（高頻偵測）
+        record_down_event "$INTERFACE"
 
         # ip rule del 切回 wan（無感）
         if rule_exists "$INTERFACE"; then
