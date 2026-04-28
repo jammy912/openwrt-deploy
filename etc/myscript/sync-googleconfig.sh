@@ -132,9 +132,10 @@ log() {
 # =====================================================
 rebuild_wg_firewall_user() {
     local FW_USER="/etc/firewall.user"
-    local TMP_FW="/tmp/firewall.user.new"
-    > "$TMP_FW"
+    local TMP_NEW="/tmp/firewall.user.wg_new"
+    > "$TMP_NEW"
 
+    # 掃描所有 wg* peer 的 allowed_ips，排除預設路由和 host 路由
     for iface in $(uci show network 2>/dev/null | grep -oE "network\.wg[^.=]+" | sed 's/network\.//' | sort -u); do
         uci show network 2>/dev/null | grep -E "@wireguard_${iface}\[" | grep -oE "network\.[^=]+" | while read -r peer_key; do
             uci get "${peer_key}.allowed_ips" 2>/dev/null | tr ' ' '\n' | while read -r cidr; do
@@ -144,16 +145,17 @@ rebuild_wg_firewall_user() {
                 [ -n "$cidr" ] && echo "ip route replace $cidr dev $iface"
             done
         done
-    done >> "$TMP_FW"
+    done >> "$TMP_NEW"
 
-    if [ -s "$TMP_FW" ]; then
-        mv "$TMP_FW" "$FW_USER"
-        log "  📋 firewall.user 已更新 ($(wc -l < "$FW_USER") 條路由)"
-    else
-        > "$FW_USER"
-        log "  📋 firewall.user 已清空（無符合條件的 allowed_ips）"
-        rm -f "$TMP_FW"
-    fi
+    # 保留 firewall.user 中非 wg 的行，再附加新的 wg 路由
+    touch "$FW_USER"
+    local TMP_KEEP="/tmp/firewall.user.keep"
+    grep -v " dev wg" "$FW_USER" > "$TMP_KEEP" 2>/dev/null || true
+    cat "$TMP_KEEP" "$TMP_NEW" > "$FW_USER"
+    rm -f "$TMP_KEEP" "$TMP_NEW"
+
+    local WG_LINES=$(grep -c " dev wg" "$FW_USER" 2>/dev/null || echo 0)
+    log "  📋 firewall.user 已更新（wg 路由 ${WG_LINES} 條，其他行保留）"
 }
 
 # =====================================================
