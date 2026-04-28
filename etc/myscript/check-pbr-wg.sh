@@ -132,26 +132,27 @@ fi
 
 CURRENT_HHMM=$(date '+%H%M')
 
+# === 第一階段：每個介面只 ping 一次，結果存 /tmp/check-pbr-wg.<iface>.pingresult (up/down/skip) ===
+CHECKED_IFACES=""
 for SECTION in $SECTIONS; do
     INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
-    POLICY_NAME=$(uci get pbr.${SECTION}.name 2>/dev/null || echo "$SECTION")
-
-    log " -> 正在檢查策略 '$POLICY_NAME' (介面: $INTERFACE)..."
+    echo "$CHECKED_IFACES" | grep -qw "$INTERFACE" && continue
 
     # 無 endpoint 的 passive wg peer 跳過
-    # 用 UCI grep 查（wg show 在介面 down 時會失敗，不可靠）
     _has_endpoint=$(uci show network 2>/dev/null | grep "@wireguard_${INTERFACE}\[" | \
         grep "endpoint_host" | grep -v "=''$" | wc -l)
     if [ "$_has_endpoint" = "0" ]; then
-        log "    跳過: $INTERFACE 無 endpoint (passive peer)"
+        echo "skip" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
         continue
     fi
 
+    log " -> 正在檢查介面: $INTERFACE ..."
     if ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP >/dev/null 2>&1; then
-        # --- PING 成功 ---
+        echo "up" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
         log "    狀態: 連線正常 (UP)"
 
-        # ping 成功時順手更新 cache，確保 fwmark 永遠是最新值
+        # ping 成功時順手更新 fwmark cache
         if rule_exists "$INTERFACE"; then
             RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
@@ -163,45 +164,36 @@ for SECTION in $SECTIONS; do
                 }' > "$RULE_CACHE"
         fi
 
-        CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
-        if [ "$CURRENT_STATUS" = "0" ]; then
-            # ip rule 加回（若不存在）— 從 /tmp/check-pbr-wg.$INTERFACE.rule 讀取
-            # down 時已把完整 rule 字串存檔，直接還原，不靠換算
-            if ! rule_exists "$INTERFACE"; then
-                RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
-                if [ -f "$RULE_CACHE" ]; then
-                    # 格式: "<prio> <fwmark>/<mask> <table>"
-                    _prio=$(awk '{print $1}' "$RULE_CACHE")
-                    _fm=$(awk '{print $2}' "$RULE_CACHE")
-                    _tbl=$(awk '{print $3}' "$RULE_CACHE")
-                    ip rule add prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
-                    log_event "[UP] $INTERFACE ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
-                    log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
-                else
-                    log_event "[UP] $INTERFACE ping 恢復但無 rule cache，等下次 pbr reload"
-                    log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
-                fi
+        # ip rule 加回（若介面曾被標記 DOWN）
+        if ! rule_exists "$INTERFACE"; then
+            RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
+            if [ -f "$RULE_CACHE" ]; then
+                _prio=$(awk '{print $1}' "$RULE_CACHE")
+                _fm=$(awk '{print $2}' "$RULE_CACHE")
+                _tbl=$(awk '{print $3}' "$RULE_CACHE")
+                ip rule add prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
+                log_event "[UP] $INTERFACE ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
+                log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
+            else
+                log_event "[UP] $INTERFACE ping 恢復但無 rule cache，等下次 pbr reload"
+                log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
             fi
-            # custrule_add 每個介面只跑一次（多個 SECTION 同介面時防重複）
+        fi
+
+        # custrule_add 只在曾被標記 DOWN（prevresult=down）時才還原
+        PREV_RESULT_UP=$(cat "/tmp/check-pbr-wg.${INTERFACE}.prevresult" 2>/dev/null)
+        if [ "$PREV_RESULT_UP" = "down" ]; then
             _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
             if [ ! -f "$_cr_done_flag" ]; then
                 custrule_add "$INTERFACE"
                 touch "$_cr_done_flag"
             fi
-            uci delete pbr.${SECTION}.enabled
-            uci commit pbr
-            push_notify "${INTERFACE}_UP"
-            log "    動作: 規則已恢復，uci enabled 清除"
-        else
-            log "    動作: 無需變更"
         fi
-
     else
-        # --- PING 失敗 ---
+        echo "down" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
         log "    狀態: 連線中斷 (DOWN)"
 
-        # 立刻 ip rule del 切回 wan（無感）
-        # 先把完整 rule 存檔，以便 UP 時原樣還原
+        # ip rule del 切回 wan（無感）
         if rule_exists "$INTERFACE"; then
             RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
@@ -219,31 +211,63 @@ for SECTION in $SECTIONS; do
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
-        # custrule_del 每個介面只跑一次（多個 SECTION 同介面時防重複）
         _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
         if [ ! -f "$_cr_done_flag" ]; then
             custrule_del "$INTERFACE"
             touch "$_cr_done_flag"
         fi
 
-        # uci 同步狀態
-        CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
-        if [ "$CURRENT_STATUS" != "0" ]; then
-            uci set pbr.${SECTION}.enabled='0'
-            uci commit pbr
-            push_notify "${INTERFACE}_Down"
-            log "    動作: uci enabled=0 已同步"
-        else
-            log "    動作: 規則已停用，無需變更"
-        fi
-
-        # 整點：背景重啟 tunnel，流量已切 wan 不影響上網
+        # 整點：背景重啟 tunnel
         if [ "$CURRENT_HHMM" = "0400" ]; then
             log_event "[DOWN] $INTERFACE 整點重啟 tunnel（背景，流量續走 wan）"
             log "    *** 整點重啟 $INTERFACE tunnel（背景執行，流量續走 wan）..."
             (ifdown $INTERFACE; sleep 3; ifup $INTERFACE) &
         fi
     fi
+
+    CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
+done
+
+# === 第二階段：所有 section 同步 uci enabled 狀態 ===
+for SECTION in $SECTIONS; do
+    INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
+    POLICY_NAME=$(uci get pbr.${SECTION}.name 2>/dev/null || echo "$SECTION")
+    PING_RESULT=$(cat "/tmp/check-pbr-wg.${INTERFACE}.pingresult" 2>/dev/null)
+
+    case "$PING_RESULT" in
+        up)
+            CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
+            if [ "$CURRENT_STATUS" = "0" ]; then
+                uci delete pbr.${SECTION}.enabled
+                log " -> $POLICY_NAME ($INTERFACE): uci enabled 清除"
+            fi
+            ;;
+        down)
+            CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
+            if [ "$CURRENT_STATUS" != "0" ]; then
+                uci set pbr.${SECTION}.enabled='0'
+                log " -> $POLICY_NAME ($INTERFACE): uci enabled=0"
+            fi
+            ;;
+    esac
+done
+
+# push_notify 只推一次（以介面為單位，避免同介面多 section 重複推）
+NOTIFIED_IFACES=""
+for SECTION in $SECTIONS; do
+    INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
+    echo "$NOTIFIED_IFACES" | grep -qw "$INTERFACE" && continue
+    PING_RESULT=$(cat "/tmp/check-pbr-wg.${INTERFACE}.pingresult" 2>/dev/null)
+    PREV_RESULT="/tmp/check-pbr-wg.${INTERFACE}.prevresult"
+    PREV=$(cat "$PREV_RESULT" 2>/dev/null)
+    if [ "$PING_RESULT" != "$PREV" ]; then
+        case "$PING_RESULT" in
+            up)   push_notify "${INTERFACE}_UP" ;;
+            down) push_notify "${INTERFACE}_Down" ;;
+        esac
+        echo "$PING_RESULT" > "$PREV_RESULT"
+    fi
+    NOTIFIED_IFACES="$NOTIFIED_IFACES $INTERFACE"
 done
 
 # 如果有任何變更，則提交設定並重載服務

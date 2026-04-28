@@ -127,6 +127,36 @@ log() {
 }
 
 # =====================================================
+# 重建 /etc/firewall.user：掃描所有 wg* peer allowed_ips
+# 排除 0.0.0.0/0 和 /32，寫入 ip route add 指令
+# =====================================================
+rebuild_wg_firewall_user() {
+    local FW_USER="/etc/firewall.user"
+    local TMP_FW="/tmp/firewall.user.new"
+    > "$TMP_FW"
+
+    for iface in $(uci show network 2>/dev/null | grep -oE "network\.wg[^.=]+" | sed 's/network\.//' | sort -u); do
+        uci show network 2>/dev/null | grep -E "@wireguard_${iface}\[" | grep -oE "network\.[^=]+" | while read -r peer_key; do
+            uci get "${peer_key}.allowed_ips" 2>/dev/null | tr ' ' '\n' | while read -r cidr; do
+                case "$cidr" in
+                    "0.0.0.0/0"|"::/0"|*"/32"|*"/128") continue ;;
+                esac
+                [ -n "$cidr" ] && echo "ip route replace $cidr dev $iface"
+            done
+        done
+    done >> "$TMP_FW"
+
+    if [ -s "$TMP_FW" ]; then
+        mv "$TMP_FW" "$FW_USER"
+        log "  📋 firewall.user 已更新 ($(wc -l < "$FW_USER") 條路由)"
+    else
+        > "$FW_USER"
+        log "  📋 firewall.user 已清空（無符合條件的 allowed_ips）"
+        rm -f "$TMP_FW"
+    fi
+}
+
+# =====================================================
 # 檢查依賴
 # =====================================================
 check_dependencies() {
@@ -1390,6 +1420,9 @@ NFTEOF
                         log "  ✅ WG 介面已還原 (${WG_RESTORED} 個)"
                         CHANGED_NETWORK=1
 
+                        # 重建 firewall.user 路由規則
+                        rebuild_wg_firewall_user
+
                         # 把還原的 WG 介面加回 firewall zone
                         # wg0 → vpn (小寫，PBR 出站)
                         # wg1-9 → VPN (大寫，入站)
@@ -1524,6 +1557,8 @@ NFTEOF
         if [ $CHANGED_NETWORK -eq 1 ]; then
             log "🔄 重啟 Network 服務..."
             /etc/init.d/network reload
+            rebuild_wg_firewall_user
+            sh /etc/firewall.user
         fi
 
         if [ $CHANGED_DHCP -eq 1 ]; then
