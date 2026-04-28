@@ -75,63 +75,100 @@ cleanup() {
 
 
 apply_rules() {
-    log "Applying CustRule PBR..."
+    log "Applying CustRule PBR (diff mode)..."
 
-    # 清除舊規則
-    cleanup
-
-    # 依 /etc/config/pbr 生成 CustRule
-    uci show pbr | grep "=policy" | while IFS= read -r line; do
+    # 從 uci 算出「應有」的規則: "src_ip table_id dev" 列表
+    WANT=$(uci show pbr | grep "=policy" | while IFS= read -r line; do
         idx=$(echo "$line" | cut -d'=' -f1)
         name=$(uci get "$idx.name" 2>/dev/null)
-
-        # 检查 enabled 选项，如果为 '0' 则跳过
+        case "$name" in CustRule*) ;; *) continue ;; esac
         enabled=$(uci get "$idx.enabled" 2>/dev/null)
-        if [ "$enabled" = "0" ]; then
-            log "Rule disabled: $name, skip"
-            continue
+        [ "$enabled" = "0" ] && continue
+        src=$(uci get "$idx.src_addr" 2>/dev/null)
+        dev=$(uci get "$idx.dest_addr" 2>/dev/null)
+        [ -z "$src" ] || [ -z "$dev" ] && continue
+        table_id=$(echo "$name" | tr -dc '0-9')
+        echo "$src $table_id $dev"
+    done)
+
+    # 從現有 ip rule 讀出「現有」的規則: "src_ip table_id"
+    HAVE=$(ip rule list | awk '$1=="200:" && $2=="from" && $3!="all" {
+        tbl=$5+0; if(tbl>=1000 && tbl<=4000) print $3, tbl}')
+
+    # 要刪的 = HAVE 有但 WANT 沒有
+    echo "$HAVE" | while read _src _tbl; do
+        [ -z "$_src" ] && continue
+        if ! echo "$WANT" | awk '{print $1, $2}' | grep -q "^${_src} ${_tbl}$"; then
+            ip rule del prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
+            ip route flush table "$_tbl" 2>/dev/null
+            log "Removed rule: $_src lookup $_tbl"
+        fi
+    done
+
+    # 要加的 = WANT 有但 HAVE 沒有（或 route 需更新）
+    echo "$WANT" | while read _src _tbl _dev; do
+        [ -z "$_src" ] && continue
+        _have_rule=$(echo "$HAVE" | awk -v s="$_src" -v t="$_tbl" '$1==s && $2==t')
+
+        if [ -z "$_have_rule" ]; then
+            ip rule add prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
+            log "Added rule: $_src lookup $_tbl"
         fi
 
-
-
-            case "$name" in
-        CustRule*)
-            src=$(uci get "$idx.src_addr" 2>/dev/null)
-            dev=$(uci get "$idx.dest_addr" 2>/dev/null)
-            [ -z "$src" ] || [ -z "$dev" ] && { log "Warning: src_addr or dest_addr empty for $name, skip"; continue; }
-
-            table_id=$(echo "$name" | tr -dc '0-9')
-            ! echo "$table_id" | grep -q '^[0-9]*$' && { log "Warning: invalid table_id for $name, skip"; continue; }
-
-            # 刪掉舊規則避免重複
-            ip rule del from $src lookup $table_id 2>/dev/null
-            ip route flush table $table_id 2>/dev/null
-
-            # 建立規則
-            ip rule add from $src lookup $table_id priority 200 2>/dev/null
-
-            # 根據設備決定 route
-            case "$dev" in
-                wan)
-                    ip route add default via $WAN_GW dev wan table $table_id 2>/dev/null
-                    ;;
-                wg*)
-                    ip route add default dev $dev table $table_id 2>/dev/null
-                    ;;
-                *)
-                    log "Warning: unknown device $dev for $name, skip"
-                    continue
-                    ;;
-            esac
-
-            log "Added rule: $src -> $dev (table $table_id)"
-            ;;
+        # 確保 route 正確（dev 可能有變）
+        _cur_route=$(ip route show table "$_tbl" 2>/dev/null | grep '^default')
+        case "$_dev" in
+            wan)
+                WAN_GW=$(ip route show default dev wan 2>/dev/null | awk '{print $3; exit}')
+                _want_route="default via $WAN_GW dev wan"
+                ;;
+            wg*)
+                _want_route="default dev $_dev"
+                ;;
+            *)
+                log "Warning: unknown device $_dev for $_src, skip"
+                continue
+                ;;
         esac
+
+        if [ "$_cur_route" != "$_want_route" ]; then
+            ip route flush table "$_tbl" 2>/dev/null
+            case "$_dev" in
+                wan) ip route add default via "$WAN_GW" dev wan table "$_tbl" 2>/dev/null ;;
+                wg*) ip route add default dev "$_dev" table "$_tbl" 2>/dev/null ;;
+            esac
+            log "Updated route: $_src → $_dev (table $_tbl)"
+        fi
     done
 
     ip route flush cache
-
     log "CustRule PBR applied successfully."
+
+    # 更新 check-pbr-wg cache（供 DOWN/UP 無感切換用）
+    # fwmark cache: 每個 wg 介面的 fwmark ip rule
+    ip rule list | awk '/fwmark.*lookup pbr_wg/{
+        prio=$1+0
+        for(i=1;i<=NF;i++) if($i=="fwmark") fm=$(i+1)
+        tbl=$NF
+        gsub(/^pbr_/,"",tbl)
+        print prio, fm, "pbr_" tbl > "/tmp/check-pbr-wg." tbl ".rule"
+    }'
+
+    # custrule cache: 每個 wg 介面對應的 per-IP rule 列表
+    # 先清掉舊 cache
+    rm -f /tmp/check-pbr-wg.*.custrules 2>/dev/null
+    # 從 uci 重建（包含 enabled=0 的也記錄，DOWN 時才知道要刪哪條）
+    uci show pbr | grep "=policy" | while IFS= read -r line; do
+        _idx=$(echo "$line" | cut -d'=' -f1)
+        _name=$(uci get "$_idx.name" 2>/dev/null)
+        case "$_name" in CustRule*) ;; *) continue ;; esac
+        _src=$(uci get "$_idx.src_addr" 2>/dev/null)
+        _dev=$(uci get "$_idx.dest_addr" 2>/dev/null)
+        [ -z "$_src" ] || [ -z "$_dev" ] && continue
+        _tbl=$(echo "$_name" | tr -dc '0-9')
+        echo "$_src $_tbl" >> "/tmp/check-pbr-wg.${_dev}.custrules"
+    done
+    log "Cache updated (fwmark + custrules)"
 }
 
 start() {

@@ -1541,13 +1541,20 @@ NFTEOF
         fi
 
         if [ $CHANGED_PBR -eq 1 ]; then
-            if [ -x /etc/init.d/pbr ]; then
-                log "🔄 重啟 PBR 服務..."
-                /etc/init.d/pbr reload
+            if [ $CHANGED_NETWORK -eq 1 ]; then
+                # wg 介面本身有變更，需要完整 pbr reload
+                if [ -x /etc/init.d/pbr ]; then
+                    log "🔄 重啟 PBR 服務（wg 介面變更）..."
+                    /etc/init.d/pbr reload
+                else
+                    log "⚠️  pbr 未安裝，跳過重啟"
+                fi
+                [ -x /etc/init.d/pbr-cust ] && /etc/init.d/pbr-cust start
             else
-                log "⚠️  pbr 未安裝，跳過重啟"
+                # 只有 CustRule 變更，pbr-cust diff 模式無感套用
+                log "🔄 PBR CustRule 無感套用（diff mode，跳過 pbr reload）..."
+                [ -x /etc/init.d/pbr-cust ] && /etc/init.d/pbr-cust start
             fi
-            [ -x /etc/init.d/pbr-cust ] && /etc/init.d/pbr-cust start
         fi
 
         if [ $CHANGED_QOS_RULES -eq 1 ] || [ $CHANGED_QOS_INTERFACES -eq 1 ]; then

@@ -70,10 +70,55 @@ get_iface_rule() {
         }'
 }
 
-# ip rule 是否存在
+# ip rule 是否存在（fwmark 類）
 rule_exists() {
     local iface="$1"
     ip rule list | grep -q "lookup pbr_${iface}$"
+}
+
+# CustRule per-IP rule del（介面 DOWN 時移除）
+custrule_del() {
+    local iface="$1"
+    local cache="/tmp/check-pbr-wg.${iface}.custrules"
+    local entries=""
+
+    if [ -f "$cache" ]; then
+        entries=$(cat "$cache")
+    else
+        # cache 不存在時從 ip rule list 即時查（table 1000-4000）
+        entries=$(ip rule list | awk '$1=="200:" && $2=="from" && $3!="all" {
+            tbl=$5+0; if(tbl>=1000 && tbl<=4000) print $3, tbl}')
+        # 只保留指向本介面的（從 uci 比對）
+        entries=$(echo "$entries" | while read _src _tbl; do
+            _name=$(uci show pbr | grep "src_addr='${_src}'" | cut -d'.' -f2 | \
+                while read _sec; do
+                    _dev=$(uci get "pbr.${_sec}.dest_addr" 2>/dev/null)
+                    [ "$_dev" = "$iface" ] && echo "$_src $_tbl" && break
+                done)
+            [ -n "$_name" ] && echo "$_name"
+        done)
+    fi
+
+    echo "$entries" | while read _src _tbl; do
+        [ -z "$_src" ] && continue
+        ip rule del prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
+        log_event "[DOWN] $iface CustRule ip rule del from $_src lookup $_tbl"
+        log "    動作: CustRule ip rule del from $_src lookup $_tbl"
+    done
+}
+
+# CustRule per-IP rule add（介面 UP 時還原）
+custrule_add() {
+    local iface="$1"
+    local cache="/tmp/check-pbr-wg.${iface}.custrules"
+    [ ! -f "$cache" ] && return
+
+    while read _src _tbl; do
+        [ -z "$_src" ] && continue
+        ip rule add prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
+        log_event "[UP] $iface CustRule ip rule add from $_src lookup $_tbl"
+        log "    動作: CustRule ip rule add from $_src lookup $_tbl"
+    done < "$cache"
 }
 
 log "開始檢查 PBR WireGuard 介面連線狀態..."
@@ -137,6 +182,7 @@ for SECTION in $SECTIONS; do
                     log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
                 fi
             fi
+            custrule_add "$INTERFACE"
             uci delete pbr.${SECTION}.enabled
             uci commit pbr
             push_notify "${INTERFACE}_UP"
@@ -167,6 +213,9 @@ for SECTION in $SECTIONS; do
             log_event "[DOWN] $INTERFACE ip rule 已移除 (prio=$_prio fwmark=$_fm) → 流量切回 wan"
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
+
+        # CustRule per-IP rule 一併移除
+        custrule_del "$INTERFACE"
 
         # uci 同步狀態
         CURRENT_STATUS=$(uci get pbr.${SECTION}.enabled 2>/dev/null)
