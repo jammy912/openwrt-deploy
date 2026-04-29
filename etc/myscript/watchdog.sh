@@ -198,8 +198,6 @@ if [ "$LOAD_1M" -ge 12 ]; then
 fi
 
 # 主逻辑
-log "开始网络连接检查..."
-
 # 检查三个IP
 check_ip "$IP1"
 result1=$?
@@ -218,24 +216,18 @@ if [ $result1 -ne 0 ]; then
     log "⚠️ $IP1 连接失败"
     failed_ips="${failed_ips}${IP1} "
     failed_count=$((failed_count + 1))
-else
-    log "✅ $IP1 连接正常"
 fi
 
 if [ $result2 -ne 0 ]; then
     log "⚠️ $IP2 连接失败"
     failed_ips="${failed_ips}${IP2} "
     failed_count=$((failed_count + 1))
-else
-    log "✅ $IP2 连接正常"
 fi
 
 if [ $result3 -ne 0 ]; then
     log "⚠️ $IP3 连接失败"
     failed_ips="${failed_ips}${IP3} "
     failed_count=$((failed_count + 1))
-else
-    log "✅ $IP3 连接正常"
 fi
 
 # 如果有任何IP失败，发送通知
@@ -285,8 +277,6 @@ if [ $failed_count -gt 0 ]; then
         log "⚠️ 有 ${failed_count} 个IP无法连接：${failed_ips}"
         push_notify "⚠️ 网络异常：${failed_ips}无法连接 (${failed_count}/3)"
     fi
-else
-    log "✅ 网络监控正常，所有DNS都可达"
 fi
 
 exit 0
