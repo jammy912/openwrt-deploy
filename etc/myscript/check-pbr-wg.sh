@@ -14,13 +14,24 @@
 #   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面
 #================================================================
 
-LOCK="/tmp/check-pbr-wg.lock"
+STATE_DIR="/tmp/check-pbr-wg"
+mkdir -p "$STATE_DIR"
+
+# 一次性遷移舊檔（散落在 /tmp 根目錄的）到子目錄
+for _old in /tmp/check-pbr-wg.*; do
+    [ -e "$_old" ] || continue
+    [ -d "$_old" ] && continue
+    _base=${_old#/tmp/check-pbr-wg.}
+    mv -f "$_old" "$STATE_DIR/$_base" 2>/dev/null
+done
+
+LOCK="$STATE_DIR/.lock"
 if [ -f "$LOCK" ]; then
     kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK" /tmp/cron_global.lock /tmp/check-pbr-wg.*.cr_done' EXIT
+trap 'rm -f "$LOCK" /tmp/cron_global.lock "$STATE_DIR"/*.cr_done' EXIT
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -61,7 +72,7 @@ log_event() {
 # 記錄一次 DOWN 事件時間戳，並清除視窗外舊記錄
 record_down_event() {
     local iface="$1"
-    local downlog="/tmp/check-pbr-wg.${iface}.downlog"
+    local downlog="${STATE_DIR}/${iface}.downlog"
     local now=$(date '+%s')
     local cutoff=$((now - DOWN_WINDOW))
     echo "$now" >> "$downlog"
@@ -73,8 +84,8 @@ record_down_event() {
 # 回傳 0 = 正常可用，1 = 目前在停用期（跳過 ping）
 check_flap_disable() {
     local iface="$1"
-    local downlog="/tmp/check-pbr-wg.${iface}.downlog"
-    local disabled_until_file="/tmp/check-pbr-wg.${iface}.disabled_until"
+    local downlog="${STATE_DIR}/${iface}.downlog"
+    local disabled_until_file="${STATE_DIR}/${iface}.disabled_until"
     local now=$(date '+%s')
 
     # 檢查是否在停用期
@@ -135,7 +146,7 @@ rule_exists() {
 # CustRule per-IP rule del（介面 DOWN 時移除）
 custrule_del() {
     local iface="$1"
-    local cache="/tmp/check-pbr-wg.${iface}.custrules"
+    local cache="${STATE_DIR}/${iface}.custrules"
     local entries=""
 
     if [ -f "$cache" ]; then
@@ -166,7 +177,7 @@ custrule_del() {
 # CustRule per-IP rule add（介面 UP 時還原）
 custrule_add() {
     local iface="$1"
-    local cache="/tmp/check-pbr-wg.${iface}.custrules"
+    local cache="${STATE_DIR}/${iface}.custrules"
     [ ! -f "$cache" ] && return
 
     while read _src _tbl; do
@@ -188,7 +199,7 @@ fi
 
 CURRENT_HHMM=$(date '+%H%M')
 
-# === 第一階段：每個介面只 ping 一次，結果存 /tmp/check-pbr-wg.<iface>.pingresult (up/down/skip) ===
+# === 第一階段：每個介面只 ping 一次，結果存 ${STATE_DIR}/<iface>.pingresult (up/down/skip) ===
 CHECKED_IFACES=""
 for SECTION in $SECTIONS; do
     INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
@@ -198,26 +209,26 @@ for SECTION in $SECTIONS; do
     _has_endpoint=$(uci show network 2>/dev/null | grep "@wireguard_${INTERFACE}\[" | \
         grep "endpoint_host" | grep -v "=''$" | wc -l)
     if [ "$_has_endpoint" = "0" ]; then
-        echo "skip" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        echo "skip" > "${STATE_DIR}/${INTERFACE}.pingresult"
         CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
         continue
     fi
 
     # 高頻停用檢查：停用中則跳過此介面
     if ! check_flap_disable "$INTERFACE"; then
-        echo "skip" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        echo "skip" > "${STATE_DIR}/${INTERFACE}.pingresult"
         CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
         continue
     fi
 
     log " -> 正在檢查介面: $INTERFACE ..."
     if ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP >/dev/null 2>&1; then
-        echo "up" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
         log "    狀態: 連線正常 (UP)"
 
         # ping 成功時順手更新 fwmark cache
         if rule_exists "$INTERFACE"; then
-            RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
+            RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
                 $0 ~ "lookup " tbl "$" {
                     prio=$1+0
@@ -229,7 +240,7 @@ for SECTION in $SECTIONS; do
 
         # ip rule 加回（若介面曾被標記 DOWN）
         if ! rule_exists "$INTERFACE"; then
-            RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
+            RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
             if [ -f "$RULE_CACHE" ]; then
                 _prio=$(awk '{print $1}' "$RULE_CACHE")
                 _fm=$(awk '{print $2}' "$RULE_CACHE")
@@ -244,16 +255,16 @@ for SECTION in $SECTIONS; do
         fi
 
         # custrule_add 只在曾被標記 DOWN（prevresult=down）時才還原
-        PREV_RESULT_UP=$(cat "/tmp/check-pbr-wg.${INTERFACE}.prevresult" 2>/dev/null)
+        PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
         if [ "$PREV_RESULT_UP" = "down" ]; then
-            _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
+            _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
             if [ ! -f "$_cr_done_flag" ]; then
                 custrule_add "$INTERFACE"
                 touch "$_cr_done_flag"
             fi
         fi
     else
-        echo "down" > "/tmp/check-pbr-wg.${INTERFACE}.pingresult"
+        echo "down" > "${STATE_DIR}/${INTERFACE}.pingresult"
         log "    狀態: 連線中斷 (DOWN)"
 
         # 記錄 DOWN 事件（高頻偵測）
@@ -261,7 +272,7 @@ for SECTION in $SECTIONS; do
 
         # ip rule del 切回 wan（無感）
         if rule_exists "$INTERFACE"; then
-            RULE_CACHE="/tmp/check-pbr-wg.${INTERFACE}.rule"
+            RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
                 $0 ~ "lookup " tbl "$" {
                     prio=$1+0
@@ -277,7 +288,7 @@ for SECTION in $SECTIONS; do
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
-        _cr_done_flag="/tmp/check-pbr-wg.${INTERFACE}.cr_done"
+        _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
         if [ ! -f "$_cr_done_flag" ]; then
             custrule_del "$INTERFACE"
             touch "$_cr_done_flag"
@@ -298,7 +309,7 @@ done
 for SECTION in $SECTIONS; do
     INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
     POLICY_NAME=$(uci get pbr.${SECTION}.name 2>/dev/null || echo "$SECTION")
-    PING_RESULT=$(cat "/tmp/check-pbr-wg.${INTERFACE}.pingresult" 2>/dev/null)
+    PING_RESULT=$(cat "${STATE_DIR}/${INTERFACE}.pingresult" 2>/dev/null)
 
     case "$PING_RESULT" in
         up)
@@ -323,8 +334,8 @@ NOTIFIED_IFACES=""
 for SECTION in $SECTIONS; do
     INTERFACE=$(uci get pbr.${SECTION}.dest_addr)
     echo "$NOTIFIED_IFACES" | grep -qw "$INTERFACE" && continue
-    PING_RESULT=$(cat "/tmp/check-pbr-wg.${INTERFACE}.pingresult" 2>/dev/null)
-    PREV_RESULT="/tmp/check-pbr-wg.${INTERFACE}.prevresult"
+    PING_RESULT=$(cat "${STATE_DIR}/${INTERFACE}.pingresult" 2>/dev/null)
+    PREV_RESULT="${STATE_DIR}/${INTERFACE}.prevresult"
     PREV=$(cat "$PREV_RESULT" 2>/dev/null)
     if [ "$PING_RESULT" != "$PREV" ]; then
         case "$PING_RESULT" in
