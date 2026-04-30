@@ -52,6 +52,7 @@ STATE_QOS_INTERFACES="$STATE_DIR/qos_interfaces.state"
 STATE_CRONTAB="$STATE_DIR/crontab.state"
 STATE_DBROUTE="$STATE_DIR/dbroute.state"
 STATE_ROUTERCONFIG="$STATE_DIR/routerconfig.state"
+STATE_ROUTERCONFIG_HITRON="$STATE_DIR/routerconfig_hitron.state"
 
 # 回滾備份檔案
 ROLLBACK_NETWORK="/tmp/network.rollback"
@@ -73,6 +74,7 @@ CHANGED_QOS_INTERFACES=0
 CHANGED_CRONTAB=0
 CHANGED_DBROUTE=0
 CHANGED_ROUTERCONFIG=0
+CHANGED_ROUTERCONFIG_HITRON=0
 
 IV_HEX=$(echo -n "$IV_STRING" | hexdump -v -e '/1 "%02x"')
 KEY_HEX=$(echo -n "$KEY_STRING" | hexdump -v -e '/1 "%02x"')
@@ -567,6 +569,7 @@ main() {
     TMP_CRONTAB="/tmp/crontab_new.uci"
     TMP_DBROUTE="/tmp/dbroute_new.uci"
     TMP_ROUTERCONFIG="/tmp/routerconfig_new.uci"
+    TMP_ROUTERCONFIG_HITRON="/tmp/routerconfig_hitron_new.uci"
 
     # 清空暫存檔案
     > "$TMP_PBR"
@@ -577,6 +580,7 @@ main() {
     > "$TMP_CRONTAB"
     > "$TMP_DBROUTE"
     > "$TMP_ROUTERCONFIG"
+    > "$TMP_ROUTERCONFIG_HITRON"
 
     log "解析並分類配置..."
 
@@ -634,8 +638,16 @@ main() {
         fi
     fi
 
-    # routerconfig 不分模式，兩邊都提取
-    sed -n '/^config routerconfig/,/^$/p' "$TMP_DECRYPTED" | sed '/^$/d' >> "$TMP_ROUTERCONFIG"
+    # routerconfig / routerconfighitron 不分模式，兩邊都提取
+    # 用 awk 嚴格匹配（避免 routerconfighitron 被 routerconfig 的 sed 模式吃進去）
+    awk '
+        /^config routerconfig$/        || /^config routerconfig / { sec="rc";   print > "'"$TMP_ROUTERCONFIG"'"; next }
+        /^config routerconfighitron$/  || /^config routerconfighitron / { sec="rch"; print > "'"$TMP_ROUTERCONFIG_HITRON"'"; next }
+        /^config /                     { sec="" }
+        /^$/                           { sec="" ; next }
+        sec=="rc"                      { print > "'"$TMP_ROUTERCONFIG"'" }
+        sec=="rch"                     { print > "'"$TMP_ROUTERCONFIG_HITRON"'" }
+    ' "$TMP_DECRYPTED"
 
     # batmanmesh: 比對 hostname，更新 .batmanmesh
     MY_HOSTNAME=$(uci get system.@system[0].hostname 2>/dev/null)
@@ -820,9 +832,16 @@ main() {
 
     # --- RouterConfig: 每筆需要 payload ---
     if [ -s "$TMP_ROUTERCONFIG" ]; then
-        RC_BLOCKS=$(grep -c '^config routerconfig' "$TMP_ROUTERCONFIG")
-        RC_NO_PAYLOAD=$(awk 'BEGIN{RS=""; FS="\n"} /^config routerconfig/{has=0; for(i=1;i<=NF;i++){if($i~/option payload/)has=1} if(!has)count++} END{print count+0}' "$TMP_ROUTERCONFIG")
+        RC_BLOCKS=$(grep -cE '^config routerconfig( |$)' "$TMP_ROUTERCONFIG")
+        RC_NO_PAYLOAD=$(awk 'BEGIN{RS=""; FS="\n"} /^config routerconfig( |$)/{has=0; for(i=1;i<=NF;i++){if($i~/option payload/)has=1} if(!has)count++} END{print count+0}' "$TMP_ROUTERCONFIG")
         [ "$RC_NO_PAYLOAD" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - RouterConfig: ${RC_NO_PAYLOAD}/${RC_BLOCKS} 筆缺少 payload"
+    fi
+
+    # --- RouterConfigHitron: 每筆需要 payload ---
+    if [ -s "$TMP_ROUTERCONFIG_HITRON" ]; then
+        RCH_BLOCKS=$(grep -cE '^config routerconfighitron( |$)' "$TMP_ROUTERCONFIG_HITRON")
+        RCH_NO_PAYLOAD=$(awk 'BEGIN{RS=""; FS="\n"} /^config routerconfighitron( |$)/{has=0; for(i=1;i<=NF;i++){if($i~/option payload/)has=1} if(!has)count++} END{print count+0}' "$TMP_ROUTERCONFIG_HITRON")
+        [ "$RCH_NO_PAYLOAD" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - RouterConfigHitron: ${RCH_NO_PAYLOAD}/${RCH_BLOCKS} 筆缺少 payload"
     fi
 
     # 組件驗證結果
@@ -833,7 +852,7 @@ main() {
         push_notify "ConfigSync_FieldError | $(echo "$FIELD_DETAIL" | tr '\n' ' ')"
         echo "🚨 組件欄位驗證失敗，已通知管理員。中止同步。"
         rm -f "$TMP_BASE64" "$TMP_BINARY" "$TMP_DECRYPTED" "$TMP_PBR" "$TMP_NETWORK" "$TMP_DHCP" \
-              "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG"
+              "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG" "$TMP_ROUTERCONFIG_HITRON"
         exit 1
     fi
     log "✅ 組件欄位驗證通過"
@@ -901,25 +920,30 @@ main() {
     if check_content_changed "$TMP_ROUTERCONFIG" "$STATE_ROUTERCONFIG" "RouterConfig"; then
         CHANGED_ROUTERCONFIG=1
     fi
-    # .hitron-pf.json 缺失 → 強制處理 RouterConfig 以補回
-    if [ "$CHANGED_ROUTERCONFIG" -eq 0 ] && \
+
+    log "檢查 RouterConfigHitron 配置..."
+    if check_content_changed "$TMP_ROUTERCONFIG_HITRON" "$STATE_ROUTERCONFIG_HITRON" "RouterConfigHitron"; then
+        CHANGED_ROUTERCONFIG_HITRON=1
+    fi
+    # .hitron-pf.json 缺失 → 強制處理 RouterConfigHitron 以補回
+    if [ "$CHANGED_ROUTERCONFIG_HITRON" -eq 0 ] && \
        [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
        [ ! -f /etc/myscript/.hitron-pf.json ]; then
-        log "  ⚠️ .hitron-pf.json 缺失，強制視為 RouterConfig 變更以補回"
-        CHANGED_ROUTERCONFIG=1
+        log "  ⚠️ .hitron-pf.json 缺失，強制視為 RouterConfigHitron 變更以補回"
+        CHANGED_ROUTERCONFIG_HITRON=1
     fi
 
     # 如果沒有任何變更，退出
     if [ $CHANGED_NETWORK -eq 0 ] && [ $CHANGED_DHCP -eq 0 ] && [ $CHANGED_PBR -eq 0 ] && \
        [ $CHANGED_QOS_RULES -eq 0 ] && [ $CHANGED_QOS_INTERFACES -eq 0 ] && [ $CHANGED_CRONTAB -eq 0 ] && \
-       [ $CHANGED_DBROUTE -eq 0 ] && [ $CHANGED_ROUTERCONFIG -eq 0 ]; then
+       [ $CHANGED_DBROUTE -eq 0 ] && [ $CHANGED_ROUTERCONFIG -eq 0 ] && [ $CHANGED_ROUTERCONFIG_HITRON -eq 0 ]; then
         log "✅ 所有配置均無變化，無需更新"
         save_current_md5 "$current_md5"
         # 產生 uploadconfig hash（確保後續 ram2flash 不會重複上傳，但不觸發上傳；僅 gateway）
         [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
             [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh --hash-only
         rm -f "$TMP_BASE64" "$TMP_BINARY" "$TMP_DECRYPTED" "$TMP_PBR" "$TMP_NETWORK" "$TMP_DHCP" \
-              "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG"
+              "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG" "$TMP_ROUTERCONFIG_HITRON"
         exit 0
     fi
 
@@ -1349,11 +1373,6 @@ NFTEOF
     # client 不處理 RouterConfig（WG/DDNS 是 gateway 專屬）
     # =====================================================
     DEVICE_ROLE=$(cat /etc/myscript/.mesh_role 2>/dev/null)
-    # 非 client 時，若 .hitron-pf.json 缺失，強制跑 restore 補回
-    if [ "$DEVICE_ROLE" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ] && [ $CHANGED_ROUTERCONFIG -eq 0 ]; then
-        log "  ℹ️ .hitron-pf.json 缺失，強制處理 RouterConfig 以補回"
-        CHANGED_ROUTERCONFIG=1
-    fi
     if [ "$DEVICE_ROLE" = "client" ]; then
         log "  ℹ️ Client 角色，跳過 RouterConfig"
     elif [ $CHANGED_ROUTERCONFIG -eq 1 ]; then
@@ -1485,27 +1504,6 @@ NFTEOF
                     fi
                     rm -f "$TMP_RC_DDNS"
 
-                    # --- 抽取 Hitron port forward ---
-                    HITRON_PF_FILE="/etc/myscript/.hitron-pf.json"
-                    _hp_b64=$(awk "/^config HITRON/{f=1;next} /^config /{f=0} f && /option data/{print; exit}" "$TMP_RC_PLAIN" \
-                        | sed "s/.*'\(.*\)'.*/\1/")
-                    if [ -n "$_hp_b64" ]; then
-                        _hp_new=$(printf '%s' "$_hp_b64" | base64 -d 2>/dev/null)
-                        if echo "$_hp_new" | grep -q '^\['; then
-                            _hp_old=$(cat "$HITRON_PF_FILE" 2>/dev/null)
-                            if [ "$_hp_new" = "$_hp_old" ]; then
-                                log "  ⏭️ Hitron PF 與本地相同，不更新 $HITRON_PF_FILE"
-                            else
-                                printf '%s' "$_hp_new" > "$HITRON_PF_FILE"
-                                chmod 600 "$HITRON_PF_FILE"
-                                _hp_cnt=$(echo "$_hp_new" | tr ',' '\n' | grep -c '"appName"')
-                                log "  ✅ Hitron PF 已更新 ($_hp_cnt 條) → $HITRON_PF_FILE"
-                            fi
-                        else
-                            log "  ⚠️ Hitron PF base64 解碼後非合法 JSON array，跳過"
-                        fi
-                    fi
-
                     # --- 還原 TDX API 憑證 ---
                     TDX_SECRET_DIR="/etc/myscript/.secrets"
                     _tdx_id=$(awk "/^config TDX/{f=1;next} /^config /{f=0} f && /option appid/{print; exit}" "$TMP_RC_PLAIN" \
@@ -1539,6 +1537,66 @@ NFTEOF
         fi
 
         update_state_file "$TMP_ROUTERCONFIG" "$STATE_ROUTERCONFIG" "RouterConfig"
+    fi
+
+    # =====================================================
+    # RouterConfigHitron 處理 (解密 payload → 還原 .hitron-pf.json)
+    # client 不處理；payload 為空就保留本地檔（避免被空值蓋掉）
+    # =====================================================
+    if [ "$DEVICE_ROLE" = "client" ]; then
+        log "  ℹ️ Client 角色，跳過 RouterConfigHitron"
+    elif [ $CHANGED_ROUTERCONFIG_HITRON -eq 1 ]; then
+        log "📝 處理 RouterConfigHitron 配置變更..."
+
+        RCH_PAYLOAD=$(awk '/^config routerconfighitron/,/^$/' "$TMP_ROUTERCONFIG_HITRON" | sed -n "s/.*option payload *//p" | sed "s/^'//; s/'$//")
+
+        if [ -n "$RCH_PAYLOAD" ]; then
+            TMP_RCH_BIN="/tmp/routerconfig_hitron_dec.bin"
+            TMP_RCH_PLAIN="/tmp/routerconfig_hitron_plain.txt"
+            echo -n "$RCH_PAYLOAD" | base64 -d > "$TMP_RCH_BIN" 2>/dev/null
+            openssl enc -aes-256-cbc -d -K "$KEY_HEX" -iv "$IV_HEX" \
+                -in "$TMP_RCH_BIN" -out "$TMP_RCH_PLAIN" 2>/dev/null
+
+            if [ $? -ne 0 ] || [ ! -s "$TMP_RCH_PLAIN" ]; then
+                log "  ❌ RouterConfigHitron payload 解密失敗"
+                push_notify "ConfigSync_RouterConfigHitronDecryptFailed"
+            elif [ $DRY_RUN -eq 0 ]; then
+                HITRON_PF_FILE="/etc/myscript/.hitron-pf.json"
+                _hp_b64=$(awk "/^config HITRON/{f=1;next} /^config /{f=0} f && /option data/{print; exit}" "$TMP_RCH_PLAIN" \
+                    | sed "s/.*'\(.*\)'.*/\1/")
+                if [ -n "$_hp_b64" ]; then
+                    _hp_new=$(printf '%s' "$_hp_b64" | base64 -d 2>/dev/null)
+                    if echo "$_hp_new" | grep -q '^\['; then
+                        _hp_old=$(cat "$HITRON_PF_FILE" 2>/dev/null)
+                        if [ "$_hp_new" = "$_hp_old" ]; then
+                            log "  ⏭️ Hitron PF 與本地相同，不更新 $HITRON_PF_FILE"
+                        else
+                            printf '%s' "$_hp_new" > "$HITRON_PF_FILE"
+                            chmod 600 "$HITRON_PF_FILE"
+                            _hp_cnt=$(echo "$_hp_new" | tr ',' '\n' | grep -c '"appName"')
+                            log "  ✅ Hitron PF 已更新 ($_hp_cnt 條) → $HITRON_PF_FILE"
+                        fi
+                    else
+                        log "  ⚠️ Hitron PF base64 解碼後非合法 JSON array，跳過"
+                    fi
+                else
+                    log "  ⚠️ RouterConfigHitron 內無 config HITRON 段，跳過（保留本地檔）"
+                fi
+            else
+                _hp_b64=$(awk "/^config HITRON/{f=1;next} /^config /{f=0} f && /option data/{print; exit}" "$TMP_RCH_PLAIN" \
+                    | sed "s/.*'\(.*\)'.*/\1/")
+                if [ -n "$_hp_b64" ]; then
+                    _hp_cnt=$(printf '%s' "$_hp_b64" | base64 -d 2>/dev/null | tr ',' '\n' | grep -c '"appName"')
+                    log "  [DRY-RUN] 模擬更新 Hitron PF ($_hp_cnt 條)"
+                fi
+            fi
+
+            rm -f "$TMP_RCH_BIN" "$TMP_RCH_PLAIN"
+        else
+            log "  ⚠️ RouterConfigHitron payload 為空，跳過（保留本地 .hitron-pf.json）"
+        fi
+
+        update_state_file "$TMP_ROUTERCONFIG_HITRON" "$STATE_ROUTERCONFIG_HITRON" "RouterConfigHitron"
     fi
 
     echo ""
@@ -1667,7 +1725,7 @@ NFTEOF
 
     # 清理臨時檔案
     rm -f "$TMP_BASE64" "$TMP_BINARY" "$TMP_DECRYPTED" "$TMP_PBR" "$TMP_NETWORK" "$TMP_DHCP" \
-          "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG" \
+          "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG" "$TMP_ROUTERCONFIG_HITRON" \
           "$TMP_QOS_DEFAULTS" \
           "$ROLLBACK_NETWORK" "$ROLLBACK_DHCP" "$ROLLBACK_FIREWALL" "$ROLLBACK_QOSIFY" "$ROLLBACK_QOS_DEFAULTS"
 

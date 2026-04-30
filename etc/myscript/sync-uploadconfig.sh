@@ -45,11 +45,15 @@ UPLOAD_URL=$(echo "$URL" | sed 's/action=[^&]*/action=UploadConfig/')
 
 # Hash 檢查檔案
 HASH_FILE="/tmp/.uploadconfig_hash"
+HASH_FILE_HITRON="/tmp/.uploadconfig_hitron_hash"
 
 # 臨時檔案
 TMP_PLAIN="/tmp/uploadconfig_plain.txt"
 TMP_ENCRYPTED="/tmp/uploadconfig_encrypted.bin"
 TMP_BASE64="/tmp/uploadconfig_base64.txt"
+TMP_HITRON_PLAIN="/tmp/uploadconfig_hitron_plain.txt"
+TMP_HITRON_ENCRYPTED="/tmp/uploadconfig_hitron_encrypted.bin"
+TMP_HITRON_BASE64="/tmp/uploadconfig_hitron_base64.txt"
 
 # =====================================================
 # 日誌函數
@@ -153,59 +157,6 @@ main() {
     fi
 
     # -------------------------------------------------
-    # 2.5 抓 Hitron CGN5-AP port forward (gateway 才跑)
-    # -------------------------------------------------
-    HITRON_PF_COUNT=0
-    _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
-    _hcool=/tmp/.hitron_cooldown
-    if [ "$_role" != "client" ] && [ -f "$_hcool" ]; then
-        _age=$(( $(date +%s) - $(date -r "$_hcool" +%s 2>/dev/null || echo 0) ))
-        if [ "$_age" -lt 300 ]; then
-            log "⏭️ Hitron cooldown (${_age}s < 300s)，跳過"
-            _role="client"  # 用這招跳過下面的區塊
-        else
-            rm -f "$_hcool"
-        fi
-    fi
-    if [ "$_role" != "client" ]; then
-        log "🔁 抓取 Hitron port forward..."
-        _hck=/tmp/.hitron_up_ck.$$
-        _hitron=http://192.168.168.1
-        _huser=admin
-        _hpass=password
-        _ok=0
-        if curl -s -c "$_hck" "$_hitron/login.html" -o /dev/null --connect-timeout 5 --max-time 10; then
-            _resp=$(curl -s -b "$_hck" -c "$_hck" -X POST "$_hitron/goform/login" \
-                -d "usr=$_huser&pwd=$_hpass&preSession=" --max-time 10)
-            if [ "$_resp" = "success" ]; then
-                _pf=$(curl -s -b "$_hck" "$_hitron/data/getForwardingRules.asp" --max-time 10)
-                if echo "$_pf" | grep -q '^\['; then
-                    HITRON_PF_COUNT=$(echo "$_pf" | tr ',' '\n' | grep -c '"appName"')
-                    _b64=$(printf '%s' "$_pf" | base64 -w0 2>/dev/null || printf '%s' "$_pf" | base64 | tr -d '\n')
-                    [ -s "$TMP_PLAIN" ] && echo "" >> "$TMP_PLAIN"
-                    echo "config HITRON 'port_forward'" >> "$TMP_PLAIN"
-                    echo "        option data '$_b64'" >> "$TMP_PLAIN"
-                    log "  ✅ Hitron PF: ${HITRON_PF_COUNT} 條 (base64: ${#_b64} bytes)"
-                    _ok=1
-                else
-                    log "  ❌ Hitron PF 讀取失敗: $_pf"
-                fi
-                # 登出釋放 session
-                curl -s -b "$_hck" -X POST "$_hitron/goform/logout" -d "data=byebye" -o /dev/null --max-time 5
-            else
-                log "  ❌ Hitron 登入失敗: $_resp"
-            fi
-        else
-            log "  ❌ Hitron 連線失敗"
-        fi
-        rm -f "$_hck"
-        if [ "$_ok" != "1" ]; then
-            touch "$_hcool"  # 失敗 → 進 cooldown 300 秒，避免觸發 Hitron LoginProtect
-            push_notify "UploadConfig_HitronFailed"
-        fi
-    fi
-
-    # -------------------------------------------------
     # 2.6 提取 TDX API 憑證 (tdx.appid / tdx.appkey)
     # -------------------------------------------------
     TDX_COUNT=0
@@ -297,7 +248,7 @@ main() {
         log "  ✅ 上傳成功 (HTTP $HTTP_CODE)"
         log "  📝 回應: $RESP"
         echo "$NEW_HASH" > "$HASH_FILE"
-        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} HitronPF:${HITRON_PF_COUNT} TDX:${TDX_COUNT}"
+        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} TDX:${TDX_COUNT}"
     else
         RESP=$(cat /tmp/uploadconfig_resp.txt 2>/dev/null)
         log "  ❌ 上傳失敗 (HTTP $HTTP_CODE)"
@@ -306,12 +257,130 @@ main() {
     fi
 
     # -------------------------------------------------
-    # 6. 清理
+    # 6. Hitron port forward 獨立上傳（失敗不影響主流程，雲端 F2 保留上次值）
+    # -------------------------------------------------
+    upload_hitron_pf
+
+    # -------------------------------------------------
+    # 7. 清理
     # -------------------------------------------------
     rm -f "$TMP_PLAIN" "$TMP_ENCRYPTED" "$TMP_BASE64" /tmp/uploadconfig_resp.txt
+    rm -f "$TMP_HITRON_PLAIN" "$TMP_HITRON_ENCRYPTED" "$TMP_HITRON_BASE64" /tmp/uploadconfig_hitron_resp.txt
 
     log "✅ 完成"
     exit 0
+}
+
+# =====================================================
+# Hitron port forward 獨立上傳
+#   抓 PF → 包 UCI → AES → base64 → action=UploadConfigHitron
+#   抓不到就直接 return（不送，雲端 F2 保留上次成功的值）
+#   抓到順手寫 /etc/myscript/.hitron-pf.json，gw 不用等下載
+# =====================================================
+upload_hitron_pf() {
+    local _role _hcool _age _hck _hitron _huser _hpass _ok _resp _pf _b64
+    local _pf_count _new_hash _old_hash _http_code _enc_size
+
+    _role=$(cat /etc/myscript/.mesh_role_active 2>/dev/null)
+    [ "$_role" = "client" ] && return 0
+
+    _hcool=/tmp/.hitron_cooldown
+    if [ -f "$_hcool" ]; then
+        _age=$(( $(date +%s) - $(date -r "$_hcool" +%s 2>/dev/null || echo 0) ))
+        if [ "$_age" -lt 300 ]; then
+            log "⏭️ Hitron cooldown (${_age}s < 300s)，跳過"
+            return 0
+        fi
+        rm -f "$_hcool"
+    fi
+
+    log "🔁 抓取 Hitron port forward..."
+    _hck=/tmp/.hitron_up_ck.$$
+    _hitron=http://192.168.168.1
+    _huser=admin
+    _hpass=password
+    _ok=0
+    _pf=""
+    if curl -s -c "$_hck" "$_hitron/login.html" -o /dev/null --connect-timeout 5 --max-time 10; then
+        _resp=$(curl -s -b "$_hck" -c "$_hck" -X POST "$_hitron/goform/login" \
+            -d "usr=$_huser&pwd=$_hpass&preSession=" --max-time 10)
+        if [ "$_resp" = "success" ]; then
+            _pf=$(curl -s -b "$_hck" "$_hitron/data/getForwardingRules.asp" --max-time 10)
+            if echo "$_pf" | grep -q '^\['; then
+                _ok=1
+            else
+                log "  ❌ Hitron PF 讀取失敗: $_pf"
+            fi
+            curl -s -b "$_hck" -X POST "$_hitron/goform/logout" -d "data=byebye" -o /dev/null --max-time 5
+        else
+            log "  ❌ Hitron 登入失敗: $_resp"
+        fi
+    else
+        log "  ❌ Hitron 連線失敗"
+    fi
+    rm -f "$_hck"
+
+    if [ "$_ok" != "1" ]; then
+        touch "$_hcool"
+        push_notify "UploadConfig_HitronFailed"
+        return 0
+    fi
+
+    # 抓到 → 順手寫本地 .hitron-pf.json（gw 直接有檔，不必繞雲端）
+    printf '%s' "$_pf" > /etc/myscript/.hitron-pf.json
+    chmod 600 /etc/myscript/.hitron-pf.json
+
+    _pf_count=$(echo "$_pf" | tr ',' '\n' | grep -c '"appName"')
+    _b64=$(printf '%s' "$_pf" | base64 -w0 2>/dev/null || printf '%s' "$_pf" | base64 | tr -d '\n')
+    log "  ✅ Hitron PF: ${_pf_count} 條 (base64: ${#_b64} bytes)"
+
+    # 包成 UCI 格式（與 RouterConfig 同樣結構，方便下載端複用 awk）
+    {
+        echo "config HITRON 'port_forward'"
+        echo "        option data '$_b64'"
+    } > "$TMP_HITRON_PLAIN"
+
+    # Hash 比對：和上次成功上傳相同就跳過
+    _new_hash=$(md5sum "$TMP_HITRON_PLAIN" | awk '{print $1}')
+    _old_hash=$(cat "$HASH_FILE_HITRON" 2>/dev/null)
+    if [ "$_new_hash" = "$_old_hash" ]; then
+        log "  ⏭️ Hitron PF 無變動 (hash: $_new_hash)，跳過上傳"
+        return 0
+    fi
+    log "  🔄 Hitron PF 變動 (old: ${_old_hash:-none} → new: $_new_hash)"
+
+    # AES + base64
+    openssl enc -aes-256-cbc -e -K "$KEY_HEX" -iv "$IV_HEX" \
+        -in "$TMP_HITRON_PLAIN" -out "$TMP_HITRON_ENCRYPTED" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        log "  ❌ Hitron AES 加密失敗"
+        return 0
+    fi
+    base64 "$TMP_HITRON_ENCRYPTED" | tr -d '\n' > "$TMP_HITRON_BASE64" 2>/dev/null
+    if [ ! -s "$TMP_HITRON_BASE64" ]; then
+        log "  ❌ Hitron base64 編碼失敗"
+        return 0
+    fi
+    _enc_size=$(wc -c < "$TMP_HITRON_BASE64")
+
+    # 上傳 (action=UploadConfigHitron → 雲端 F2)
+    log "  📤 上傳 Hitron PF (${_enc_size} bytes)..."
+    local _hitron_url
+    _hitron_url=$(echo "$URL" | sed 's/action=[^&]*/action=UploadConfigHitron/')
+    _http_code=$(curl -s -o /tmp/uploadconfig_hitron_resp.txt -w "%{http_code}" \
+        --connect-timeout 15 --max-time 60 \
+        -X POST "$_hitron_url" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-urlencode "data=$(cat "$TMP_HITRON_BASE64")" 2>/dev/null)
+
+    if [ "$_http_code" = "200" ] || [ "$_http_code" = "302" ]; then
+        log "  ✅ Hitron PF 上傳成功 (HTTP $_http_code)"
+        echo "$_new_hash" > "$HASH_FILE_HITRON"
+        push_notify "UploadConfigHitron_Done | PF:${_pf_count}"
+    else
+        log "  ❌ Hitron PF 上傳失敗 (HTTP $_http_code)"
+        push_notify "UploadConfigHitron_Failed | HTTP:${_http_code}"
+    fi
 }
 
 main "$@"
