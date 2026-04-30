@@ -1551,10 +1551,16 @@ NFTEOF
         RCH_PAYLOAD=$(awk '/^config routerconfighitron/,/^$/' "$TMP_ROUTERCONFIG_HITRON" | sed -n "s/.*option payload *//p" | sed "s/^'//; s/'$//")
 
         if [ -n "$RCH_PAYLOAD" ]; then
+            # 從 token 推導 KEY/IV (與 uploadconfig.sh 一致)
+            RCH_TOKEN=$(echo "$URL" | grep -oE 'token=[^&]+' | cut -d'=' -f2)
+            RCH_SHA256=$(echo -n "$RCH_TOKEN" | sha256sum | awk '{print $1}')
+            RCH_KEY_HEX="$RCH_SHA256"
+            RCH_IV_HEX=$(echo "$RCH_SHA256" | cut -c33-64)
+
             TMP_RCH_BIN="/tmp/routerconfig_hitron_dec.bin"
             TMP_RCH_PLAIN="/tmp/routerconfig_hitron_plain.txt"
             echo -n "$RCH_PAYLOAD" | base64 -d > "$TMP_RCH_BIN" 2>/dev/null
-            openssl enc -aes-256-cbc -d -K "$KEY_HEX" -iv "$IV_HEX" \
+            openssl enc -aes-256-cbc -d -K "$RCH_KEY_HEX" -iv "$RCH_IV_HEX" \
                 -in "$TMP_RCH_BIN" -out "$TMP_RCH_PLAIN" 2>/dev/null
 
             if [ $? -ne 0 ] || [ ! -s "$TMP_RCH_PLAIN" ]; then
