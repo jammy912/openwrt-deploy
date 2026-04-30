@@ -177,7 +177,7 @@ main() {
     if [ ! -s "$TMP_PLAIN" ]; then
         log "⚠️ 沒有提取到任何設定，跳過上傳"
         rm -f "$TMP_PLAIN"
-        exit 0
+        return 0
     fi
 
     TOTAL_LINES=$(wc -l < "$TMP_PLAIN")
@@ -201,7 +201,7 @@ main() {
     if [ "$NEW_HASH" = "$OLD_HASH" ]; then
         log "⏭️ 設定無變動 (hash: $NEW_HASH)，跳過上傳"
         rm -f "$TMP_PLAIN"
-        exit 0
+        return 0
     fi
     log "🔄 偵測到變動 (old: ${OLD_HASH:-none} → new: $NEW_HASH)"
 
@@ -216,7 +216,7 @@ main() {
         log "❌ AES 加密失敗"
         push_notify "UploadConfig_EncryptFailed"
         rm -f "$TMP_PLAIN" "$TMP_ENCRYPTED"
-        exit 1
+        return 1
     fi
 
     base64 "$TMP_ENCRYPTED" | tr -d '\n' > "$TMP_BASE64" 2>/dev/null
@@ -224,7 +224,7 @@ main() {
         log "❌ Base64 編碼失敗"
         push_notify "UploadConfig_EncodeFailed"
         rm -f "$TMP_PLAIN" "$TMP_ENCRYPTED" "$TMP_BASE64"
-        exit 1
+        return 1
     fi
 
     ENC_SIZE=$(wc -c < "$TMP_BASE64")
@@ -256,19 +256,8 @@ main() {
         push_notify "UploadConfig_Failed | HTTP:${HTTP_CODE}"
     fi
 
-    # -------------------------------------------------
-    # 6. Hitron port forward 獨立上傳（失敗不影響主流程，雲端 F2 保留上次值）
-    # -------------------------------------------------
-    upload_hitron_pf
-
-    # -------------------------------------------------
-    # 7. 清理
-    # -------------------------------------------------
     rm -f "$TMP_PLAIN" "$TMP_ENCRYPTED" "$TMP_BASE64" /tmp/uploadconfig_resp.txt
-    rm -f "$TMP_HITRON_PLAIN" "$TMP_HITRON_ENCRYPTED" "$TMP_HITRON_BASE64" /tmp/uploadconfig_hitron_resp.txt
-
-    log "✅ 完成"
-    exit 0
+    return 0
 }
 
 # =====================================================
@@ -384,3 +373,12 @@ upload_hitron_pf() {
 }
 
 main "$@"
+
+# Hitron PF 獨立上傳（不論主流程結果如何都跑；--hash-only 例外）
+if [ "$1" != "--hash-only" ]; then
+    upload_hitron_pf
+fi
+
+rm -f "$TMP_HITRON_PLAIN" "$TMP_HITRON_ENCRYPTED" "$TMP_HITRON_BASE64" /tmp/uploadconfig_hitron_resp.txt
+log "✅ 完成"
+exit 0
