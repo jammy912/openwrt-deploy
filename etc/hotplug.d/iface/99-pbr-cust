@@ -3,7 +3,7 @@
 # pbr-cust 由 rc.d/S99 + sync-googleconfig + check-pbr-wg.sh 處理
 
 case "$INTERFACE" in
-    wg_*)
+    wg*|wan)
         [ "$ACTION" = "ifup" ] || exit 0
         if grep -q "route_${INTERFACE}_v4" /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null; then
             logger -t pbr-cust "$INTERFACE up → 執行 dbroute-setup"
