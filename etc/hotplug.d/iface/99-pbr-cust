@@ -1,5 +1,5 @@
 #!/bin/sh
-# wg_* 介面 ifup 時恢復 dbroute
+# wg* / wan 介面 ifup 時若 dbroute conf 內有對應項目就重套 dbroute
 # pbr-cust 由 rc.d/S99 + sync-googleconfig + check-pbr-wg.sh 處理
 
 case "$INTERFACE" in
