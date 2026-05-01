@@ -188,6 +188,24 @@ custrule_add() {
     done < "$cache"
 }
 
+# CustRule table default route 自我修復
+# pbr 服務 reload 會清掉 1000-4000 table 的 route 但保留 ip rule，
+# 造成 rule 命中後 table 查不到 → fallthrough 走 wan。
+custrule_route_repair() {
+    local iface="$1"
+    local cache="${STATE_DIR}/${iface}.custrules"
+    [ ! -f "$cache" ] && return
+
+    while read _src _tbl; do
+        [ -z "$_tbl" ] && continue
+        if ! ip route show table "$_tbl" 2>/dev/null | grep -q "^default dev ${iface} "; then
+            ip route replace default dev "$iface" table "$_tbl" 2>/dev/null
+            log_event "[REPAIR] $iface table $_tbl 缺 default route，已補 default dev $iface"
+            log "    修復: table $_tbl 補上 default dev $iface"
+        fi
+    done < "$cache"
+}
+
 log "開始檢查 PBR WireGuard 介面連線狀態..."
 
 SECTIONS=$(uci show pbr | grep ".dest_addr='wg" | cut -d'.' -f2)
@@ -237,6 +255,9 @@ for SECTION in $SECTIONS; do
                     exit
                 }' > "$RULE_CACHE"
         fi
+
+        # 自我修復：確保 CustRule table 都有 default route（防 pbr reload 把 route 清掉）
+        custrule_route_repair "$INTERFACE"
 
         # ip rule 加回（若介面曾被標記 DOWN）
         if ! rule_exists "$INTERFACE"; then
