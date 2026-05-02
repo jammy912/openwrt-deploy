@@ -1,17 +1,19 @@
 #!/bin/sh
 
 #================================================================
-# PBR WireGuard Interface Health Check Script (V3)
+# PBR WireGuard Interface Health Check Script (V4 抗抖動版)
 #
 # 功能:
 #   - 檢查所有 PBR 規則中，以 'wg' 開頭的介面。
-#   - 透過指定的介面對外 PING 測試。
-#   - PING 失敗: 立刻 ip rule del 切回 wan（無感）+ uci enabled=0
-#   - PING 成功: ip rule add 加回（無感）+ uci delete enabled
-#   - 整點且持續失敗: 背景 ifdown/ifup 重建 tunnel，ifup 完成後
-#     由本腳本下一輪 ping 成功時自動加回 ip rule
-#   - 1小時內 DOWN 超過 5 次: 停用該介面 PBR 規則 24 小時
-#   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面
+#   - 透過指定的介面對外 PING 測試（5 包，允許 ≤ 2 包遺失）。
+#   - PING 失敗: 連續 DOWN_CONFIRM 輪都失敗才 ip rule del 切回 wan，
+#     單次抖動只記為 pending，不動 ip rule、不推播、不計入 24h 視窗。
+#   - PING 成功: 若先前被切走，需連續 UP_CONFIRM 輪 UP 才把 ip rule
+#     加回 wg（冷靜期），避免抖動期間反覆 flip 影響長連線。
+#   - 整點且確認失敗: 背景 ifdown/ifup 重建 tunnel，ifup 完成後
+#     由本腳本下一輪 ping 成功時自動進入冷靜期，再加回 ip rule。
+#   - 1小時內 DOWN 超過 DOWN_THRESHOLD 次: 停用該介面 PBR 規則 24 小時。
+#   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面。
 #================================================================
 
 STATE_DIR="/tmp/check-pbr-wg"
@@ -47,9 +49,12 @@ PUSH_NAMES="admin"
 
 # --- 設定 ---
 TARGET_IP="8.8.8.8"
-PING_COUNT=3
+PING_COUNT=5             # 每輪送 5 包
+PING_LOSS_TOLERATE=2     # 5 包中允許最多 2 包遺失仍視為 up（success >= 3）
 PING_TIMEOUT=5
 QUIET_MODE=0
+DOWN_CONFIRM=2           # 連續 N 輪 ping 失敗才真的切走 wan
+UP_CONFIRM=4             # 從 DOWN 恢復後, 需連續 N 輪 UP 才加回 wg（≈ 2 分鐘冷靜期）
 DOWN_THRESHOLD=10     # 1小時內 DOWN 幾次觸發停用
 DOWN_WINDOW=3600      # 滑動視窗秒數
 DISABLE_DURATION=86400 # 停用秒數（24小時）
@@ -79,6 +84,15 @@ record_down_event() {
     # 只保留視窗內的記錄
     awk -v cutoff="$cutoff" '$1 > cutoff' "$downlog" > "${downlog}.tmp" && mv "${downlog}.tmp" "$downlog"
 }
+
+# 連敗 / 連勝計數器（跨輪累計，存於 STATE_DIR）
+fail_count_get()   { cat "${STATE_DIR}/${1}.failcount" 2>/dev/null || echo 0; }
+fail_count_inc()   { echo $(( $(fail_count_get "$1") + 1 )) > "${STATE_DIR}/${1}.failcount"; }
+fail_count_reset() { rm -f "${STATE_DIR}/${1}.failcount"; }
+
+up_count_get()     { cat "${STATE_DIR}/${1}.upcount" 2>/dev/null || echo 0; }
+up_count_inc()     { echo $(( $(up_count_get "$1") + 1 )) > "${STATE_DIR}/${1}.upcount"; }
+up_count_reset()   { rm -f "${STATE_DIR}/${1}.upcount"; }
 
 # 檢查是否觸發高頻停用，或是否已到恢復時間
 # 回傳 0 = 正常可用，1 = 目前在停用期（跳過 ping）
@@ -240,9 +254,15 @@ for SECTION in $SECTIONS; do
     fi
 
     log " -> 正在檢查介面: $INTERFACE ..."
-    if ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP >/dev/null 2>&1; then
-        echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
-        log "    狀態: 連線正常 (UP)"
+    _received=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP 2>/dev/null \
+        | awk -F'[ ,]' '/packets received/ {print $4; exit}')
+    _received=${_received:-0}
+    _need=$(( PING_COUNT - PING_LOSS_TOLERATE ))
+    if [ "$_received" -ge "$_need" ]; then
+        log "    狀態: 連線正常 (UP, ${_received}/${PING_COUNT})"
+
+        # 清掉 DOWN 連敗計數
+        fail_count_reset "$INTERFACE"
 
         # ping 成功時順手更新 fwmark cache
         if rule_exists "$INTERFACE"; then
@@ -259,36 +279,66 @@ for SECTION in $SECTIONS; do
         # 自我修復：確保 CustRule table 都有 default route（防 pbr reload 把 route 清掉）
         custrule_route_repair "$INTERFACE"
 
-        # ip rule 加回（若介面曾被標記 DOWN）
-        if ! rule_exists "$INTERFACE"; then
-            RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
-            if [ -f "$RULE_CACHE" ]; then
-                _prio=$(awk '{print $1}' "$RULE_CACHE")
-                _fm=$(awk '{print $2}' "$RULE_CACHE")
-                _tbl=$(awk '{print $3}' "$RULE_CACHE")
-                ip rule add prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
-                log_event "[UP] $INTERFACE ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
-                log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
+        if rule_exists "$INTERFACE"; then
+            # 已在 wg, 不需冷靜期
+            up_count_reset "$INTERFACE"
+            echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
+        else
+            # 先前被切走, 進入冷靜期累計
+            up_count_inc "$INTERFACE"
+            _upc=$(up_count_get "$INTERFACE")
+            if [ "$_upc" -lt "$UP_CONFIRM" ]; then
+                log "    冷靜期 ${_upc}/${UP_CONFIRM}: 仍走 wan, 暫不加回 ip rule"
+                # cooldown 期間第二階段不該動 uci, 標 pending
+                echo "pending" > "${STATE_DIR}/${INTERFACE}.pingresult"
             else
-                log_event "[UP] $INTERFACE ping 恢復但無 rule cache，等下次 pbr reload"
-                log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
-            fi
-        fi
+                # 連勝確認完成, 還原 ip rule
+                RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
+                if [ -f "$RULE_CACHE" ]; then
+                    _prio=$(awk '{print $1}' "$RULE_CACHE")
+                    _fm=$(awk '{print $2}' "$RULE_CACHE")
+                    _tbl=$(awk '{print $3}' "$RULE_CACHE")
+                    ip rule add prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
+                    log_event "[UP] $INTERFACE 冷靜期完成, ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
+                    log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
+                else
+                    log_event "[UP] $INTERFACE 冷靜期完成但無 rule cache，等下次 pbr reload"
+                    log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
+                fi
 
-        # custrule_add 只在曾被標記 DOWN（prevresult=down）時才還原
-        PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
-        if [ "$PREV_RESULT_UP" = "down" ]; then
-            _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
-            if [ ! -f "$_cr_done_flag" ]; then
-                custrule_add "$INTERFACE"
-                touch "$_cr_done_flag"
+                # custrule_add 只在曾被標記 DOWN 時才還原
+                PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
+                if [ "$PREV_RESULT_UP" = "down" ]; then
+                    _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
+                    if [ ! -f "$_cr_done_flag" ]; then
+                        custrule_add "$INTERFACE"
+                        touch "$_cr_done_flag"
+                    fi
+                fi
+
+                up_count_reset "$INTERFACE"
+                echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
             fi
         fi
     else
-        echo "down" > "${STATE_DIR}/${INTERFACE}.pingresult"
-        log "    狀態: 連線中斷 (DOWN)"
+        log "    狀態: 連線異常 (DOWN, ${_received}/${PING_COUNT})"
 
-        # 記錄 DOWN 事件（高頻偵測）
+        # 清掉 UP 連勝計數
+        up_count_reset "$INTERFACE"
+
+        # 連敗確認: 未達門檻只記 pending, 不動 ip rule、不計入 24h 視窗
+        fail_count_inc "$INTERFACE"
+        _fc=$(fail_count_get "$INTERFACE")
+        if [ "$_fc" -lt "$DOWN_CONFIRM" ]; then
+            log "    DOWN 確認中 ${_fc}/${DOWN_CONFIRM}: 暫不切回 wan"
+            echo "pending" > "${STATE_DIR}/${INTERFACE}.pingresult"
+            CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
+            continue
+        fi
+
+        echo "down" > "${STATE_DIR}/${INTERFACE}.pingresult"
+
+        # 連敗確認完成 → 真切走
         record_down_event "$INTERFACE"
 
         # ip rule del 切回 wan（無感）
@@ -305,7 +355,7 @@ for SECTION in $SECTIONS; do
             _fm=$(awk '{print $2}' "$RULE_CACHE")
             _tbl=$(awk '{print $3}' "$RULE_CACHE")
             ip rule del prio $_prio fwmark $_fm lookup $_tbl 2>/dev/null
-            log_event "[DOWN] $INTERFACE ip rule 已移除 (prio=$_prio fwmark=$_fm) → 流量切回 wan"
+            log_event "[DOWN] $INTERFACE 連 ${_fc} 輪確認失敗, ip rule 已移除 (prio=$_prio fwmark=$_fm) → 流量切回 wan"
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
@@ -347,6 +397,7 @@ for SECTION in $SECTIONS; do
                 log " -> $POLICY_NAME ($INTERFACE): uci enabled=0"
             fi
             ;;
+        pending|skip|"") ;;  # 連敗確認中 / 冷靜期 / 未檢查 → 不動 uci
     esac
 done
 
@@ -358,7 +409,8 @@ for SECTION in $SECTIONS; do
     PING_RESULT=$(cat "${STATE_DIR}/${INTERFACE}.pingresult" 2>/dev/null)
     PREV_RESULT="${STATE_DIR}/${INTERFACE}.prevresult"
     PREV=$(cat "$PREV_RESULT" 2>/dev/null)
-    if [ "$PING_RESULT" != "$PREV" ]; then
+    # pending / skip 不更新 prevresult, 避免破壞 up↔down 對比
+    if [ "$PING_RESULT" != "$PREV" ] && [ "$PING_RESULT" != "pending" ] && [ "$PING_RESULT" != "skip" ]; then
         case "$PING_RESULT" in
             up)   push_notify "${INTERFACE}_UP" ;;
             down) push_notify "${INTERFACE}_Down" ;;
