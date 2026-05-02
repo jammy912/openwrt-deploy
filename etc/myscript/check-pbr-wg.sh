@@ -184,6 +184,7 @@ check_flap_disable() {
 }
 
 # 從 ip rule 動態查出介面對應的 fwmark 與 priority
+# 只抓主 PBR rule (prio >= 29000), 排除 dbroute (prio 100) 與 cust (prio 200)
 # 輸出: "<prio> <fwmark> <mask> <table>"，查無則空
 get_iface_rule() {
     local iface="$1"
@@ -191,6 +192,7 @@ get_iface_rule() {
     ip rule list | awk -v tbl="$table" '
         $0 ~ "lookup " tbl "$" {
             prio = $1+0
+            if (prio < 29000) next
             for (i=1;i<=NF;i++) {
                 if ($i == "fwmark") { split($(i+1), fm, "/"); fwmark=fm[1]; mask=fm[2] }
             }
@@ -199,10 +201,15 @@ get_iface_rule() {
         }'
 }
 
-# ip rule 是否存在（fwmark 類）
+# 主 PBR ip rule 是否存在 (只看 prio>=29000, 排除 dbroute/cust)
 rule_exists() {
     local iface="$1"
-    ip rule list | grep -q "lookup pbr_${iface}$"
+    ip rule list | awk -v tbl="pbr_${iface}" '
+        $0 ~ "lookup " tbl "$" {
+            prio = $1+0
+            if (prio >= 29000) { found=1; exit }
+        }
+        END { exit !found }'
 }
 
 # CustRule per-IP rule del（介面 DOWN 時移除）
@@ -312,12 +319,13 @@ for SECTION in $SECTIONS; do
         # 清掉 DOWN 連敗計數
         fail_count_reset "$INTERFACE"
 
-        # ping 成功時順手更新 fwmark cache
+        # ping 成功時順手更新 fwmark cache (只抓主 PBR, 排除 dbroute/cust)
         if rule_exists "$INTERFACE"; then
             RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
                 $0 ~ "lookup " tbl "$" {
                     prio=$1+0
+                    if (prio < 29000) next
                     for(i=1;i<=NF;i++) if($i=="fwmark"){fm=$(i+1)}
                     print prio, fm, tbl
                     exit
@@ -409,12 +417,13 @@ for SECTION in $SECTIONS; do
         # 連敗確認完成 → 真切走
         record_down_event "$INTERFACE"
 
-        # ip rule del 切回 wan（無感）
+        # ip rule del 切回 wan（無感, 只刪主 PBR rule, 不影響 dbroute/cust）
         if rule_exists "$INTERFACE"; then
             RULE_CACHE="${STATE_DIR}/${INTERFACE}.rule"
             ip rule list | awk -v tbl="pbr_${INTERFACE}" '
                 $0 ~ "lookup " tbl "$" {
                     prio=$1+0
+                    if (prio < 29000) next
                     for(i=1;i<=NF;i++) if($i=="fwmark"){fm=$(i+1)}
                     print prio, fm, tbl
                     exit
