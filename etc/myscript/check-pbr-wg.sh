@@ -34,7 +34,8 @@ if [ -f "$LOCK" ]; then
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK" /tmp/cron_global.lock "$STATE_DIR"/*.cr_done' EXIT
+trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
+# 註: 不清 *.cr_done, 讓它跨輪持續存在; 只在 DOWN/UP 切換時 toggle
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -342,13 +343,14 @@ for SECTION in $SECTIONS; do
             # 保險: 若 prevresult=down 表示先前被腳本切走,
             # 但主 rule 已被外部 (pbr reload / hotplug ifup) 補回,
             # 此時 custrules 可能仍未回復, 用 cache 補上一次。
+            # cr_done 旗標代表「DOWN 階段已 custrule_del」, 需要對應 add 還原
             PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
             if [ "$PREV_RESULT_UP" = "down" ]; then
                 _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
-                if [ ! -f "$_cr_done_flag" ]; then
+                if [ -f "$_cr_done_flag" ]; then
                     log_event "[REPAIR] $INTERFACE 主 rule 已由外部重建, 補 CustRule"
                     custrule_add "$INTERFACE"
-                    touch "$_cr_done_flag"
+                    rm -f "$_cr_done_flag"
                 fi
             fi
 
@@ -378,12 +380,13 @@ for SECTION in $SECTIONS; do
                 fi
 
                 # custrule_add 只在曾被標記 DOWN 時才還原
+                # cr_done 旗標 = DOWN 階段已 custrule_del, UP 階段對應 add 並清旗標
                 PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
                 if [ "$PREV_RESULT_UP" = "down" ]; then
                     _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
-                    if [ ! -f "$_cr_done_flag" ]; then
+                    if [ -f "$_cr_done_flag" ]; then
                         custrule_add "$INTERFACE"
-                        touch "$_cr_done_flag"
+                        rm -f "$_cr_done_flag"
                     fi
                 fi
 
