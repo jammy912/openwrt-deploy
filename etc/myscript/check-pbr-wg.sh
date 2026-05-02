@@ -320,6 +320,20 @@ for SECTION in $SECTIONS; do
         if rule_exists "$INTERFACE"; then
             # 已在 wg, 不需冷靜期
             up_count_reset "$INTERFACE"
+
+            # 保險: 若 prevresult=down 表示先前被腳本切走,
+            # 但主 rule 已被外部 (pbr reload / hotplug ifup) 補回,
+            # 此時 custrules 可能仍未回復, 用 cache 補上一次。
+            PREV_RESULT_UP=$(cat "${STATE_DIR}/${INTERFACE}.prevresult" 2>/dev/null)
+            if [ "$PREV_RESULT_UP" = "down" ]; then
+                _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
+                if [ ! -f "$_cr_done_flag" ]; then
+                    log_event "[REPAIR] $INTERFACE 主 rule 已由外部重建, 補 CustRule"
+                    custrule_add "$INTERFACE"
+                    touch "$_cr_done_flag"
+                fi
+            fi
+
             echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
         else
             # 先前被切走, 進入冷靜期累計
