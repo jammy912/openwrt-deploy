@@ -12,7 +12,8 @@
 #     加回 wg（冷靜期），避免抖動期間反覆 flip 影響長連線。
 #   - 整點且確認失敗: 背景 ifdown/ifup 重建 tunnel，ifup 完成後
 #     由本腳本下一輪 ping 成功時自動進入冷靜期，再加回 ip rule。
-#   - 1小時內 DOWN 超過 DOWN_THRESHOLD 次: 停用該介面 PBR 規則 24 小時。
+#   - 1小時內 DOWN 超過 DOWN_THRESHOLD 次: 短鎖 5 分鐘;24 小時內
+#     累計達 LOCK_ESCALATE_THRESHOLD 次自動升級為長鎖 24 小時。
 #   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面。
 #================================================================
 
@@ -55,9 +56,13 @@ PING_TIMEOUT=5
 QUIET_MODE=0
 DOWN_CONFIRM=2           # 連續 N 輪 ping 失敗才真的切走 wan
 UP_CONFIRM=4             # 從 DOWN 恢復後, 需連續 N 輪 UP 才加回 wg（≈ 2 分鐘冷靜期）
-DOWN_THRESHOLD=10     # 1小時內 DOWN 幾次觸發停用
-DOWN_WINDOW=3600      # 滑動視窗秒數
-DISABLE_DURATION=86400 # 停用秒數（24小時）
+DOWN_THRESHOLD=10              # 1小時內 DOWN 幾次觸發停用
+DOWN_WINDOW=3600               # 滑動視窗秒數
+SHORT_LOCK_DURATION=300        # 短鎖時長: 5 分鐘
+LONG_LOCK_DURATION=86400       # 長鎖時長: 24 小時
+LOCK_ESCALATE_THRESHOLD=3      # 短鎖累計 N 次升級到長鎖
+LOCK_ESCALATE_WINDOW=86400     # 累計視窗: 24 小時
+DISABLE_DURATION=86400 # 停用秒數（24小時, 保留為相容變數, 未使用）
 
 if [ "$1" = "--quiet" ] || [ "$1" = "-q" ]; then
     QUIET_MODE=1
@@ -94,23 +99,38 @@ up_count_get()     { cat "${STATE_DIR}/${1}.upcount" 2>/dev/null || echo 0; }
 up_count_inc()     { echo $(( $(up_count_get "$1") + 1 )) > "${STATE_DIR}/${1}.upcount"; }
 up_count_reset()   { rm -f "${STATE_DIR}/${1}.upcount"; }
 
+# 將秒數轉成「N 小時」/「N 分鐘」/「N 秒」可讀字串
+fmt_duration() {
+    local s="$1"
+    if [ "$s" -ge 3600 ]; then
+        echo "$(( s / 3600 )) 小時"
+    elif [ "$s" -ge 60 ]; then
+        echo "$(( s / 60 )) 分鐘"
+    else
+        echo "${s} 秒"
+    fi
+}
+
 # 檢查是否觸發高頻停用，或是否已到恢復時間
+# 階梯式停用: 短鎖 SHORT_LOCK_DURATION (5 分鐘),
+# 24 小時內累計 LOCK_ESCALATE_THRESHOLD (3) 次升級為長鎖 LONG_LOCK_DURATION (24 小時)
 # 回傳 0 = 正常可用，1 = 目前在停用期（跳過 ping）
 check_flap_disable() {
     local iface="$1"
     local downlog="${STATE_DIR}/${iface}.downlog"
     local disabled_until_file="${STATE_DIR}/${iface}.disabled_until"
+    local lock_history_file="${STATE_DIR}/${iface}.lockhistory"
     local now=$(date '+%s')
 
     # 檢查是否在停用期
     if [ -f "$disabled_until_file" ]; then
         local until=$(cat "$disabled_until_file")
         if [ "$now" -lt "$until" ]; then
-            local remain=$(( (until - now) / 3600 ))
-            log "    [$iface] 高頻停用中，剩餘約 ${remain} 小時，跳過"
+            local remain=$(( until - now ))
+            log "    [$iface] 高頻停用中，剩餘約 $(fmt_duration $remain)，跳過"
             return 1
         else
-            # 停用到期，自動恢復
+            # 停用到期，自動恢復 (downlog 清掉重新計數, lockhistory 保留供升級判斷)
             rm -f "$disabled_until_file" "$downlog"
             log_event "[FLAP] $iface 停用期滿，自動恢復"
             log "    [$iface] 停用期滿，已自動恢復"
@@ -123,11 +143,29 @@ check_flap_disable() {
         local cutoff=$((now - DOWN_WINDOW))
         local count=$(awk -v cutoff="$cutoff" '$1 > cutoff' "$downlog" | wc -l)
         if [ "$count" -ge "$DOWN_THRESHOLD" ]; then
-            local until=$((now + DISABLE_DURATION))
+            # 寫入鎖歷史並清掉視窗外舊紀錄
+            echo "$now" >> "$lock_history_file"
+            local lock_cutoff=$((now - LOCK_ESCALATE_WINDOW))
+            awk -v cutoff="$lock_cutoff" '$1 > cutoff' "$lock_history_file" \
+                > "${lock_history_file}.tmp" && mv "${lock_history_file}.tmp" "$lock_history_file"
+            local lock_count=$(wc -l < "$lock_history_file")
+
+            local lock_dur lock_label notify_tag
+            if [ "$lock_count" -ge "$LOCK_ESCALATE_THRESHOLD" ]; then
+                lock_dur=$LONG_LOCK_DURATION
+                lock_label="長鎖 $(fmt_duration $LONG_LOCK_DURATION) (累計第 ${lock_count} 次)"
+                notify_tag="${iface}_FlapDisable_Long"
+            else
+                lock_dur=$SHORT_LOCK_DURATION
+                lock_label="短鎖 $(fmt_duration $SHORT_LOCK_DURATION) (累計第 ${lock_count}/${LOCK_ESCALATE_THRESHOLD} 次)"
+                notify_tag="${iface}_FlapDisable_Short"
+            fi
+
+            local until=$((now + lock_dur))
             echo "$until" > "$disabled_until_file"
-            log_event "[FLAP] $iface 1小時內 DOWN ${count} 次，停用 PBR 24 小時"
-            log "    [$iface] 高頻異常（${count} 次/小時），停用 PBR 規則 24 小時"
-            push_notify "${iface}_FlapDisable_24h"
+            log_event "[FLAP] $iface 1小時內 DOWN ${count} 次，${lock_label}"
+            log "    [$iface] 高頻異常（${count} 次/小時），${lock_label}"
+            push_notify "$notify_tag"
             return 1
         fi
     fi
