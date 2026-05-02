@@ -508,18 +508,17 @@ if [ -f "$DBR_CONF" ]; then
     DBR_HS_TIMEOUT=180  # handshake 超過 180 秒視為對端離線, 直接判 down 不 ping
 
     for DR_IFACE in $DR_IFACES; do
-        if ! ip link show "$DR_IFACE" >/dev/null 2>&1; then
-            continue
-        fi
-
         DR_TABLE=$(awk -v name="pbr_${DR_IFACE}" '$2 == name {print $1}' "$RT_TABLES")
         [ -z "$DR_TABLE" ] && continue
         DR_FWMARK=$(printf "0x%x" "$DR_TABLE")
 
         # --- 判定 up/down ---
-        # 雙訊號: 1) wg handshake age (省離線時的 ping 5 秒等待)  2) ping
+        # 介面消失 (ifdown) / 對端離線 (handshake 過期) / ping 失敗 → 都視為 down
         DBR_RESULT="down"
-        if [ "$DR_IFACE" = "wan" ]; then
+        if ! ip link show "$DR_IFACE" >/dev/null 2>&1; then
+            # 介面不存在, 直接 down (避免 fwmark 命中後流量進空 table)
+            log_event "[PENDING] $DR_IFACE 介面不存在 (ifdown), 視為 down"
+        elif [ "$DR_IFACE" = "wan" ]; then
             # wan 沒 wg handshake, 直接 ping
             DBR_HS_OK=1
         else
@@ -533,13 +532,14 @@ if [ -f "$DBR_CONF" ]; then
             fi
         fi
 
-        if [ "$DBR_HS_OK" = "1" ]; then
+        if [ "${DBR_HS_OK:-0}" = "1" ]; then
             DBR_RX=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I "$DR_IFACE" $TARGET_IP 2>/dev/null \
                 | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
             DBR_RX=${DBR_RX:-0}
             DBR_NEED=$(( PING_COUNT - PING_LOSS_TOLERATE ))
             [ "$DBR_RX" -ge "$DBR_NEED" ] && DBR_RESULT="up"
         fi
+        unset DBR_HS_OK
 
         DBR_PREV=$(db_prev_get "$DR_IFACE")
         DBR_HAS_RULE=0
@@ -588,8 +588,10 @@ if [ -f "$DBR_CONF" ]; then
                         db_prev_set "$DR_IFACE" "down"
                     fi
                 fi
-                # 整點: 真確認 down 才 ifdown/ifup
-                if [ "$CURRENT_HHMM" = "0400" ] && [ "$DR_IFACE" != "wan" ]; then
+                # 整點: 真確認 down 且介面存在才 ifdown/ifup
+                # (介面不存在通常是用戶手動 ifdown, 不該自動 ifup 違反用戶意圖)
+                if [ "$CURRENT_HHMM" = "0400" ] && [ "$DR_IFACE" != "wan" ] \
+                    && ip link show "$DR_IFACE" >/dev/null 2>&1; then
                     log "${DR_IFACE} 整點重啟（背景）..."
                     (ifdown "$DR_IFACE"; sleep 3; ifup "$DR_IFACE") &
                 fi
