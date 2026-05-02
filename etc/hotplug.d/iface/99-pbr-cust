@@ -8,6 +8,10 @@ case "$INTERFACE" in
         if grep -q "route_${INTERFACE}_v4" /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null; then
             logger -t pbr-cust "$INTERFACE up → 執行 dbroute-setup"
             /etc/myscript/dbroute-setup.sh
+            # 順便重新解析所有 dbroute 域名填充 nftset
+            # (避免 client 端 DNS cache + 舊 IP 已從 nftset timeout 造成流量沒走 fwmark)
+            logger -t pbr-cust "$INTERFACE up → 觸發 dbroute-refresh"
+            (sleep 5; /etc/myscript/dbroute-refresh.sh) &
         fi
         ;;
 esac
