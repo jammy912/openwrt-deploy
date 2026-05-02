@@ -99,6 +99,16 @@ up_count_get()     { cat "${STATE_DIR}/${1}.upcount" 2>/dev/null || echo 0; }
 up_count_inc()     { echo $(( $(up_count_get "$1") + 1 )) > "${STATE_DIR}/${1}.upcount"; }
 up_count_reset()   { rm -f "${STATE_DIR}/${1}.upcount"; }
 
+# dbroute (域名路由) 獨立計數器與 prev 紀錄
+db_fail_get()      { cat "${STATE_DIR}/${1}.dbfailcount" 2>/dev/null || echo 0; }
+db_fail_inc()      { echo $(( $(db_fail_get "$1") + 1 )) > "${STATE_DIR}/${1}.dbfailcount"; }
+db_fail_reset()    { rm -f "${STATE_DIR}/${1}.dbfailcount"; }
+db_up_get()        { cat "${STATE_DIR}/${1}.dbupcount" 2>/dev/null || echo 0; }
+db_up_inc()        { echo $(( $(db_up_get "$1") + 1 )) > "${STATE_DIR}/${1}.dbupcount"; }
+db_up_reset()      { rm -f "${STATE_DIR}/${1}.dbupcount"; }
+db_prev_get()      { cat "${STATE_DIR}/${1}.dbprevresult" 2>/dev/null; }
+db_prev_set()      { echo "$2" > "${STATE_DIR}/${1}.dbprevresult"; }
+
 # 將秒數轉成「N 小時」/「N 分鐘」/「N 秒」可讀字串
 fmt_duration() {
     local s="$1"
@@ -494,6 +504,9 @@ if [ -f "$DBR_CONF" ]; then
 
     DR_IFACES=$(sed -n 's/.*#inet#fw4#route_\(.*\)_v4$/\1/p' "$DBR_CONF" | sort -u)
 
+    DBR_NOW=$(date '+%s')
+    DBR_HS_TIMEOUT=180  # handshake 超過 180 秒視為對端離線, 直接判 down 不 ping
+
     for DR_IFACE in $DR_IFACES; do
         if ! ip link show "$DR_IFACE" >/dev/null 2>&1; then
             continue
@@ -503,21 +516,83 @@ if [ -f "$DBR_CONF" ]; then
         [ -z "$DR_TABLE" ] && continue
         DR_FWMARK=$(printf "0x%x" "$DR_TABLE")
 
-        if ping -c $PING_COUNT -W $PING_TIMEOUT -I "$DR_IFACE" $TARGET_IP >/dev/null 2>&1; then
-            if ! ip rule show | grep -q "fwmark $DR_FWMARK"; then
-                /etc/myscript/dbroute-setup.sh
-                log "${DR_IFACE} UP → 恢復 domain routing"
-                push_notify "${DR_IFACE}_DomainRoute_UP"
+        # --- 判定 up/down ---
+        # 雙訊號: 1) wg handshake age (省離線時的 ping 5 秒等待)  2) ping
+        DBR_RESULT="down"
+        if [ "$DR_IFACE" = "wan" ]; then
+            # wan 沒 wg handshake, 直接 ping
+            DBR_HS_OK=1
+        else
+            DBR_LATEST_HS=$(wg show "$DR_IFACE" latest-handshakes 2>/dev/null \
+                | awk '{print $2}' | sort -n | tail -1)
+            if [ -z "$DBR_LATEST_HS" ] || [ "$DBR_LATEST_HS" = "0" ]; then
+                DBR_HS_OK=0
+            else
+                DBR_AGE=$(( DBR_NOW - DBR_LATEST_HS ))
+                [ "$DBR_AGE" -le "$DBR_HS_TIMEOUT" ] && DBR_HS_OK=1 || DBR_HS_OK=0
+            fi
+        fi
+
+        if [ "$DBR_HS_OK" = "1" ]; then
+            DBR_RX=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I "$DR_IFACE" $TARGET_IP 2>/dev/null \
+                | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
+            DBR_RX=${DBR_RX:-0}
+            DBR_NEED=$(( PING_COUNT - PING_LOSS_TOLERATE ))
+            [ "$DBR_RX" -ge "$DBR_NEED" ] && DBR_RESULT="up"
+        fi
+
+        DBR_PREV=$(db_prev_get "$DR_IFACE")
+        DBR_HAS_RULE=0
+        ip rule show | grep -q "fwmark $DR_FWMARK" && DBR_HAS_RULE=1
+
+        if [ "$DBR_RESULT" = "up" ]; then
+            db_fail_reset "$DR_IFACE"
+
+            if [ "$DBR_HAS_RULE" = "1" ]; then
+                db_up_reset "$DR_IFACE"
+            else
+                db_up_inc "$DR_IFACE"
+                _dbu=$(db_up_get "$DR_IFACE")
+                if [ "$_dbu" -lt "$UP_CONFIRM" ]; then
+                    log_event "[PENDING] $DR_IFACE dbroute 冷靜期 ${_dbu}/${UP_CONFIRM}"
+                else
+                    /etc/myscript/dbroute-setup.sh
+                    log "${DR_IFACE} UP → 恢復 domain routing"
+                    log_event "[UP] $DR_IFACE dbroute 冷靜期完成, fwmark $DR_FWMARK 已建"
+                    db_up_reset "$DR_IFACE"
+                    if [ "$DBR_PREV" != "up" ]; then
+                        push_notify "${DR_IFACE}_DomainRoute_UP"
+                        db_prev_set "$DR_IFACE" "up"
+                    fi
+                fi
             fi
         else
-            if ip rule show | grep -q "fwmark $DR_FWMARK"; then
-                ip rule del fwmark "$DR_FWMARK" lookup "$DR_TABLE" 2>/dev/null
-                log "${DR_IFACE} DOWN → 移除 domain routing"
-                push_notify "${DR_IFACE}_DomainRoute_Down"
+            db_up_reset "$DR_IFACE"
+
+            # 達門檻後不再 inc, 避免 23 小時離線無限累計
+            _dbf=$(db_fail_get "$DR_IFACE")
+            if [ "$_dbf" -lt "$DOWN_CONFIRM" ]; then
+                db_fail_inc "$DR_IFACE"
+                _dbf=$(db_fail_get "$DR_IFACE")
             fi
-            if [ "$CURRENT_HHMM" = "0400" ]; then
-                log "${DR_IFACE} 整點重啟（背景）..."
-                (ifdown "$DR_IFACE"; sleep 3; ifup "$DR_IFACE") &
+
+            if [ "$_dbf" -lt "$DOWN_CONFIRM" ]; then
+                log_event "[PENDING] $DR_IFACE dbroute DOWN 確認中 ${_dbf}/${DOWN_CONFIRM}"
+            else
+                if [ "$DBR_HAS_RULE" = "1" ]; then
+                    ip rule del fwmark "$DR_FWMARK" lookup "$DR_TABLE" 2>/dev/null
+                    log "${DR_IFACE} DOWN → 移除 domain routing"
+                    log_event "[DOWN] $DR_IFACE dbroute 連 ${DOWN_CONFIRM} 輪確認失敗, fwmark $DR_FWMARK 已移除"
+                    if [ "$DBR_PREV" != "down" ]; then
+                        push_notify "${DR_IFACE}_DomainRoute_Down"
+                        db_prev_set "$DR_IFACE" "down"
+                    fi
+                fi
+                # 整點: 真確認 down 才 ifdown/ifup
+                if [ "$CURRENT_HHMM" = "0400" ] && [ "$DR_IFACE" != "wan" ]; then
+                    log "${DR_IFACE} 整點重啟（背景）..."
+                    (ifdown "$DR_IFACE"; sleep 3; ifup "$DR_IFACE") &
+                fi
             fi
         fi
     done
