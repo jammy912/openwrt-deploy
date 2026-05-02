@@ -255,7 +255,7 @@ for SECTION in $SECTIONS; do
 
     log " -> 正在檢查介面: $INTERFACE ..."
     _received=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP 2>/dev/null \
-        | awk -F'[ ,]' '/packets received/ {print $4; exit}')
+        | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
     _received=${_received:-0}
     _need=$(( PING_COUNT - PING_LOSS_TOLERATE ))
     if [ "$_received" -ge "$_need" ]; then
