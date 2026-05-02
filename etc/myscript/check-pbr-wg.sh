@@ -550,6 +550,13 @@ if [ -f "$DBR_CONF" ]; then
 
             if [ "$DBR_HAS_RULE" = "1" ]; then
                 db_up_reset "$DR_IFACE"
+                # 保險: dbprev=down 但 fwmark 已被外部 (hotplug ifup /
+                # dbroute-setup.sh / sync-googleconfig) 補回, 推一次 UP 同步狀態
+                if [ "$DBR_PREV" = "down" ]; then
+                    log_event "[REPAIR] $DR_IFACE dbroute fwmark 已由外部重建, 同步狀態"
+                    push_notify "${DR_IFACE}_DomainRoute_UP"
+                    db_prev_set "$DR_IFACE" "up"
+                fi
             else
                 db_up_inc "$DR_IFACE"
                 _dbu=$(db_up_get "$DR_IFACE")
