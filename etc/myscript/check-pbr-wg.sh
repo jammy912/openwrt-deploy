@@ -390,8 +390,12 @@ for SECTION in $SECTIONS; do
         up_count_reset "$INTERFACE"
 
         # 連敗確認: 未達門檻只記 pending, 不動 ip rule、不計入 24h 視窗
-        fail_count_inc "$INTERFACE"
+        # 達門檻後不再 inc, 避免長期離線累積成大數字 (與第三階段 dbroute 一致)
         _fc=$(fail_count_get "$INTERFACE")
+        if [ "$_fc" -lt "$DOWN_CONFIRM" ]; then
+            fail_count_inc "$INTERFACE"
+            _fc=$(fail_count_get "$INTERFACE")
+        fi
         if [ "$_fc" -lt "$DOWN_CONFIRM" ]; then
             log "    DOWN 確認中 ${_fc}/${DOWN_CONFIRM}: 暫不切回 wan"
             log_event "[PENDING] $INTERFACE DOWN 確認中 ${_fc}/${DOWN_CONFIRM} (ping ${_received}/${PING_COUNT})"
