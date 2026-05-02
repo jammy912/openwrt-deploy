@@ -289,6 +289,7 @@ for SECTION in $SECTIONS; do
             _upc=$(up_count_get "$INTERFACE")
             if [ "$_upc" -lt "$UP_CONFIRM" ]; then
                 log "    冷靜期 ${_upc}/${UP_CONFIRM}: 仍走 wan, 暫不加回 ip rule"
+                log_event "[PENDING] $INTERFACE 冷靜期 ${_upc}/${UP_CONFIRM} (ping ${_received}/${PING_COUNT})"
                 # cooldown 期間第二階段不該動 uci, 標 pending
                 echo "pending" > "${STATE_DIR}/${INTERFACE}.pingresult"
             else
@@ -331,6 +332,7 @@ for SECTION in $SECTIONS; do
         _fc=$(fail_count_get "$INTERFACE")
         if [ "$_fc" -lt "$DOWN_CONFIRM" ]; then
             log "    DOWN 確認中 ${_fc}/${DOWN_CONFIRM}: 暫不切回 wan"
+            log_event "[PENDING] $INTERFACE DOWN 確認中 ${_fc}/${DOWN_CONFIRM} (ping ${_received}/${PING_COUNT})"
             echo "pending" > "${STATE_DIR}/${INTERFACE}.pingresult"
             CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
             continue
