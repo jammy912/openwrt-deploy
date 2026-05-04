@@ -233,10 +233,10 @@ fi
 # 如果有任何IP失败，发送通知
 if [ $failed_count -gt 0 ]; then
     if [ $failed_count -eq 3 ]; then
-        # 三个IP都失败 - 先等 30 秒再驗一次，避免瞬斷誤判
-        log "⚠️ 所有 IP 都失败，30 秒后重试确认..."
-        push_notify "⚠️ 网络异常：全部 DNS 失败，30秒后重试"
-        sleep 30
+        # 三个IP都失败 - 先等 5 分鐘再驗一次，容忍短暫斷線
+        log "⚠️ 所有 IP 都失败，5 分钟后重试确认..."
+        push_notify "⚠️ 网络异常：全部 DNS 失败，5 分钟后重试"
+        sleep 300
         if check_ip "$IP1" || check_ip "$IP2" || check_ip "$IP3"; then
             log "✅ 重试后至少一个恢复，取消重启"
             push_notify "⚠️ 网络短暂中断但已恢复，未重启"
