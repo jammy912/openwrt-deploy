@@ -1201,6 +1201,16 @@ if [ "$GW_TYPE" = "主gw" ]; then
         log "fixup: default route ($CUR_DEF_LINE) → via $WAN_GW dev $WAN_DEV"
         FIXUP=1
     fi
+    # 主 gw: 清除副gw 期間 wg ifup 把 endpoint host route 釘到 br-lan 的殘留
+    # Why: 副gw default 走 192.168.1.1 dev br-lan,wg ifup resolve endpoint 時
+    # 會跟著 default 釘 host route。即使 default 後來修回 wan,host route 仍指
+    # br-lan 自迴圈 → 連外 wg handshake 永久失敗、network restart 無效、要 reboot 才修。
+    # 這裡每輪主gw 都掃一次 (不依賴角色切換),確保 wg ifup 之後也能清。
+    ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
+        | while read _stale; do
+            ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
+                && { log "fixup: 清除殘留 endpoint host route: $_stale"; FIXUP=1; }
+        done
     # 主 gw: WG/dnsmasq/adguardhome 必須在跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -eq 0 ]; then
