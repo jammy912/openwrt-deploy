@@ -503,6 +503,15 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
             WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
             WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
             [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ] && ip route replace default via "$WAN_GW" dev "$WAN_DEV" 2>/dev/null
+            # 清除副gw 角色期間 wireguard.sh 把 endpoint host route 釘成 via br-lan 的殘留
+            # Why: 副gw default 走 192.168.1.1 dev br-lan，wg ifup 時 resolve endpoint
+            # 會釘 host route 跟著 default 方向；切回主gw 後 default 改走 wan，
+            # 但 host route 仍指 br-lan 形成自迴圈，wg handshake 永遠失敗、reboot 才修。
+            ip route show | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
+                | while read _stale; do
+                    ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
+                        && log "清除殘留 endpoint host route: $_stale"
+                done
         fi
         log "LAN IP 熱切換: $OLD_IP → ${NEW_IP}/${NEW_MASK:-255.255.255.0}"
     else
