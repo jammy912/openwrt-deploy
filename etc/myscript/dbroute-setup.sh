@@ -40,9 +40,14 @@ for IFACE in $INTERFACES; do
     # 從 rt_tables 找 table ID
     TABLE_ID=$(awk -v name="pbr_${IFACE}" '$2 == name {print $1}' "$RT_TABLES")
 
+    # 沒對應條目就自動分配下一個可用 table id 並寫入
+    # Why: PBR 套件只管 uci 設為 interface 的 wg,wg2 之類「反向接入但 dbroute 要走」
+    # 的介面 PBR 不管,rt_tables 沒它的份,dbroute-setup.sh 過去直接 skip 不建 route。
+    # 由 dbroute 自己補登,Google Sheet 加新介面就能自動生效,不用手動改 rt_tables。
     if [ -z "$TABLE_ID" ]; then
-        logger -t dbroute "WARNING: No rt_table entry for pbr_${IFACE}, skipping"
-        continue
+        TABLE_ID=$(($(awk '/^[0-9]+/{print $1}' "$RT_TABLES" | sort -n | tail -1) + 1))
+        echo "$TABLE_ID pbr_${IFACE}" >> "$RT_TABLES"
+        logger -t dbroute "Auto-registered pbr_${IFACE} → table $TABLE_ID"
     fi
 
     # fwmark = table ID 的十六進位
