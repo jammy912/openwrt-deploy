@@ -46,6 +46,8 @@ for IFACE in $INTERFACES; do
     # 由 dbroute 自己補登,Google Sheet 加新介面就能自動生效,不用手動改 rt_tables。
     if [ -z "$TABLE_ID" ]; then
         TABLE_ID=$(($(awk '/^[0-9]+/{print $1}' "$RT_TABLES" | sort -n | tail -1) + 1))
+        # DBR 從 300 起,跟 PBR 套件 256-261 區隔
+        [ "$TABLE_ID" -lt 300 ] && TABLE_ID=300
         echo "$TABLE_ID pbr_${IFACE}" >> "$RT_TABLES"
         logger -t dbroute "Auto-registered pbr_${IFACE} → table $TABLE_ID"
     fi
