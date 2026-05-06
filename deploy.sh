@@ -1034,6 +1034,16 @@ case "$BOARD_NAME" in
         ;;
 esac
 
+# zram 場景下提高 swappiness,讓 kernel 更積極使用壓縮 swap
+if ! grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null; then
+    echo 'vm.swappiness=200' >> /etc/sysctl.conf
+    echo "  ✅ vm.swappiness=200 已寫入 /etc/sysctl.conf"
+else
+    sed -i 's/^vm.swappiness=.*/vm.swappiness=200/' /etc/sysctl.conf
+    echo "  ✅ vm.swappiness 已更新為 200"
+fi
+sysctl -w vm.swappiness=200 >/dev/null 2>&1
+
 # NTP 時間同步伺服器
 uci set system.ntp.enabled='1'
 uci delete system.ntp.server 2>/dev/null
