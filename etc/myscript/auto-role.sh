@@ -1039,6 +1039,11 @@ if [ -n "$(uci -q get network.wan6)" ]; then
         else
             uci -q delete network.wan6.disabled
             uci commit network
+            # 啟用前先清舊 odhcp6c 殘留,避免多進程搶 ubus 造成
+            # netifd "Invalid argument" retry loop (每秒重啟 wan6 數十次)
+            ifdown wan6 2>/dev/null
+            killall -q odhcp6c 2>/dev/null
+            sleep 1
             ifup wan6 2>/dev/null
             log "wan6: enabled (主gw拉IPv6上游)"
         fi
@@ -1223,6 +1228,14 @@ if [ "$GW_TYPE" = "主gw" ]; then
     fi
     if ! pgrep -x dnsmasq >/dev/null 2>&1; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
+    fi
+    # odhcp6c 多進程殘留 → netifd 對 wan6 報 "ubus error: Invalid argument"
+    # 並每 ~10 秒 retry,長時間後 logread 被沖滿、load 上升。發現多於 1 個就全殺重啟。
+    _ODHCP_N=$(pgrep -x odhcp6c | wc -l)
+    if [ "$_ODHCP_N" -gt 1 ]; then
+        killall -q odhcp6c 2>/dev/null; sleep 1
+        ifdown wan6 2>/dev/null; sleep 1; ifup wan6 2>/dev/null
+        log "fixup: odhcp6c 殘留 $_ODHCP_N 個,已清乾淨重啟 wan6"; FIXUP=1
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
 else
