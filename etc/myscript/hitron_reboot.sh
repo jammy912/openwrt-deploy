@@ -105,29 +105,27 @@ fi
 
 # =====================================================
 # 4. 送 reboot
-#   Backbone.js model.save("reboot","1") → POST JSON {"reboot":"1"} 到 /goform/Reboot
-#   reboot 成功後分享器會立刻斷,curl 通常回 000 (連線中斷)
+#   Hitron 韌體用早期 Backbone emulateJSON: JSON 包進 form 欄位 "model"
+#   單純 POST 純 JSON body 會被 200 回但不觸發,必須這格式
+#   實測 model={"reboot":"1"} → HTTP 200 後 ~3 秒分享器重啟
 # =====================================================
 log "🔁 送 reboot 指令到 $REBOOT_URL ..."
 HTTP_CODE=$(curl -s -b "$HCK" -o /tmp/.hitron_reboot_resp.$$ \
     -w "%{http_code}" \
     -X POST "$HITRON$REBOOT_URL" \
-    -H "Content-Type: application/json" \
-    --data-binary '{"reboot":"1"}' \
-    --connect-timeout 5 --max-time 8 2>/dev/null)
+    --data-urlencode 'model={"reboot":"1"}' \
+    --connect-timeout 5 --max-time 10 2>/dev/null)
 RESP=$(head -c 300 /tmp/.hitron_reboot_resp.$$ 2>/dev/null | tr -d '\r\n')
 rm -f /tmp/.hitron_reboot_resp.$$
 
 log "  HTTP=$HTTP_CODE RESP=${RESP:-<empty>}"
 
-# 成功判定:
-#   000 = 連線中斷(分享器真的開始重開,正常結果)
-#   HTTP 2xx 且 body 不含 "not defined" / "Access Error" / "Error" 等錯誤字串
+# 成功判定: HTTP 200/000 且 body 不含錯誤字串
 _ok=0
 if [ "$HTTP_CODE" = "000" ]; then
     _ok=1
 elif echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
-    if echo "$RESP" | grep -qiE 'not defined|access error|document error'; then
+    if echo "$RESP" | grep -qiE 'not defined|access error|document error|bad request'; then
         _ok=0
     else
         _ok=1
