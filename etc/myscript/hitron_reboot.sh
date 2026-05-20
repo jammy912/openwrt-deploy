@@ -29,8 +29,10 @@ HUSER="admin"
 HPASS="password"
 HCK="/tmp/.hitron_reboot_ck.$$"
 
-# Hitron CODA reboot endpoint 常見有兩個,依序嘗試
-REBOOT_ENDPOINTS="/goform/sysreboot /goform/Devices_Restart"
+# Hitron CODA reboot endpoint: /goform/Reboot
+# 由 js/admin_devreboot.js 反查得到 (Backbone model.urlRoot="goform/Reboot")
+# 送 JSON body {"reboot":"1"}
+REBOOT_URL="/goform/Reboot"
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -102,52 +104,46 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # =====================================================
-# 4. 送 reboot (依序嘗試多個 endpoint)
-#   reboot 後分享器會立刻斷,curl 應該會 timeout 或回 000 / 連線中斷
-#   收到 success 或連線中斷都視為成功
+# 4. 送 reboot
+#   Backbone.js model.save("reboot","1") → POST JSON {"reboot":"1"} 到 /goform/Reboot
+#   reboot 成功後分享器會立刻斷,curl 通常回 000 (連線中斷)
 # =====================================================
-log "🔁 送 reboot 指令..."
-_done=0
-for _ep in $REBOOT_ENDPOINTS; do
-    log "  嘗試 $_ep"
-    HTTP_CODE=$(curl -s -b "$HCK" -o /tmp/.hitron_reboot_resp.$$ \
-        -w "%{http_code}" \
-        -X POST "$HITRON$_ep" -d "model=4" \
-        --connect-timeout 5 --max-time 8 2>/dev/null)
-    RESP=$(cat /tmp/.hitron_reboot_resp.$$ 2>/dev/null)
-    rm -f /tmp/.hitron_reboot_resp.$$
+log "🔁 送 reboot 指令到 $REBOOT_URL ..."
+HTTP_CODE=$(curl -s -b "$HCK" -o /tmp/.hitron_reboot_resp.$$ \
+    -w "%{http_code}" \
+    -X POST "$HITRON$REBOOT_URL" \
+    -H "Content-Type: application/json" \
+    --data-binary '{"reboot":"1"}' \
+    --connect-timeout 5 --max-time 8 2>/dev/null)
+RESP=$(head -c 300 /tmp/.hitron_reboot_resp.$$ 2>/dev/null | tr -d '\r\n')
+rm -f /tmp/.hitron_reboot_resp.$$
 
-    log "    HTTP=$HTTP_CODE RESP=${RESP:-<empty>}"
+log "  HTTP=$HTTP_CODE RESP=${RESP:-<empty>}"
 
-    # 000 = 連線中斷(分享器真的開始重開,正常結果)
-    # 200 + "success" 也是成功
-    if [ "$HTTP_CODE" = "000" ] || echo "$RESP" | grep -qi 'success'; then
-        log "  ✅ reboot 指令已下達 ($_ep)"
-        _done=1
-        break
+# 成功判定:
+#   000 = 連線中斷(分享器真的開始重開,正常結果)
+#   HTTP 2xx 且 body 不含 "not defined" / "Access Error" / "Error" 等錯誤字串
+_ok=0
+if [ "$HTTP_CODE" = "000" ]; then
+    _ok=1
+elif echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
+    if echo "$RESP" | grep -qiE 'not defined|access error|document error'; then
+        _ok=0
+    else
+        _ok=1
     fi
+fi
 
-    # 404 之類就換下一個 endpoint
-    if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "400" ]; then
-        continue
-    fi
-
-    # 其他狀態(200 但不是 success)也視為已下達,跳出
-    if [ "$HTTP_CODE" = "200" ]; then
-        log "  ✅ HTTP 200 已收到 ($_ep),視為已下達"
-        _done=1
-        break
-    fi
-done
-
-if [ "$_done" != "1" ]; then
-    log "❌ 所有 reboot endpoint 都失敗"
+if [ "$_ok" != "1" ]; then
+    log "❌ reboot 失敗 (HTTP=$HTTP_CODE)"
     curl -s -b "$HCK" -X POST "$HITRON/goform/logout" \
         -d "data=byebye" -o /dev/null --max-time 5 2>/dev/null
-    push_notify "HitronReboot_Failed | endpoints exhausted"
+    push_notify "HitronReboot_Failed | HTTP=$HTTP_CODE"
     cleanup
     exit 1
 fi
+
+log "  ✅ reboot 指令已下達"
 
 # =====================================================
 # 5. 通知 + 收尾
