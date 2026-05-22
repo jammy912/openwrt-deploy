@@ -276,6 +276,25 @@ custrule_route_repair() {
     done < "$cache"
 }
 
+# CustRule per-IP ip rule 自我修復
+# pbr 套件 reload / hotplug 等外部事件可能把 200: 規則整批清掉，
+# 或 DOWN→UP transition 期間 cr_done 旗標已清但 custrule_add 漏跑，
+# 造成 src-based 規則永久消失。每次 UP 時比對 cache 直接補上。
+custrule_rule_repair() {
+    local iface="$1"
+    local cache="${STATE_DIR}/${iface}.custrules"
+    [ ! -f "$cache" ] && return
+
+    while read _src _tbl; do
+        [ -z "$_src" ] || [ -z "$_tbl" ] && continue
+        if ! ip rule list | grep -q "^200:.*from ${_src} lookup ${_tbl}\$"; then
+            ip rule add prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
+            log_event "[REPAIR] $iface 缺 CustRule，補 from $_src lookup $_tbl"
+            log "    修復: ip rule add prio 200 from $_src lookup $_tbl"
+        fi
+    done < "$cache"
+}
+
 log "開始檢查 PBR WireGuard 介面連線狀態..."
 
 SECTIONS=$(uci show pbr | grep ".dest_addr='wg" | cut -d'.' -f2)
@@ -335,6 +354,8 @@ for SECTION in $SECTIONS; do
 
         # 自我修復：確保 CustRule table 都有 default route（防 pbr reload 把 route 清掉）
         custrule_route_repair "$INTERFACE"
+        # 自我修復：確保 CustRule ip rule 都在（防 pbr reload / DOWN→UP 漏補造成永久消失）
+        custrule_rule_repair "$INTERFACE"
 
         if rule_exists "$INTERFACE"; then
             # 已在 wg, 不需冷靜期
