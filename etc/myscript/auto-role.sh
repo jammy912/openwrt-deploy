@@ -675,12 +675,12 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
             wifi reload
             log "IOT WiFi ($IOT_IF+$_IOT_RADIO) uci 修復→啟用"
         else
-            # uci 正確但 runtime 可能漂移 (radio0 disabled=true), 用 ubus 對齊
-            _runtime_dis=$(ubus call network.wireless status 2>/dev/null \
-                | grep -A3 "\"${_IOT_RADIO}\"" | grep -m1 disabled | grep -c true)
-            if [ "${_runtime_dis:-0}" = "1" ]; then
+            # uci 正確但 runtime 可能漂移: radio 未 up (wifi down / reload 失敗)
+            _runtime_up=$(ubus call network.wireless status 2>/dev/null \
+                | jsonfilter -e "@.${_IOT_RADIO}.up")
+            if [ "$_runtime_up" != "true" ]; then
                 wifi up ${_IOT_RADIO}
-                log "IOT WiFi (${_IOT_RADIO}) runtime 漂移修復 (wifi up)"
+                log "IOT WiFi (${_IOT_RADIO}) runtime 漂移修復 (wifi up): radio up=$_runtime_up"
             fi
         fi
     fi
