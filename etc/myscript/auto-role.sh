@@ -650,22 +650,39 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         svc_enable pbr
         svc_enable qosify
         NEED_WG_START=1
-        # 開啟 IOT WiFi
-        IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-        if [ -n "$IOT_IF" ]; then
-            CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
-            if [ "$CUR_IOT_DIS" = "1" ]; then
-                uci delete wireless.${IOT_IF}.disabled
-                _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
-                [ -n "$_IOT_RADIO" ] && uci delete wireless.${_IOT_RADIO}.disabled 2>/dev/null
-                uci commit wireless
-                wifi reload
-                log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已啟用 (主 gateway)"
-            fi
-        fi
         [ "$PROMOTED" = "1" ] && log "服務: 全開 (副gw→主gw 升級)"
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
+    fi
+    # IOT WiFi 自我修復: 主 gw 每輪無條件檢查 uci 與 runtime 狀態
+    # 防止 wifi reload 失敗 / 狀態漂移後永久卡 disabled
+    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+    if [ -n "$IOT_IF" ]; then
+        _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
+        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
+        CUR_RADIO_DIS=$(uci get wireless.${_IOT_RADIO}.disabled 2>/dev/null)
+        _need_commit=0
+        if [ "$CUR_IOT_DIS" = "1" ]; then
+            uci delete wireless.${IOT_IF}.disabled
+            _need_commit=1
+        fi
+        if [ -n "$_IOT_RADIO" ] && [ "$CUR_RADIO_DIS" = "1" ]; then
+            uci delete wireless.${_IOT_RADIO}.disabled
+            _need_commit=1
+        fi
+        if [ "$_need_commit" = "1" ]; then
+            uci commit wireless
+            wifi reload
+            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) uci 修復→啟用"
+        else
+            # uci 正確但 runtime 可能漂移 (radio0 disabled=true), 用 ubus 對齊
+            _runtime_dis=$(ubus call network.wireless status 2>/dev/null \
+                | grep -A3 "\"${_IOT_RADIO}\"" | grep -m1 disabled | grep -c true)
+            if [ "${_runtime_dis:-0}" = "1" ]; then
+                wifi up ${_IOT_RADIO}
+                log "IOT WiFi (${_IOT_RADIO}) runtime 漂移修復 (wifi up)"
+            fi
+        fi
     fi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
