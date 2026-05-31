@@ -62,6 +62,48 @@ radio_has_other_active_iface() {
     return $((1 - _has))
 }
 
+# 依 .mesh_runiotwifi 決定本機 IOT WiFi 開/關 (脫離角色綁定, 預設 N)
+# Y=開 (確保 iface+radio enabled 且 runtime up), N/空=關
+# 與 wifi-signal.sh 同讀 .mesh_runiotwifi 作為唯一真相來源, 避免兩者對打
+apply_iot_wifi() {
+    local _run=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
+    [ -z "$_run" ] && _run=N
+    local IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
+    [ -z "$IOT_IF" ] && return
+    local _radio=$(uci -q get wireless.${IOT_IF}.device)
+
+    if [ "$_run" = "Y" ]; then
+        # 開: 清 disabled (iface+radio), 必要時 commit+reload, 否則檢查 runtime
+        local _need=0
+        [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${IOT_IF}.disabled; _need=1; }
+        [ -n "$_radio" ] && [ "$(uci get wireless.${_radio}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_radio}.disabled; _need=1; }
+        if [ "$_need" = "1" ]; then
+            uci commit wireless; wifi reload
+            log "IOT WiFi ($IOT_IF+$_radio) 啟用 (runiotwifi=Y)"
+        else
+            local _up=$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.${_radio}.up")
+            if [ "$_up" != "true" ]; then
+                wifi up ${_radio}
+                log "IOT WiFi (${_radio}) runtime 修復 (wifi up): up=$_up"
+            fi
+        fi
+    else
+        # 關: 停 IOT iface; radio 無其他啟用 SSID 才一起停
+        if [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
+            uci set wireless.${IOT_IF}.disabled='1'
+            if [ -n "$_radio" ]; then
+                if radio_has_other_active_iface "$_radio" "$IOT_IF"; then
+                    log "[$_radio] 尚有其他啟用 SSID，保留 radio"
+                else
+                    uci set wireless.${_radio}.disabled='1'
+                fi
+            fi
+            uci commit wireless; wifi reload
+            log "IOT WiFi ($IOT_IF+$_radio) 停用 (runiotwifi=N)"
+        fi
+    fi
+}
+
 # =====================
 # 一次性 fw3→fw4 遷移
 # =====================
@@ -654,36 +696,8 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
     fi
-    # IOT WiFi 自我修復: 主 gw 每輪無條件檢查 uci 與 runtime 狀態
-    # 防止 wifi reload 失敗 / 狀態漂移後永久卡 disabled
-    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-    if [ -n "$IOT_IF" ]; then
-        _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
-        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
-        CUR_RADIO_DIS=$(uci get wireless.${_IOT_RADIO}.disabled 2>/dev/null)
-        _need_commit=0
-        if [ "$CUR_IOT_DIS" = "1" ]; then
-            uci delete wireless.${IOT_IF}.disabled
-            _need_commit=1
-        fi
-        if [ -n "$_IOT_RADIO" ] && [ "$CUR_RADIO_DIS" = "1" ]; then
-            uci delete wireless.${_IOT_RADIO}.disabled
-            _need_commit=1
-        fi
-        if [ "$_need_commit" = "1" ]; then
-            uci commit wireless
-            wifi reload
-            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) uci 修復→啟用"
-        else
-            # uci 正確但 runtime 可能漂移: radio 未 up (wifi down / reload 失敗)
-            _runtime_up=$(ubus call network.wireless status 2>/dev/null \
-                | jsonfilter -e "@.${_IOT_RADIO}.up")
-            if [ "$_runtime_up" != "true" ]; then
-                wifi up ${_IOT_RADIO}
-                log "IOT WiFi (${_IOT_RADIO}) runtime 漂移修復 (wifi up): radio up=$_runtime_up"
-            fi
-        fi
-    fi
+    # IOT WiFi: 每輪依 .mesh_runiotwifi 自我修復 (脫離角色綁定)
+    apply_iot_wifi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi (AGH 由 check-adguard 管)
@@ -693,25 +707,8 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     wg_stop
-    # 停 IOT WiFi (只有主 gw 需要)
-    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-    if [ -n "$IOT_IF" ]; then
-        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
-        if [ "$CUR_IOT_DIS" != "1" ]; then
-            uci set wireless.${IOT_IF}.disabled='1'
-            _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
-            if [ -n "$_IOT_RADIO" ]; then
-                if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
-                    log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
-                else
-                    uci set wireless.${_IOT_RADIO}.disabled='1'
-                fi
-            fi
-            uci commit wireless
-            wifi reload
-            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已停用 (非主 gateway)"
-        fi
-    fi
+    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
+    apply_iot_wifi
     dbg "5.非主gateway: 停全部服務+IOT"
 else
     # client: 停全部服務 + IOT WiFi (AGH 與 dnsmasq upstream 由 check-adguard 管)
@@ -720,24 +717,8 @@ else
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     wg_stop
-    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-    if [ -n "$IOT_IF" ]; then
-        CUR_IOT_DIS=$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)
-        if [ "$CUR_IOT_DIS" != "1" ]; then
-            uci set wireless.${IOT_IF}.disabled='1'
-            _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
-            if [ -n "$_IOT_RADIO" ]; then
-                if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
-                    log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
-                else
-                    uci set wireless.${_IOT_RADIO}.disabled='1'
-                fi
-            fi
-            uci commit wireless
-            wifi reload
-            log "IOT WiFi ($IOT_IF+$_IOT_RADIO) 已停用 (client)"
-        fi
-    fi
+    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
+    apply_iot_wifi
     dbg "5.client: 停全部服務+IOT"
 fi
 
@@ -1260,21 +1241,8 @@ else
         FIXUP=1
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
-    IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-    if [ -n "$IOT_IF" ] && [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
-        uci set wireless.${IOT_IF}.disabled='1'
-        _IOT_RADIO=$(uci -q get wireless.${IOT_IF}.device)
-        if [ -n "$_IOT_RADIO" ]; then
-            if radio_has_other_active_iface "$_IOT_RADIO" "$IOT_IF"; then
-                log "[$_IOT_RADIO] 尚有其他啟用 SSID，保留 radio"
-            else
-                uci set wireless.${_IOT_RADIO}.disabled='1'
-            fi
-        fi
-        uci commit wireless
-        wifi reload
-        log "fixup: IOT WiFi ($IOT_IF+$_IOT_RADIO) 不應開啟，已停用"; FIXUP=1
-    fi
+    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定, 函式自行 log)
+    apply_iot_wifi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"
 

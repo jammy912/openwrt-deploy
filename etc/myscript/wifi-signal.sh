@@ -186,9 +186,12 @@ FIRST_RUN=0
 # =====================
 # Enable / Disable 介面
 # =====================
-# 非主gw 不啟用 IOT (2G)，避免 wifi-signal 把 auto-role 停用的 IOT 開回來
-GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
-[ "$GW_TYPE" != "主gw" ] && ENABLE_2G=0
+# IOT(2.4G) 開關以 .mesh_runiotwifi 為準 (與 auto-role apply_iot_wifi 同一真相來源)
+# 每次無條件依 flag 覆寫 ENABLE_2G, 不再依賴 GW_TYPE 或 cron 參數, 避免兩者對打
+# flag 預設 N; 副gw/client 只要 flag=Y 也能開 IOT
+RUN_IOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
+[ -z "$RUN_IOTWIFI" ] && RUN_IOTWIFI=N
+[ "$RUN_IOTWIFI" = "Y" ] && ENABLE_2G=1 || ENABLE_2G=0
 
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)

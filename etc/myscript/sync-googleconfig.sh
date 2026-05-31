@@ -655,7 +655,7 @@ main() {
         eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
-                h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
+                h=""; p=""; wl=""; wr=""; gw=""; ra=""; rio=""; d1=""; d2=""; d3=""; d4=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -663,6 +663,7 @@ main() {
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                     if ($i ~ /option runagh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ra=a[n] }
+                    if ($i ~ /option runiotwifi/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); rio=a[n] }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -672,7 +673,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_RUNIOTWIFI=" rio " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -729,6 +730,17 @@ main() {
         if [ "$NEW_RUNAGH" != "$CUR_RUNAGH" ]; then
             echo "$NEW_RUNAGH" > /etc/myscript/.mesh_runagh
             log "🔧 mesh_runagh: $CUR_RUNAGH → $NEW_RUNAGH (hostname=$MY_HOSTNAME)"
+        fi
+        # 更新 .mesh_runiotwifi (TRUE/FALSE → Y/N, 預設 N)
+        case "$NEW_RUNIOTWIFI" in
+            TRUE|true|1|Y|y) NEW_RUNIOTWIFI=Y ;;
+            FALSE|false|0|N|n) NEW_RUNIOTWIFI=N ;;
+            "") NEW_RUNIOTWIFI=N ;;
+        esac
+        CUR_RUNIOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
+        if [ "$NEW_RUNIOTWIFI" != "$CUR_RUNIOTWIFI" ]; then
+            echo "$NEW_RUNIOTWIFI" > /etc/myscript/.mesh_runiotwifi
+            log "🔧 mesh_runiotwifi: $CUR_RUNIOTWIFI → $NEW_RUNIOTWIFI (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_upstream_dns (一行一組 DNS，空值略過)
         NEW_DNS=""
