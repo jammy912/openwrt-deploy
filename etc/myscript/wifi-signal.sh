@@ -186,12 +186,15 @@ FIRST_RUN=0
 # =====================
 # Enable / Disable 介面
 # =====================
-# IOT(2.4G) 開關以 .mesh_runiotwifi 為準 (與 auto-role apply_iot_wifi 同一真相來源)
-# 每次無條件依 flag 覆寫 ENABLE_2G, 不再依賴 GW_TYPE 或 cron 參數, 避免兩者對打
-# flag 預設 N; 副gw/client 只要 flag=Y 也能開 IOT
+# IOT(2.4G): cron 參數 (此處 ENABLE_2G 已是 crontab 帶入值, 預設 1) 為真相來源。
+# 若與 .mesh_runiotwifi 不同, 用 cron 參數反寫 flag 檔 → 下次 auto-role 讀到一致, 兩者不對打。
+# (Google Sheet 同步時也會寫一次 .mesh_runiotwifi, 但每分鐘 cron 參數會覆寫, 後者贏)
+_WANT_IOT=N; [ "$ENABLE_2G" = "1" ] && _WANT_IOT=Y
 RUN_IOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
-[ -z "$RUN_IOTWIFI" ] && RUN_IOTWIFI=N
-[ "$RUN_IOTWIFI" = "Y" ] && ENABLE_2G=1 || ENABLE_2G=0
+if [ "$_WANT_IOT" != "$RUN_IOTWIFI" ]; then
+    echo "$_WANT_IOT" > /etc/myscript/.mesh_runiotwifi
+    log "🔧 mesh_runiotwifi: $RUN_IOTWIFI → $_WANT_IOT (cron 參數覆寫)"
+fi
 
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)
