@@ -1,12 +1,14 @@
 #!/bin/sh
 # blockdev.sh - 依 DHCP static host 名字封鎖/解封裝置上網
 # 用法:
-#   blockdev.sh <name> add|del|status
+#   blockdev.sh <name>[,<name>...] add|del|status
 # 範例:
-#   blockdev.sh my-phone add      # 封鎖 my-phone
-#   blockdev.sh my-phone del      # 解封 my-phone
-#   blockdev.sh my-phone status   # 查目前是否封鎖
-#   blockdev.sh "" status         # 列出 set 內所有被封鎖的 IP
+#   blockdev.sh TV_Apple add                    # 封鎖單一裝置
+#   blockdev.sh TV_Apple,TV_Android add         # 一次封鎖多台 (逗號分隔)
+#   blockdev.sh "TV_Apple TV_Android" add       # 多台也可用空白分隔 (需引號)
+#   blockdev.sh TV_Apple,TV_Android del         # 一次解封多台
+#   blockdev.sh TV_Apple status                 # 查狀態
+#   blockdev.sh "" status                       # 列出 set 內所有被封鎖的 IP
 #
 # 原理:
 #   從 /etc/config/dhcp static host 依 name 查出固定 IP,
@@ -18,36 +20,62 @@
 #   2. add 前先 delete 同 IP,避免 element 已存在報 "File exists"。
 #   3. del 時吞掉 "No such file" 之類錯誤,重複 del 安全。
 #   4. firewall restart 會清掉整個 fw4 table,故每次執行都重新確保 set+rule 存在。
+#   5. 多裝置: 任一台查無 IP 會警告但不中斷其他台; 全部查無才回 exit 1。
 
 . /lib/functions.sh
 
-TARGET="$1"
-ACTION="$2"
 LOG_TAG="blockdev"
-
 TABLE="inet fw4"
 SET_NAME="blocked"
 
+# 最後一個參數為動作, 其餘 (可多個, 空白分隔) 為裝置名稱
+ACTION=$(eval echo "\${$#}")
+TARGETS=""
+i=1
+while [ $i -lt $# ]; do
+    TARGETS="$TARGETS $(eval echo "\${$i}")"
+    i=$((i + 1))
+done
+# 正規化: 逗號→空白 (支援 TV_Apple,TV_Android), 去除多餘/前後空白;
+# 全空 (如 blockdev.sh "" status) → 真空字串
+TARGETS=$(echo "$TARGETS" | tr ',' ' ')
+TARGETS=$(echo $TARGETS)
+
 usage() {
-    echo "用法: $0 <name> add|del|status"
-    echo "      $0 \"\" status   # 列出所有被封鎖 IP"
+    echo "用法: $0 <name>[,<name>...] add|del|status"
+    echo "      $0 TV_Apple,TV_Android add   # 一次多台 (逗號分隔)"
+    echo "      $0 \"\" status                # 列出所有被封鎖 IP"
     exit 1
 }
 
 [ -z "$ACTION" ] && usage
 
-# 依 name 從 uci dhcp 查固定 IP (status 且 name 為空時可略過)
-IP=""
-find_ip() {
-    local _name _ip
-    config_get _name "$1" name
-    config_get _ip  "$1" ip
-    [ "$_name" = "$TARGET" ] && [ -n "$_ip" ] && IP="$_ip"
+# 依名字清單從 uci dhcp 查固定 IP, 結果存 RESULTS ("name ip" 每行一筆)
+# 查無 IP 的名字存 MISSING
+RESULTS=""
+MISSING=""
+collect_ips() {
+    local want="$1"     # 要找的名字 (可多個, 空白分隔)
+    [ -z "$want" ] && return
+    local found name ip n
+    for n in $want; do
+        found=""
+        find_one() {
+            local _name _ip
+            config_get _name "$1" name
+            config_get _ip  "$1" ip
+            [ "$_name" = "$n" ] && [ -n "$_ip" ] && found="$_ip"
+        }
+        config_load dhcp
+        config_foreach find_one host
+        if [ -n "$found" ]; then
+            RESULTS="$RESULTS
+$n $found"
+        else
+            MISSING="$MISSING $n"
+        fi
+    done
 }
-if [ -n "$TARGET" ]; then
-    config_load dhcp
-    config_foreach find_ip host
-fi
 
 # 確保 set 與 drop rule 存在 (冪等; 已存在不報錯)
 ensure_infra() {
@@ -64,38 +92,54 @@ ensure_infra() {
 
 case "$ACTION" in
     add)
-        [ -z "$IP" ] && { echo "找不到 DHCP static host: '$TARGET'"; exit 1; }
         ensure_infra
-        # 先 delete 再 add → 冪等,重複 add 不會因 element 已存在而失敗
-        nft delete element $TABLE $SET_NAME "{ $IP }" 2>/dev/null
-        if nft add element $TABLE $SET_NAME "{ $IP }" 2>/dev/null; then
-            logger -t $LOG_TAG "BLOCK $TARGET ($IP)"
-            echo "已封鎖 $TARGET ($IP)"
-        else
-            echo "封鎖失敗 $TARGET ($IP)"
-            exit 1
-        fi
+        collect_ips "$TARGETS"
+        [ -z "$RESULTS" ] && { echo "找不到任何 DHCP static host:$TARGETS"; exit 1; }
+        echo "$RESULTS" | while read -r name ip; do
+            [ -z "$ip" ] && continue
+            # 先 delete 再 add → 冪等,重複 add 不會因 element 已存在而失敗
+            nft delete element $TABLE $SET_NAME "{ $ip }" 2>/dev/null
+            if nft add element $TABLE $SET_NAME "{ $ip }" 2>/dev/null; then
+                logger -t $LOG_TAG "BLOCK $name ($ip)"
+                echo "已封鎖 $name ($ip)"
+            else
+                echo "封鎖失敗 $name ($ip)"
+            fi
+        done
+        [ -n "$MISSING" ] && echo "警告: 查無 IP, 略過:$MISSING"
         ;;
     del)
-        [ -z "$IP" ] && { echo "找不到 DHCP static host: '$TARGET'"; exit 1; }
         ensure_infra
-        # 吞掉 element 不存在的錯誤 → 重複 del 安全
-        nft delete element $TABLE $SET_NAME "{ $IP }" 2>/dev/null
-        logger -t $LOG_TAG "UNBLOCK $TARGET ($IP)"
-        echo "已解封 $TARGET ($IP)"
+        collect_ips "$TARGETS"
+        [ -z "$RESULTS" ] && { echo "找不到任何 DHCP static host:$TARGETS"; exit 1; }
+        echo "$RESULTS" | while read -r name ip; do
+            [ -z "$ip" ] && continue
+            # 吞掉 element 不存在的錯誤 → 重複 del 安全
+            nft delete element $TABLE $SET_NAME "{ $ip }" 2>/dev/null
+            logger -t $LOG_TAG "UNBLOCK $name ($ip)"
+            echo "已解封 $name ($ip)"
+        done
+        [ -n "$MISSING" ] && echo "警告: 查無 IP, 略過:$MISSING"
         ;;
     status)
         ensure_infra
-        if [ -n "$TARGET" ]; then
-            [ -z "$IP" ] && { echo "找不到 DHCP static host: '$TARGET'"; exit 1; }
-            if nft get element $TABLE $SET_NAME "{ $IP }" >/dev/null 2>&1; then
-                echo "$TARGET ($IP): 封鎖中"
-            else
-                echo "$TARGET ($IP): 未封鎖"
-            fi
+        if [ -n "$TARGETS" ]; then
+            collect_ips "$TARGETS"
+            [ -z "$RESULTS" ] && { echo "找不到任何 DHCP static host:$TARGETS"; exit 1; }
+            echo "$RESULTS" | while read -r name ip; do
+                [ -z "$ip" ] && continue
+                if nft get element $TABLE $SET_NAME "{ $ip }" >/dev/null 2>&1; then
+                    echo "$name ($ip): 封鎖中"
+                else
+                    echo "$name ($ip): 未封鎖"
+                fi
+            done
+            [ -n "$MISSING" ] && echo "警告: 查無 IP, 略過:$MISSING"
         else
-            echo "目前 $SET_NAME set 內的 IP:"
-            nft list set $TABLE $SET_NAME 2>/dev/null | grep -oE '([0-9]+\.){3}[0-9]+' | sed 's/^/  /'
+            echo "目前 $SET_NAME set 內的 IP (相鄰 IP 會被 auto-merge 成 CIDR/範圍):"
+            nft list set $TABLE $SET_NAME 2>/dev/null \
+                | sed -n 's/.*elements = {\(.*\)}.*/\1/p' \
+                | tr ',' '\n' | sed 's/^[[:space:]]*/  /'
         fi
         ;;
     *)
