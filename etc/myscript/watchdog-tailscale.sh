@@ -18,6 +18,7 @@ PROBE_HOST="api.ipify.org"               # 查對外出口 IP 的服務
 ALLOW_LAN="true"
 ACCEPT_DNS="false"
 LOCKFILE="/tmp/watchdog-tailscale.lock"
+PUSH_NAMES="${PUSH_NAMES:-admin}"        # 推播對象(對應 .secrets/pushkey.<name>)
 # ----------------------------------------------------------------
 
 # 防重入:拿不到鎖就直接退出(上一輪還在跑)
@@ -25,6 +26,17 @@ exec 9>"$LOCKFILE"
 flock -n 9 || exit 0
 
 log() { logger -t watchdog-tailscale "$1"; }
+
+# 推播模組(PushDeer/LINE 即時 + 離線佇列)。載入失敗不影響主流程。
+[ -f /etc/myscript/push-notify.inc ] && . /etc/myscript/push-notify.inc
+# 即時推播;無模組時 no-op
+notify() { command -v push_notify >/dev/null 2>&1 && push_notify "$1"; }
+# 救不回專用:即時試送 + 進離線佇列(網路斷也能開機後補送)
+notify_fail() {
+  notify "$1"
+  command -v queue_push >/dev/null 2>&1 && \
+    queue_push "tailscale-exitnode-fail" "$1" "" >/dev/null 2>&1
+}
 
 # 本機 tailscale IPv4(動態)
 ts_ip() { tailscale ip -4 2>/dev/null | head -1; }
@@ -119,6 +131,7 @@ apply_exit
 sleep 4
 if check_egress; then
   log "RECOVERED: 重設 exit node 後出口恢復 ($OUT)"
+  notify "✅ Tailscale exit node 自癒成功(重設 exit node),出口已恢復走 $OUT"
   exit 0
 fi
 
@@ -132,7 +145,9 @@ apply_exit
 sleep 4
 if check_egress; then
   log "RECOVERED: 重啟 tailscaled 後出口恢復 ($OUT)"
+  notify "✅ Tailscale exit node 自癒成功(重啟 tailscaled),出口已恢復走 $OUT"
 else
   log "ERROR: 自動恢復失敗,出口='$OUT' 期望='$(expect_exit_ip)',需人工介入"
+  notify_fail "🛑 Tailscale exit node 自癒失敗,需人工介入!出口='${OUT:-無}' 期望='$(expect_exit_ip)'"
 fi
 exit 0
