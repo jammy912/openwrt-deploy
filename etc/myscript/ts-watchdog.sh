@@ -1,5 +1,5 @@
 #!/bin/sh
-# watchdog-tailscale.sh — 監看 tailscale exit node,壞了自動恢復
+# ts-watchdog.sh — 監看 tailscale exit node,壞了自動恢復
 # 每 10 分鐘由 cron 跑一次。對應 ClientInstallGuide.md §6 的已知故障。
 # 健檢三項:(1) exit node 設定還在 (2) tailscale0 有 IPv4 (3) 出口確實走 exit node
 # 自動修復分級:補介面 IP -> 重設 exit node -> 重啟 tailscaled
@@ -22,7 +22,7 @@ ACCEPT_DNS="false"
 FALLBACK_TO_WAN="1"                       # 救不回時:1=清掉exit node改走WAN保上網,0=維持斷網(fail-closed)
 LAST_EXIT_FILE="/etc/myscript/.ts-last-exitnode"  # 記上次 exit node IP(fallback後自動切回用)
 FALLBACK_FLAG="/etc/myscript/.ts-fallback-active" # fallback 旗標:有=watchdog清的(該自動切回);無=你手動清的(別碰)。持久化以防 fallback 中途重開機
-LOCKFILE="/tmp/watchdog-tailscale.lock"
+LOCKFILE="/tmp/ts-watchdog.lock"
 PUSH_NAMES="${PUSH_NAMES:-admin}"        # 推播對象(對應 .secrets/pushkey.<name>)
 # ----------------------------------------------------------------
 
@@ -30,7 +30,7 @@ PUSH_NAMES="${PUSH_NAMES:-admin}"        # 推播對象(對應 .secrets/pushkey.
 exec 9>"$LOCKFILE"
 flock -n 9 || exit 0
 
-log() { logger -t watchdog-tailscale "$1"; }
+log() { logger -t ts-watchdog "$1"; }
 
 # 推播模組(PushDeer/LINE 即時 + 離線佇列)。載入失敗不影響主流程。
 [ -f /etc/myscript/push-notify.inc ] && . /etc/myscript/push-notify.inc

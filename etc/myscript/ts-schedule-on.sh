@@ -16,7 +16,7 @@ PUSH_NAMES="${PUSH_NAMES:-admin}"
 notify() { command -v push_notify >/dev/null 2>&1 && push_notify "$1"; }
 log() { logger -t ts-schedule "$1"; }
 
-# headscale 登入網址:從 uci 動態取得(與 watchdog-tailscale.sh 同一真相來源,
+# headscale 登入網址:從 uci 動態取得(與 ts-watchdog.sh 同一真相來源,
 # 改網址只需改 uci tailscale.settings.custom_login_url 一處)。
 # 不留 hardcode:讀不到就推播告警並中止(沒有正確 server 硬跑 up 只會連錯/卡住)。
 LOGIN_URL=$(uci get tailscale.settings.custom_login_url 2>/dev/null)
