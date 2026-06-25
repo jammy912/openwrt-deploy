@@ -17,10 +17,14 @@ notify() { command -v push_notify >/dev/null 2>&1 && push_notify "$1"; }
 log() { logger -t ts-schedule "$1"; }
 
 # headscale 登入網址:從 uci 動態取得(與 watchdog-tailscale.sh 同一真相來源,
-# 改網址只需改 uci tailscale.settings.custom_login_url 一處)。讀不到才退回預設,
-# 避免靜默連錯 server。
+# 改網址只需改 uci tailscale.settings.custom_login_url 一處)。
+# 不留 hardcode:讀不到就推播告警並中止(沒有正確 server 硬跑 up 只會連錯/卡住)。
 LOGIN_URL=$(uci get tailscale.settings.custom_login_url 2>/dev/null)
-[ -z "$LOGIN_URL" ] && { LOGIN_URL="https://mxc5569.duckdns.org"; log "WARN: uci 無 custom_login_url,用預設 $LOGIN_URL"; }
+if [ -z "$LOGIN_URL" ]; then
+  log "ERROR: uci 無 tailscale.settings.custom_login_url,無法決定 headscale server,中止"
+  notify "🛑 Tailscale 排程開啟失敗:找不到 login server (uci custom_login_url 為空),請檢查設定"
+  exit 1
+fi
 
 log "排程開機:啟動 tailscale 並設回 exit node"
 
