@@ -13,10 +13,15 @@
 #     (★不可用 WAN 介面 IP 對照:double-NAT 下 WAN介面IP != 對外公網IP 會誤判)
 #
 # 設定 ------------------------------------------------------------
-EXIT_HOST="openwrt-router"               # exit node hostname(你的意圖;比 ID 穩,ID 會變)
+# exit node 全動態識別,不寫死任何 IP/hostname(hostname 會被改名,IP 也可能變):
+#   exit node = headscale server 同一台 → 找 status 裡 direct endpoint = server IP 的 node;
+#   備援:在線且 offers exit node 的 node。
 PROBE_HOST="api.ipify.org"               # 查對外出口 IP 的服務
 ALLOW_LAN="true"
 ACCEPT_DNS="false"
+FALLBACK_TO_WAN="1"                       # 救不回時:1=清掉exit node改走WAN保上網,0=維持斷網(fail-closed)
+LAST_EXIT_FILE="/etc/myscript/.ts-last-exitnode"  # 記上次 exit node IP(fallback後自動切回用)
+FALLBACK_FLAG="/etc/myscript/.ts-fallback-active" # fallback 旗標:有=watchdog清的(該自動切回);無=你手動清的(別碰)。持久化以防 fallback 中途重開機
 LOCKFILE="/tmp/watchdog-tailscale.lock"
 PUSH_NAMES="${PUSH_NAMES:-admin}"        # 推播對象(對應 .secrets/pushkey.<name>)
 # ----------------------------------------------------------------
@@ -41,31 +46,58 @@ notify_fail() {
 # 本機 tailscale IPv4(動態)
 ts_ip() { tailscale ip -4 2>/dev/null | head -1; }
 
-# exit node 的 tailscale IP(用 hostname 找,避開 ID 漂移)
-exit_node_ip() {
-  tailscale status 2>/dev/null | awk -v h="$EXIT_HOST" '$2==h {print $1; exit}'
+# client 設定要用的 exit node ID(你的意圖;實測它不會自己無故消失,設成有效 node 後穩定留著)
+exit_node_id() {
+  tailscale debug prefs 2>/dev/null | grep -oE '"ExitNodeID": "[^"]*"' | grep -oE '"[^:]*"$' | tr -d '"'
 }
 
-# exit node 的「對外公網 IP」(動態;走 exit node 後對外應看到這個)
-# 主來源:解析 headscale server_url 域名(exit node = 同一台 headscale 主機)
-# 備援  :status 的 direct/CurAddr endpoint IP
+# 用 ExitNodeID 反查該 node 的 tailscale IPv4(jq)— 全動態,不寫死、不怕改名、不靠同一台
+# (.Peer 是 object,[] 迭代 value;TailscaleIPs[0] 即 IPv4)
+exit_node_ip() {
+  local id
+  id=$(exit_node_id)
+  [ -z "$id" ] && return 1
+  tailscale status --json 2>/dev/null \
+    | jq -r --arg id "$id" '.Peer[] | select(.ID == $id) | .TailscaleIPs[0]' 2>/dev/null
+}
+
+# 記憶上次成功使用的 exit node IP(讓 fallback 後 OCI 回來能自動切回)
+# ⚠️內容一致就不寫:避免每 10 分鐘對 flash 寫相同內容,減少磨損。
+remember_exit() {
+  local ip; ip=$(exit_node_ip)
+  [ -z "$ip" ] && return 0
+  [ "$ip" = "$(cat "$LAST_EXIT_FILE" 2>/dev/null)" ] && return 0   # 一致,不寫
+  echo "$ip" > "$LAST_EXIT_FILE" 2>/dev/null
+}
+last_exit_ip() { cat "$LAST_EXIT_FILE" 2>/dev/null | grep -oE '^100\.[0-9.]+' | head -1; }
+
+# 某 tailscale IP 的 node 現在是否在線(status 那行沒 offline)
+node_online() {
+  [ -n "$1" ] && tailscale status 2>/dev/null | awk -v n="$1" '$1==n && $0 !~ /offline/ {f=1} END{exit !f}'
+}
+
+# 用 ExitNodeID 反查該 node 的「對外公網 IP」(走 exit node 後對外應看到這個)
+# 主:CurAddr 的 IP(direct 時有);備:走 relay 時 CurAddr 可能空 → 用 server_url 解析
 expect_exit_ip() {
-  local host ip
-  host=$(uci get tailscale.settings.custom_login_url 2>/dev/null | sed 's|https\?://||; s|/.*||')
-  if [ -n "$host" ]; then
-    ip=$(nslookup "$host" 2>/dev/null | awk '/^Address/{a=$NF} END{print a}' | grep -oE '^[0-9.]+$')
-  fi
+  local id ip
+  id=$(exit_node_id)
+  [ -z "$id" ] && return 1
+  ip=$(tailscale status --json 2>/dev/null \
+    | jq -r --arg id "$id" '.Peer[] | select(.ID == $id) | .CurAddr' 2>/dev/null \
+    | grep -oE '^[0-9.]+' | head -1)
   if [ -z "$ip" ]; then
-    ip=$(tailscale status 2>/dev/null | awk -v h="$EXIT_HOST" '$2==h' \
-         | grep -oE 'direct [0-9.]+' | grep -oE '[0-9.]+' | head -1)
+    # CurAddr 空(走 relay)→ 退而用 headscale server_url 解析(多數情境 exit node=同台)
+    local h
+    h=$(uci get tailscale.settings.custom_login_url 2>/dev/null | sed 's|https\?://||; s|/.*||')
+    [ -n "$h" ] && ip=$(nslookup "$h" 2>/dev/null | awk '/^Address/{a=$NF} END{print a}' | grep -oE '^[0-9.]+$')
   fi
   echo "$ip"
 }
 
-# 套用 exit node 設定
+# 套用 exit node 設定(用 ExitNodeID 反查到的 IP 重設,確保 prefs 一致)
 apply_exit() {
   EIP=$(exit_node_ip)
-  [ -z "$EIP" ] && return 1                 # 找不到 exit node,沒得設
+  [ -z "$EIP" ] && return 1                 # ExitNodeID 空或查不到 → 沒有意圖可設,放棄
   tailscale set --exit-node="$EIP" \
     --exit-node-allow-lan-access="$ALLOW_LAN" \
     --accept-dns="$ACCEPT_DNS" >/dev/null 2>&1
@@ -97,12 +129,36 @@ fi
 
 TS_IP=$(ts_ip)
 
-# ---- 健檢 1:exit node 設定是否還在 ----
-EID=$(tailscale debug prefs 2>/dev/null | grep -oE '"ExitNodeID": "[^"]*"' | grep -oE '"[^:]*"$' | tr -d '"')
+# ---- 健檢 1:client 是否設有 exit node 意圖 ----
+# ExitNodeID 空可能是:(a)你手動/UI 清 (b)watchdog 先前 fallback 走 WAN 清掉的。
+# 兩者外觀一樣,靠「fallback 旗標檔」區分:
+#   有旗標 = watchdog 自己清的 → node 回來時自動切回;
+#   無旗標 = 你手動清的 → 尊重你,不回寫、不設回(避免你清不掉)。
+EID=$(exit_node_id)
 if [ -z "$EID" ]; then
-  log "FAIL: ExitNodeID 空,重新套用 exit node"
-  apply_exit
-  sleep 3
+  if [ ! -f "$FALLBACK_FLAG" ]; then
+    log "INFO: ExitNodeID 空且無 fallback 旗標 = 使用者手動清,尊重不動,退出"
+    exit 0
+  fi
+  # 有旗標:是 fallback 造成的,嘗試自動切回
+  LAST=$(last_exit_ip)
+  if [ -n "$LAST" ] && node_online "$LAST"; then
+    log "RECOVER: fallback 後上次 exit node $LAST 已在線 -> 自動切回"
+    tailscale set --exit-node="$LAST" \
+      --exit-node-allow-lan-access="$ALLOW_LAN" --accept-dns="$ACCEPT_DNS" >/dev/null 2>&1
+    sleep 4
+    if check_egress; then
+      log "RECOVERED: 自動切回 exit node $LAST,出口已恢復走 $OUT"
+      notify "✅ Tailscale exit node 已自動切回($LAST),出口恢復走 $OUT(先前 fallback 到 WAN)"
+      rm -f "$FALLBACK_FLAG"                  # 切回成功,清旗標
+      remember_exit
+      exit 0
+    fi
+    log "WARN: 切回 $LAST 後出口仍異常(出口='$OUT'),繼續往下健檢"
+  else
+    log "WARN: fallback 中,上次 exit node ${LAST:-無} 未在線,續走 WAN 等待"
+    exit 0                                    # 安靜等待 node 回來(不每輪洗推播)
+  fi
 fi
 
 # ---- 健檢 2:tailscale0 有 IPv4 嗎(★最大坑)----
@@ -122,6 +178,8 @@ fi
 
 # ---- 健檢 3:出口確實走 exit node 嗎 ----
 if check_egress; then
+  remember_exit                              # 健康時記住當前 exit node IP(供日後 fallback 自動切回)
+  rm -f "$FALLBACK_FLAG"                      # 健康走著 exit node = 沒有未完成的 fallback,清旗標
   exit 0                                     # 一切正常,安靜離開
 fi
 
@@ -132,6 +190,7 @@ sleep 4
 if check_egress; then
   log "RECOVERED: 重設 exit node 後出口恢復 ($OUT)"
   notify "✅ Tailscale exit node 自癒成功(重設 exit node),出口已恢復走 $OUT"
+  remember_exit
   exit 0
 fi
 
@@ -146,8 +205,22 @@ sleep 4
 if check_egress; then
   log "RECOVERED: 重啟 tailscaled 後出口恢復 ($OUT)"
   notify "✅ Tailscale exit node 自癒成功(重啟 tailscaled),出口已恢復走 $OUT"
+  remember_exit
 else
-  log "ERROR: 自動恢復失敗,出口='$OUT' 期望='$(expect_exit_ip)',需人工介入"
-  notify_fail "🛑 Tailscale exit node 自癒失敗,需人工介入!出口='${OUT:-無}' 期望='$(expect_exit_ip)'"
+  log "ERROR: 自動恢復失敗,出口='$OUT' 期望='$(expect_exit_ip)'"
+  if [ "$FALLBACK_TO_WAN" = "1" ]; then
+    # 救不回 -> 清掉 exit node,讓 LAN 改走家用 WAN 保上網(犧牲「不漏明路」)
+    # ★清除前先記住當前 exit node IP(此時 ExitNodeID 還在),供恢復後自動切回
+    remember_exit
+    touch "$FALLBACK_FLAG"                    # 留旗標:標記「這是 watchdog 清的」→ 之後可自動切回
+    log "FALLBACK: 清除 exit node,LAN 改走 WAN 以維持上網"
+    tailscale set --exit-node= >/dev/null 2>&1
+    sleep 3
+    NEWOUT=$(curl -4 -sS -m 12 "https://$PROBE_HOST" 2>/dev/null)
+    log "FALLBACK done: 現出口='${NEWOUT:-無}'(走 WAN)"
+    notify_fail "⚠️ Tailscale exit node 救不回,已 fallback 改走家用 WAN(出口='${NEWOUT:-無}')。網路維持但未走 exit node;恢復後 watchdog 會自動切回。"
+  else
+    notify_fail "🛑 Tailscale exit node 自癒失敗,需人工介入!出口='${OUT:-無}' 期望='$(expect_exit_ip)'"
+  fi
 fi
 exit 0
