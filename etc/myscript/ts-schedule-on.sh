@@ -9,13 +9,18 @@
 PATH=/usr/sbin:/sbin:/usr/bin:/bin; export PATH
 WANT_EXIT="$1"                                      # optional 覆寫目標
 
-LOGIN_URL="https://mxc5569.duckdns.org"
 LAST_EXIT_FILE="/etc/myscript/.ts-last-exitnode"   # watchdog 記的上次 exit node IP
 FALLBACK_FLAG="/etc/myscript/.ts-fallback-active"
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 [ -f /etc/myscript/push-notify.inc ] && . /etc/myscript/push-notify.inc
 notify() { command -v push_notify >/dev/null 2>&1 && push_notify "$1"; }
 log() { logger -t ts-schedule "$1"; }
+
+# headscale 登入網址:從 uci 動態取得(與 watchdog-tailscale.sh 同一真相來源,
+# 改網址只需改 uci tailscale.settings.custom_login_url 一處)。讀不到才退回預設,
+# 避免靜默連錯 server。
+LOGIN_URL=$(uci get tailscale.settings.custom_login_url 2>/dev/null)
+[ -z "$LOGIN_URL" ] && { LOGIN_URL="https://mxc5569.duckdns.org"; log "WARN: uci 無 custom_login_url,用預設 $LOGIN_URL"; }
 
 log "排程開機:啟動 tailscale 並設回 exit node"
 
