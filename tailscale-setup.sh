@@ -168,6 +168,27 @@ uci set tailscale.settings.custom_login_url="$TS_URL"
 uci commit tailscale
 echo "  ✅ uci tailscale.settings.custom_login_url=$TS_URL"
 
+# ---- 限制 tailscaled 記憶體上限(小 RAM OpenWrt 必備)----
+# tailscaled 是 Go 程式,預設不主動還記憶體給 OS;當 exit-node client 轉發整個 LAN
+# 流量時 RSS 會無限膨脹(實測 56→90MB,把 233MB 小機吃到 avail 剩 7MB)。
+# 設 GOMEMLIMIT 讓 Go runtime 封頂 + 積極 GC(實測 RSS 壓回 ~25MB)。
+# ⚠️ 用 awk 插入,不可用 sed /a\(busybox 換行會把註解和指令擠成同一行→失效)。
+if grep -q "procd_append_param env TS_NO_LOGS_NO_SUPPORT=true" /etc/init.d/tailscale 2>/dev/null \
+   && ! grep -q "GOMEMLIMIT" /etc/init.d/tailscale; then
+    cp /etc/init.d/tailscale /etc/init.d/tailscale.bak.gomemlimit 2>/dev/null
+    awk '
+    /procd_append_param env TS_NO_LOGS_NO_SUPPORT=true/ {
+        print; print ""
+        print "  # 限制 Go runtime 記憶體上限,避免 tailscaled 在小 RAM 機無限膨脹"
+        print "  procd_append_param env GOMEMLIMIT=\"48MiB\""
+        next
+    }
+    { print }
+    ' /etc/init.d/tailscale > /tmp/ts.init && mv /tmp/ts.init /etc/init.d/tailscale
+    chmod +x /etc/init.d/tailscale
+    echo "  ✅ 已設 tailscaled GOMEMLIMIT=48MiB(防記憶體膨脹)"
+fi
+
 # ---- ⑨ 確保服務:啟用 + 只起 daemon(不在 init.d 跑 up,exit node 才能存 state 持久)----
 /etc/init.d/tailscale enable 2>/dev/null
 ps w | grep -q "[t]ailscaled" || { /etc/init.d/tailscale start >/dev/null 2>&1; sleep 6; }
