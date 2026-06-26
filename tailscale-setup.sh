@@ -151,10 +151,15 @@ if ! zone_exists ts; then
     uci set firewall.@zone[-1].mtu_fix='1'     # MSS clamp,避免大封包卡住
     uci add_list firewall.@zone[-1].network='tailscale'
 fi
+# 三條 forwarding,涵蓋兩種需求(node 互通 + 當出口):
+#   lan→ts : LAN 連得到其他 node;LAN 走「別台」exit node 出去
+#   ts→lan : 其他 node 連得進這台 LAN(node 互通回程)
+#   ts→wan : 別人透過「這台」當 exit node 出公網(需另 tailscale set --advertise-exit-node + headscale 核准路由)
 fwd_exists lan ts || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='lan'; uci set firewall.@forwarding[-1].dest='ts'; }
+fwd_exists ts lan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='ts';  uci set firewall.@forwarding[-1].dest='lan'; }
 fwd_exists ts wan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='ts';  uci set firewall.@forwarding[-1].dest='wan'; }
 uci commit firewall
-echo "  ✅ firewall zone 'ts' + lan→ts→wan forwarding"
+echo "  ✅ firewall zone 'ts' + lan↔ts↔wan forwarding(node 互通 + 可當出口)"
 
 # ---- ⑦ 寫 custom_login_url(watchdog/schedule 反查 exit node 對外 IP 的真相來源)----
 uci set tailscale=tailscale 2>/dev/null
@@ -186,10 +191,15 @@ else
     echo "  ⚠️ 尚未取得 tailscale IP,請確認 URL/authkey 後手動 tailscale up"
 fi
 
-# 本機定位=純 node,不設 exit node。日後若要當出口再手動設(見下方提示)。
-echo "  ℹ️ 本機為純 node,未設 exit node(LAN 正常走自家 WAN)。"
-echo "     日後若要讓整個 LAN 走某 exit node:"
-echo "     tailscale set --exit-node=<IP> --exit-node-allow-lan-access=true --accept-dns=false"
+# 預設:已加入 mesh 當 node、LAN 與其他 node 互通(firewall 三條已就緒)。
+# 不自動設 exit node(那綁 headscale 端狀態,每台不同,手動設較好維護)。
+echo "  ℹ️ 已加入 mesh,LAN 與其他 node 互通。未設 exit node(LAN 走自家 WAN)。"
+echo "     ── 日後要當出口,firewall 已備妥,只差以下指令: ──"
+echo "     【這台 LAN 走別台 exit node 出去】"
+echo "       tailscale set --exit-node=<IP> --exit-node-allow-lan-access=true --accept-dns=false"
+echo "     【這台當別人的 exit node(別人透過這台出公網)】"
+echo "       tailscale set --advertise-exit-node"
+echo "       再到 headscale 核准: headscale nodes approve-routes -i <id> -r '0.0.0.0/0,::/0'"
 
 # ---- ⑧ cron: watchdog 每天一次 ----
 # 不裝 schedule 定時開關(本機是純 node)。watchdog 此階段對「無 exit node」是空轉,
