@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# 网络连接监控脚本
-# 监控三个关键DNS服务器的连通性
-# 如果三个IP都无法ping通，则自动重启路由器
+# 網路連線監控腳本
+# 監控三個關鍵 DNS 伺服器的連通性
+# 如果三個 IP 都無法 ping 通，則自動重啟路由器
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -13,27 +13,32 @@ trap 'rm -f /tmp/cron_global.lock' EXIT
 . /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
 
-# 定义要监控的IP地址
+# 定義要監控的 IP 位址
 IP1="1.1.1.1"       # Cloudflare DNS
 IP2="8.8.8.8"       # Google DNS
 IP3="168.95.1.1"    # Taiwan HiNet DNS
 
-# Ping超时时间（秒）
+# Ping 逾時時間（秒）
 TIMEOUT=5
 
-# 日志函数
+# 連續重啟計數檔 (持久, 跨 reboot 保留 → 放 /etc/myscript 不放 /tmp)
+# 連續 reboot 自己達此次數仍斷網 → 改打上層 Hitron 分享器 (自己重開沒救=問題在上游)
+REBOOT_COUNT_FILE="/etc/myscript/.reboot_count"
+HITRON_THRESHOLD=3
+
+# 日誌函式
 log() {
     echo "$1"
     logger -t network-watchdog "$1"
 }
 
-# 检查单个IP是否可达
+# 檢查單個 IP 是否可達
 check_ip() {
     local ip="$1"
     if ping -c 2 -W "$TIMEOUT" "$ip" >/dev/null 2>&1; then
         return 0  # 成功
     else
-        return 1  # 失败
+        return 1  # 失敗
     fi
 }
 
@@ -197,8 +202,8 @@ if [ "$LOAD_1M" -ge 12 ]; then
     fi
 fi
 
-# 主逻辑
-# 检查三个IP
+# 主邏輯
+# 檢查三個 IP
 check_ip "$IP1"
 result1=$?
 
@@ -208,46 +213,76 @@ result2=$?
 check_ip "$IP3"
 result3=$?
 
-# 统计失败的IP
+# 統計失敗的 IP
 failed_ips=""
 failed_count=0
 
 if [ $result1 -ne 0 ]; then
-    log "⚠️ $IP1 连接失败"
+    log "⚠️ $IP1 連線失敗"
     failed_ips="${failed_ips}${IP1} "
     failed_count=$((failed_count + 1))
 fi
 
 if [ $result2 -ne 0 ]; then
-    log "⚠️ $IP2 连接失败"
+    log "⚠️ $IP2 連線失敗"
     failed_ips="${failed_ips}${IP2} "
     failed_count=$((failed_count + 1))
 fi
 
 if [ $result3 -ne 0 ]; then
-    log "⚠️ $IP3 连接失败"
+    log "⚠️ $IP3 連線失敗"
     failed_ips="${failed_ips}${IP3} "
     failed_count=$((failed_count + 1))
 fi
 
-# 如果有任何IP失败，发送通知
+# 網路正常 (至少一個 IP 通) → 清零連續重啟計數 (代表上網已恢復)
+if [ $failed_count -lt 3 ] && [ -f "$REBOOT_COUNT_FILE" ]; then
+    rm -f "$REBOOT_COUNT_FILE"
+    log "✅ 網路正常，清零連續重啟計數"
+fi
+
+# 如果有任何 IP 失敗，發送通知
 if [ $failed_count -gt 0 ]; then
     if [ $failed_count -eq 3 ]; then
-        # 三个IP都失败 - 先等 5 分鐘再驗一次，容忍短暫斷線
-        log "⚠️ 所有 IP 都失败，5 分钟后重试确认..."
-        push_notify "⚠️ 网络异常：全部 DNS 失败，5 分钟后重试"
+        # 三個 IP 都失敗 - 先等 5 分鐘再驗一次，容忍短暫斷線
+        log "⚠️ 所有 IP 都失敗，5 分鐘後重試確認..."
+        push_notify "⚠️ 網路異常：全部 DNS 失敗，5 分鐘後重試"
         sleep 300
         if check_ip "$IP1" || check_ip "$IP2" || check_ip "$IP3"; then
-            log "✅ 重试后至少一个恢复，取消重启"
-            push_notify "⚠️ 网络短暂中断但已恢复，未重启"
+            log "✅ 重試後至少一個恢復，取消重啟"
+            push_notify "⚠️ 網路短暫中斷但已恢復，未重啟"
             exit 0
         fi
-        log "⚠️ 重试仍全失败，执行重启..."
+        log "⚠️ 重試仍全失敗"
         # 收集重開前網路診斷 (LAN/WAN gw/外網/traceroute)
         NETDIAG_LOG="/tmp/watchdog-netdiag-$(date +%Y%m%d-%H%M%S).log"
         NETDIAG_SUMMARY=$(collect_netdiag "$NETDIAG_LOG")
         log "netdiag: $NETDIAG_SUMMARY"
         log "完整診斷 → $NETDIAG_LOG"
+
+        # 連續重啟計數 +1 (持久檔, 上面網路恢復時會清零)
+        REBOOT_N=$(cat "$REBOOT_COUNT_FILE" 2>/dev/null)
+        case "$REBOOT_N" in ''|*[!0-9]*) REBOOT_N=0 ;; esac
+        REBOOT_N=$((REBOOT_N + 1))
+        echo "$REBOOT_N" > "$REBOOT_COUNT_FILE"; sync 2>/dev/null
+        log "⚠️ 連續重啟計數 = $REBOOT_N / $HITRON_THRESHOLD"
+
+        # 連續重啟自己已達門檻仍斷網 → 自己重開沒救, 改打上層 Hitron 分享器,
+        # 這次不 reboot 自己 (等上層回來自己應恢復; 下輪再判)。
+        if [ "$REBOOT_N" -ge "$HITRON_THRESHOLD" ]; then
+            log "⚠️ 已連續重啟 $REBOOT_N 次仍斷網，改重開上層 Hitron 分享器"
+            queue_push "reboot-watchdog" "hitron-escalate" "連續自重啟 ${REBOOT_N} 次仍斷網, 改重開上層 Hitron| failed=${failed_ips}| ${NETDIAG_SUMMARY}"
+            rm -f "$REBOOT_COUNT_FILE"; sync 2>/dev/null    # 升級打 hitron = 換策略, 計數歸零重新算
+            if [ -x /etc/myscript/hitron_reboot.sh ]; then
+                /etc/myscript/hitron_reboot.sh -y
+            else
+                log "❌ /etc/myscript/hitron_reboot.sh 不存在或不可執行"
+            fi
+            log "ℹ️ 已下達 Hitron 重開，本輪不 reboot 自己，等上層恢復"
+            exit 0
+        fi
+
+        log "🔄 準備重啟自己 (第 $REBOOT_N 次)..."
         # 網路已斷，即時 push 幾乎必失敗 → 寫 queue 讓開機後補送
         queue_push "reboot-watchdog" "all-dns-down" "failed=${failed_ips}| ${NETDIAG_SUMMARY}"
 
@@ -270,12 +305,12 @@ if [ $failed_count -gt 0 ]; then
         queue_push "reboot-snapshot-tail" "" "$SNAP_TAIL"
 
         sleep 5
-        log "🔄 执行重启..."
+        log "🔄 執行重啟..."
         reboot
     else
-        # 部分IP失败 - 仅通知
-        log "⚠️ 有 ${failed_count} 个IP无法连接：${failed_ips}"
-        push_notify "⚠️ 网络异常：${failed_ips}无法连接 (${failed_count}/3)"
+        # 部分 IP 失敗 - 僅通知
+        log "⚠️ 有 ${failed_count} 個 IP 無法連線：${failed_ips}"
+        push_notify "⚠️ 網路異常：${failed_ips}無法連線 (${failed_count}/3)"
     fi
 fi
 
