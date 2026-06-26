@@ -45,6 +45,8 @@ ARG_ENCRYPTION=""
 ARG_TDX_ID=""
 ARG_TDX_KEY=""
 ARG_PRIORITY=""
+ARG_TS_URL=""
+ARG_TS_AUTHKEY=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -63,6 +65,8 @@ while [ $# -gt 0 ]; do
         --tdx-id)     ARG_TDX_ID="$2"; shift ;;
         --tdx-key)    ARG_TDX_KEY="$2"; shift ;;
         --priority)   ARG_PRIORITY="$2"; shift ;;
+        --ts-url)     ARG_TS_URL="$2"; shift ;;
+        --ts-authkey) ARG_TS_AUTHKEY="$2"; shift ;;
     esac
     shift
 done
@@ -799,6 +803,16 @@ if ! grep -q "#SyncAreaStart" "$CRONTAB_FILE" 2>/dev/null; then
     echo "  ✅ 已建立 SyncArea 區塊"
 fi
 /etc/init.d/cron restart 2>/dev/null
+
+# =====================
+# 3.5 Tailscale (Headscale exit node) — 選裝
+# =====================
+# 三支 ts-*.sh 已於上面複製到 /etc/myscript/。此處互動安裝 tailscale 本體 +
+# 接線(interface/firewall/登入)。gateway 才裝(client 子路由不需要)。
+if [ "$MESH_ROLE" != "client" ] && [ -f "$DEPLOY_DIR/tailscale-setup.sh" ]; then
+    export AUTO_MODE ARG_TS_URL ARG_TS_AUTHKEY
+    sh "$DEPLOY_DIR/tailscale-setup.sh"
+fi
 
 echo ""
 echo "========================================"

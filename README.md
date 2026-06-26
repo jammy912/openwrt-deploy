@@ -73,6 +73,7 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/jammy912/openwrt-deploy/mai
 | DDNS（動態 DNS） | ✅ | |
 | qosify（QoS 頻寬管理） | ✅ | |
 | bind-dig（DNS 偵錯） | ✅ | |
+| Tailscale（Headscale node，選裝） | ✅ | |
 
 ### 3. 選擇模組
 
@@ -85,8 +86,28 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/jammy912/openwrt-deploy/mai
 | Android 手機 USB 分享 | Android 手機 USB 網路共享 | n |
 | iPhone USB 分享 | iPhone USB 網路共享 | n |
 | Docker | 容器化平台 | n |
+| Tailscale | 加入 Headscale mesh 當一個 node（不設 exit node） | n |
 
 > 已安裝的模組會記錄在 `/etc/myscript/.modules`，開機時自動檢查。
+
+#### Tailscale（Headscale node）
+
+只在 **gateway** 詢問。選 y 後需輸入兩樣：
+
+- **① Headscale URL**（例 `https://mxc5569.duckdns.org`）— 同時寫入 `uci tailscale.settings.custom_login_url`
+- **② pre-auth key**（`hskey-auth-...`，headscale 後台產）— 一行登入
+
+腳本自動完成：裝套件（tailscale / jq / luci app）→ 建 `network.tailscale` interface → 建 firewall zone `ts`（masq + mtu_fix + lan↔ts 雙向 forwarding，**LAN 與其他 node 互通**）→ 登入（`--accept-dns=false`）→ 加 `ts-watchdog.sh` cron（每天 04:00）。
+
+> **定位 = 純 node**：不設 exit node、不裝 schedule 定時開關。
+> 日後若要讓整個 LAN 走某 exit node：
+> `tailscale set --exit-node=<IP> --exit-node-allow-lan-access=true --accept-dns=false`
+
+**補裝到舊機器**（用沒有 tailscale 步驟的舊版 deploy 裝起來的）：上傳部署包後，直接單獨跑這支即可（會自我補齊三支 `ts-*.sh`）：
+
+```sh
+sh /tmp/deploy/tailscale-setup.sh
+```
 
 ### 4. 部署設定檔與腳本
 
@@ -170,6 +191,9 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/jammy912/openwrt-deploy/mai
 | 檢查套件 | `/etc/myscript/check-custpkgs.sh --now` |
 | WiFi 重新設定 | `sh /tmp/deploy/wifi-setup.sh` |
 | BATMAN 重新設定 | `sh /tmp/deploy/batman-setup.sh` |
+| Tailscale 安裝/補裝 | `sh /tmp/deploy/tailscale-setup.sh` |
+| Tailscale node 狀態 | `tailscale status` |
+| Tailscale 自癒日誌 | `logread \| grep ts-watchdog` |
 
 ---
 
@@ -181,6 +205,7 @@ deploy/
 ├── deploy.sh                # 主部署腳本
 ├── wifi-setup.sh            # WiFi 設定
 ├── batman-setup.sh          # BATMAN mesh + 802.11r/k/v
+├── tailscale-setup.sh       # Tailscale (Headscale node) 安裝 + 接線
 ├── etc/
 │   ├── rc.local             # 開機啟動（RAM overlay）
 │   ├── sysupgrade.conf      # 韌體升級保留檔案清單
