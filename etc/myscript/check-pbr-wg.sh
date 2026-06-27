@@ -669,6 +669,16 @@ for SWG in $SERVER_WG_IFACES; do
         | grep "endpoint_host" | grep -v "=''$" | wc -l)
     [ "$_has_ep" != "0" ] && continue
 
+    # server wg 的 CustRule table/rule 自我修復。
+    # Why: server wg（無 endpoint）在第一階段被 skip，不會走到那邊的
+    #   custrule_route_repair/custrule_rule_repair。但角色切換(auto-role.sh)、
+    #   pbr reload、手動 ifup wg 都會沖掉 table 1000-4000 的 route（pbr-cust 建的
+    #   `default dev wgX`），導致命中 prio 200 規則卻查空表 → .1.10 等流量掉回 wan。
+    #   這裡每輪對 passive server wg 補一次，任何原因沖掉最多 1 分鐘自動恢復，
+    #   不必依賴 auto-role / hotplug 額外呼叫 pbr-cust start。
+    custrule_route_repair "$SWG"
+    custrule_rule_repair "$SWG"
+
     # 蒐集候選 peer: uci allowed_ips 含 0.0.0.0/0 者
     # 輸出每行: "<idx> <description> <public_key>"
     CANDIDATES=$(i=0; while uci -q get network.@wireguard_${SWG}[$i] >/dev/null 2>&1; do
