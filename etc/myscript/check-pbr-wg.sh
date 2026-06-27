@@ -644,4 +644,132 @@ if [ -f "$DBR_CONF" ]; then
     done
 fi
 
+# === 第四階段：server wg 多 peer 的 0.0.0.0/0 出口 failover ===
+# 場景: 一個 passive server wg 介面（無 endpoint_host）下掛多個 peer，
+#       多個 peer 的 uci allowed_ips 都宣告 0.0.0.0/0（想當該介面的對外出口）。
+# 限制: WireGuard crypto-routing 中 0.0.0.0/0 全域唯一，只能歸一個 peer，
+#       兩個 peer 都設會互搶、飄忽（last-wins 不確定）。
+# 作法: 用各 peer 的 latest-handshake 判 active；在 active 候選中按 description
+#       字典序最小者勝出，把 0.0.0.0/0 設給它、從其他候選移除（保留各自 251.x）。
+#       只操作 kernel（wg set），不寫 uci —— uci 保留「兩個都想要」的意圖，
+#       kernel 才是當下實際歸屬，與本腳本「無感切換不動 uci」風格一致。
+# 候選來源: 讀 uci，allowed_ips 含 0.0.0.0/0 的 peer 才納入（沒設的不碰）。
+EXIT_HS_TIMEOUT=180   # peer handshake 超過此秒數視為 down
+
+# 找出所有「無 endpoint_host 的 server wg 介面」（passive）
+SERVER_WG_IFACES=$(uci show network 2>/dev/null \
+    | sed -n "s/^network\.\(wg[0-9a-z_]*\)=interface$/\1/p" | sort -u)
+
+for SWG in $SERVER_WG_IFACES; do
+    # 介面必須存在且 up
+    ip link show "$SWG" >/dev/null 2>&1 || continue
+
+    # passive 判定: 該介面所有 peer 都沒有 endpoint_host
+    _has_ep=$(uci show network 2>/dev/null | grep "@wireguard_${SWG}\[" \
+        | grep "endpoint_host" | grep -v "=''$" | wc -l)
+    [ "$_has_ep" != "0" ] && continue
+
+    # 蒐集候選 peer: uci allowed_ips 含 0.0.0.0/0 者
+    # 輸出每行: "<idx> <description> <public_key>"
+    CANDIDATES=$(i=0; while uci -q get network.@wireguard_${SWG}[$i] >/dev/null 2>&1; do
+        _aip=$(uci -q get network.@wireguard_${SWG}[$i].allowed_ips)
+        case " $_aip " in
+            *" 0.0.0.0/0 "*)
+                _desc=$(uci -q get network.@wireguard_${SWG}[$i].description)
+                _pub=$(uci -q get network.@wireguard_${SWG}[$i].public_key)
+                [ -z "$_desc" ] && _desc="_"   # 無描述者排最後（"_" > 大多字元）
+                echo "$i $_desc $_pub"
+                ;;
+        esac
+        i=$((i+1))
+    done)
+
+    # 候選 < 2 不需仲裁（單一或無 0.0.0.0/0，維持現狀）
+    _ncand=$(echo "$CANDIDATES" | grep -c .)
+    [ "${_ncand:-0}" -lt 2 ] && continue
+
+    NOW_TS=$(date '+%s')
+
+    # 在候選中挑出 active（handshake 年齡 ≤ EXIT_HS_TIMEOUT）者，
+    # 按 description 字典序排序，取最小者為 winner。
+    WINNER_PUB=""
+    WINNER_DESC=""
+    # latest-handshakes: "<pub>\t<unix_ts>"
+    HS_DUMP=$(wg show "$SWG" latest-handshakes 2>/dev/null)
+    # 排序候選（依 description，欄2）
+    SORTED=$(echo "$CANDIDATES" | sort -k2,2)
+    echo "$SORTED" | while read _idx _desc _pub; do
+        [ -z "$_pub" ] && continue
+        _hs=$(echo "$HS_DUMP" | awk -v p="$_pub" '$1==p{print $2}')
+        _hs=${_hs:-0}
+        [ "$_hs" = "0" ] && continue
+        _age=$(( NOW_TS - _hs ))
+        if [ "$_age" -le "$EXIT_HS_TIMEOUT" ]; then
+            echo "$_pub $_desc" > "${STATE_DIR}/${SWG}.exitwinner.tmp"
+            break   # 字典序第一個 active 者勝出
+        fi
+    done
+    if [ -f "${STATE_DIR}/${SWG}.exitwinner.tmp" ]; then
+        WINNER_PUB=$(awk '{print $1}' "${STATE_DIR}/${SWG}.exitwinner.tmp")
+        WINNER_DESC=$(awk '{print $2}' "${STATE_DIR}/${SWG}.exitwinner.tmp")
+        rm -f "${STATE_DIR}/${SWG}.exitwinner.tmp"
+    fi
+
+    # 沒有任何 active 候選 → 不動（保留現有歸屬，避免把唯一通路也拔掉）
+    [ -z "$WINNER_PUB" ] && {
+        log_event "[EXITFO] $SWG 無 active 候選 peer，0.0.0.0/0 維持現狀"
+        continue
+    }
+
+    # 取得 winner 當下在 kernel 的 allowed-ips；若已持有 0.0.0.0/0 視為無變化
+    _cur_winner_aip=$(wg show "$SWG" allowed-ips 2>/dev/null \
+        | awk -v p="$WINNER_PUB" '$1==p{$1="";print}')
+    case " $_cur_winner_aip " in
+        *" 0.0.0.0/0 "*) _winner_has=1 ;;
+        *) _winner_has=0 ;;
+    esac
+
+    # uci 內某 peer idx 的 allowed_ips 去掉 0.0.0.0/0 後的剩餘 IP，
+    # 以「逗號」分隔輸出（wg set allowed-ips 要求逗號分隔，空格會報格式錯）。
+    # 結尾不留逗號；可能為空（該 peer 只有 0.0.0.0/0）。
+    _peer_keep_ips() {  # $1=idx
+        # busybox 無 paste；用 awk 把多個 IP 以逗號接起來（去掉 0.0.0.0/0）
+        uci -q get network.@wireguard_${SWG}[$1].allowed_ips \
+            | tr ' ' '\n' | grep -v '^0\.0\.0\.0/0$' \
+            | awk 'NR>1{printf ","} {printf "%s", $0} END{print ""}'
+    }
+
+    # 清理：把 0.0.0.0/0 從所有「非 winner 候選」的 kernel allowed-ips 移除
+    echo "$CANDIDATES" | while read _idx _desc _pub; do
+        [ "$_pub" = "$WINNER_PUB" ] && continue
+        _other_aip=$(wg show "$SWG" allowed-ips 2>/dev/null \
+            | awk -v p="$_pub" '$1==p{$1="";print}')
+        case " $_other_aip " in
+            *" 0.0.0.0/0 "*)
+                _keep=$(_peer_keep_ips "$_idx")
+                # 移除 0.0.0.0/0 後保留各自 251.x（_keep 必非空，server peer 都有 251.x）
+                wg set "$SWG" peer "$_pub" allowed-ips "$_keep" 2>/dev/null
+                log_event "[EXITFO] $SWG peer $_desc 移除殘留 0.0.0.0/0（保留 $_keep）"
+                ;;
+        esac
+    done
+
+    if [ "$_winner_has" = "1" ]; then
+        # winner 已持有 0.0.0.0/0，且上面已清掉其他候選殘留 → 完成，避免 churn
+        continue
+    fi
+
+    # winner 尚未持有 → 把 0.0.0.0/0 設給 winner（連同其原有非預設 IP，逗號分隔）
+    _win_idx=$(echo "$CANDIDATES" | awk -v p="$WINNER_PUB" '$3==p{print $1; exit}')
+    _win_keep=$(_peer_keep_ips "$_win_idx")
+    if [ -n "$_win_keep" ]; then
+        wg set "$SWG" peer "$WINNER_PUB" allowed-ips "${_win_keep},0.0.0.0/0" 2>/dev/null
+    else
+        wg set "$SWG" peer "$WINNER_PUB" allowed-ips "0.0.0.0/0" 2>/dev/null
+    fi
+    log_event "[EXITFO] $SWG 出口 0.0.0.0/0 → $WINNER_DESC（active, 字典序優先）"
+    log "    動作: $SWG 0.0.0.0/0 搬給 $WINNER_DESC"
+    push_notify "${SWG}_ExitFailover_${WINNER_DESC}"
+done
+
 log "檢查完畢。"
