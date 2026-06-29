@@ -10,12 +10,12 @@ RT_TABLES="/etc/iproute2/rt_tables"
 CONF="/etc/dnsmasq.d/dbroute-domains.conf"
 
 # 清除所有舊的域名路由 fwmark 規則（priority 100）
+# 只靠 fwmark + priority 刪,不解析 lookup 後的 table 名:table 現在是別名
+# (dbr_wg4),舊版 sed 用 lookup \([0-9]*\) 只抓數字 → 抓不到別名 → 清不掉孤兒。
+# fwmark 是唯一 key,ip rule del fwmark X priority 100 不需指定 table 即可刪。
 ip rule show | grep "priority 100" | while read -r line; do
     fwmark=$(echo "$line" | sed -n 's/.*fwmark \(0x[0-9a-f]*\).*/\1/p')
-    table=$(echo "$line" | sed -n 's/.*lookup \([0-9]*\).*/\1/p')
-    if [ -n "$fwmark" ] && [ -n "$table" ]; then
-        ip rule del fwmark "$fwmark" lookup "$table" 2>/dev/null
-    fi
+    [ -n "$fwmark" ] && ip rule del fwmark "$fwmark" priority 100 2>/dev/null
 done
 
 # 從 dbroute-domains.conf 找出所有使用中的 nft set 名稱（route_<iface>_v4 格式）

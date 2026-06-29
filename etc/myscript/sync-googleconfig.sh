@@ -637,7 +637,7 @@ main() {
 
     # MAC 正規化: dash → colon (e8-9f-80 → e8:9f:80)，避免 dnsmasq 啟動失敗
     if [ -s "$TMP_DHCP" ]; then
-        BAD_MACS=$(grep 'option mac' "$TMP_DHCP" | grep -o "'[^']*-[^']*'" | tr -d "'" | paste -sd, -)
+        BAD_MACS=$(grep 'option mac' "$TMP_DHCP" | grep -o "'[^']*-[^']*'" | tr -d "'" | tr '\n' ',' | sed 's/,$//')
         if [ -n "$BAD_MACS" ]; then
             push_notify "⚠️ DHCP MAC 格式錯誤 (dash): $BAD_MACS → 已自動修正為 colon"
             log "⚠️ MAC dash→colon 修正: $BAD_MACS"
@@ -645,10 +645,10 @@ main() {
         awk '{if($0 ~ /option mac/){gsub(/-/,":")} print}' "$TMP_DHCP" > "${TMP_DHCP}.tmp" && mv "${TMP_DHCP}.tmp" "$TMP_DHCP"
 
         # MAC 長度/格式檢查: 不符 XX:XX:XX:XX:XX:XX 的整筆移除
-        INVALID_MACS=$(awk '/option mac/{gsub(/'\''/, ""); mac=$3; if(mac !~ /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print mac}' "$TMP_DHCP" | paste -sd, -)
+        INVALID_MACS=$(awk '/option mac/{gsub(/'\''/, ""); mac=$3; if(mac !~ /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print mac}' "$TMP_DHCP" | tr '\n' ',' | sed 's/,$//')
         if [ -n "$INVALID_MACS" ]; then
             # 找出對應 name
-            INVALID_NAMES=$(awk 'BEGIN{RS=""; FS="\n"} {mac=""; name=""; for(i=1;i<=NF;i++){if($i~/option mac/){gsub(/\047/,"",$i); split($i,a," "); mac=a[3]} if($i~/option name/){gsub(/\047/,"",$i); split($i,a," "); name=a[3]}} if(mac!="" && mac!~/^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print name"("mac")"}' "$TMP_DHCP" | paste -sd, -)
+            INVALID_NAMES=$(awk 'BEGIN{RS=""; FS="\n"} {mac=""; name=""; for(i=1;i<=NF;i++){if($i~/option mac/){gsub(/\047/,"",$i); split($i,a," "); mac=a[3]} if($i~/option name/){gsub(/\047/,"",$i); split($i,a," "); name=a[3]}} if(mac!="" && mac!~/^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) print name"("mac")"}' "$TMP_DHCP" | tr '\n' ',' | sed 's/,$//')
             push_notify "❌ DHCP MAC 格式無效，已移除: $INVALID_NAMES"
             log "❌ MAC 格式無效，移除: $INVALID_NAMES"
             # 移除整個 config host block
@@ -817,7 +817,7 @@ main() {
         DUP_IPS=$(awk '/option ip/{gsub(/'\''/,"",$3); print $3}' "$TMP_DHCP" | sort | uniq -d)
         if [ -n "$DUP_IPS" ]; then
             for dip in $DUP_IPS; do
-                DUP_NAMES=$(awk -v ip="$dip" 'BEGIN{RS=""; FS="\n"} {found_ip=0; name=""; for(i=1;i<=NF;i++){if($i~"option ip.*"ip) found_ip=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found_ip && name{print name}' "$TMP_DHCP" | paste -sd, -)
+                DUP_NAMES=$(awk -v ip="$dip" 'BEGIN{RS=""; FS="\n"} {found_ip=0; name=""; for(i=1;i<=NF;i++){if($i~"option ip.*"ip) found_ip=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found_ip && name{print name}' "$TMP_DHCP" | tr '\n' ',' | sed 's/,$//')
                 COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: IP ${dip} 重複 (${DUP_NAMES})"
             done
         fi
@@ -825,7 +825,7 @@ main() {
         DUP_MACS=$(awk '/option mac/{gsub(/'\''/,"",$3); print toupper($3)}' "$TMP_DHCP" | sort | uniq -d)
         if [ -n "$DUP_MACS" ]; then
             for dmac in $DUP_MACS; do
-                DUP_NAMES=$(awk -v mac="$dmac" 'BEGIN{RS=""; FS="\n"} {found=0; name=""; for(i=1;i<=NF;i++){if($i~"option mac" && toupper($i)~mac) found=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found && name{print name}' "$TMP_DHCP" | paste -sd, -)
+                DUP_NAMES=$(awk -v mac="$dmac" 'BEGIN{RS=""; FS="\n"} {found=0; name=""; for(i=1;i<=NF;i++){if($i~"option mac" && toupper($i)~mac) found=1; if($i~/option name/) {gsub(/.*option name /,"",$i); gsub(/'\''/,"",$i); name=$i}}} found && name{print name}' "$TMP_DHCP" | tr '\n' ',' | sed 's/,$//')
                 COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - DHCP: MAC ${dmac} 重複 (${DUP_NAMES})"
             done
         fi
