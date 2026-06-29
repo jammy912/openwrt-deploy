@@ -1342,12 +1342,17 @@ main() {
                     RFWMARK="0xfe"
                 else
                     # 介面在這台機根本不存在(打錯名 / 多機共用 Sheet 但此機無此介面)：
-                    # 跳過產生 nftset/set/打標、不分配 table。否則 nft 仍會把封包打上
-                    # 孤兒 mark，但 dbroute-setup 因介面不在而不建 ip rule → 封包回落
-                    # main table 靜默走 wan(洩真實 IP)。這裡直接當「此機沒設這條」。
-                    # 註：ip link show 只擋「不存在」；介面存在但暫時 down 仍回 0，不誤擋。
-                    if ! ip link show "$RIFACE" >/dev/null 2>&1; then
-                        log "  ⚠️  介面 $RIFACE 不存在，跳過其 dbroute(避免靜默走 wan 洩 IP)"
+                    # 跳過產生 nftset/set/打標、不分配 table，避免 nft 打孤兒 mark 但
+                    # 無 ip rule 接 → 封包回落 main 靜默走 wan(洩真實 IP)。
+                    #
+                    # ★判斷依據用「uci 有無定義此 network 介面」,不用 ip link show★：
+                    # WireGuard 介面被 ifdown/disabled 時 ip link show 也會失敗(Device
+                    # does not exist),用它會把「暫時 down 的 wg4」也誤跳過 → conf 不產 →
+                    # 連 hotplug ifup 補 dbroute-setup 都沒東西可建 → wg4 回來也不恢復。
+                    # 改判 uci：有定義=本機該有(暫時 down 也照產 conf,介面 up 時 hotplug
+                    # 自動補 ip rule);無定義=真沒這介面才跳過。
+                    if ! uci -q get "network.${RIFACE}" >/dev/null 2>&1; then
+                        log "  ⚠️  介面 $RIFACE 在 uci 無定義，跳過其 dbroute(避免靜默走 wan 洩 IP)"
                         push_notify "DBR_SkipMissingIface_${RIFACE}"
                         continue
                     fi
