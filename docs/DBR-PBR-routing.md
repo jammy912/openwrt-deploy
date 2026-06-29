@@ -197,12 +197,15 @@ config dbroute 區塊（UCI）
      **Why**：否則 nft 仍把封包打上孤兒 mark，但 `dbroute-setup` 因介面不在
      不建 ip rule → 封包回落 main table **靜默走 wan（洩真實 IP）**。
 2. 先 `nft delete chain ... domain_prerouting` 與舊 `route_*_v4` set，再 `nft -f dbroute.nft`
-3. **`dnsmasq reload`（不是 restart）讓 nftset 生效**——用 DBR 專用旗標
+3. **`dnsmasq restart`（不能用 reload）讓 nftset 綁定生效**——用 DBR 專用旗標
    `CHANGED_DBROUTE_DNS=1`，**不借用全域 `CHANGED_DHCP`**。
-   **Why**：`dnsmasq restart` 在 hybrid role 會連帶叫起 `udhcpc`，把 LAN 重新
-   協商（`udhcpc no lease` → LAN 掉線）。`--only dbroute` 過去借 `CHANGED_DHCP=1`
-   而 restart，正是它弄掛 LAN 的原因。`reload` 只重讀 config 不重起 interface，
-   nftset 一樣生效。
+   **Why 必須 restart**：dnsmasq 的 nftset 綁定**只在完整 restart 時建立**，
+   `reload`/SIGHUP **不重建 nftset** → 新加的 DBR 域名解析後 IP 不會進 set →
+   流量不走 DBR（實測新增 myip.com.tw/whatismyipaddress 到 sheet，sync 後不轉）。
+   **關於「restart 震 LAN」**：那是**舊 auto-role 把 lan 搞亂（改 IP/proto）**時才
+   發生。dnsmasq init 腳本 restart 時會對 interface 發探測 `udhcpc`；lan=static 時
+   只探測 wan（成功拿 lease），不影響 LAN。auto-role 移除後 lan 恆 static，
+   restart 安全（實測 .7 restart → 只探測 wan，LAN 192.168.151.1 不掉）。
 4. `dbroute-setup.sh`（建立 ip rule + route；add 前先 del 確保冪等）
 5. `dbroute-refresh.sh`（填充 nft set IP）
 
@@ -365,9 +368,10 @@ nft list set inet fw4 route_wg2_v4 | grep -A100 elements
 # 確認 dbroute-domains.conf 內容（自動生成，勿手改）
 cat /etc/dnsmasq.d/dbroute-domains.conf
 
-# 讓 dnsmasq 重讀 conf 後手動觸發一次刷新填充
-# ⚠️ 用 reload 不要用 restart：hybrid role 上 restart 會叫起 udhcpc 震掉 LAN
-/etc/init.d/dnsmasq reload
+# 讓 dnsmasq 重建 nftset 綁定後手動觸發一次刷新填充
+# ⚠️ 必須 restart 不能 reload：nftset 綁定只在 restart 時建立,reload 不重建
+#    → 新域名解析後不進 set。restart 只探測 wan(lan=static),不震 LAN。
+/etc/init.d/dnsmasq restart
 /etc/myscript/dbroute-refresh.sh
 logread -e dbroute-refresh | tail
 ```

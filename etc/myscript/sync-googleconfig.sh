@@ -1750,13 +1750,18 @@ NFTEOF
         fi
 
         # DBR 讓 dnsmasq 重讀新 dbroute-domains.conf(nftset= 對應)。
-        # 用 reload 不用 restart：restart 在 hybrid role 會叫起 udhcpc 震掉 LAN。
-        # dbroute-refresh.sh 不重啟 dnsmasq，只主動查域名觸發 nftset，
-        # 故必須先讓 dnsmasq 載入新 conf，refresh 才填得進去。
+        # ★必須用 restart 不能用 reload★：dnsmasq 的 nftset 綁定只在「完整 restart」
+        # 時建立,reload/SIGHUP 不重建 nftset → 新加的 DBR 域名解析後 IP 不會進 set
+        # → 流量不走 DBR(實測 .7 myip.com.tw/whatismyipaddress 加在 sheet 卻不轉)。
+        #
+        # 關於「restart 震 LAN」: 那是舊 auto-role 把 lan 搞亂(改 IP/proto)時才發生。
+        # dnsmasq init(行121)restart 時會對 interface 發探測 udhcpc,lan=static 時
+        # 只探測 wan(成功拿 lease),不影響 LAN。auto-role 移除後 lan 恆 static,
+        # restart 安全。實測 .7 restart → udhcpc 探測 wan,LAN(192.168.151.1)不掉。
         if [ "${CHANGED_DBROUTE_DNS:-0}" -eq 1 ]; then
             if [ -x /etc/init.d/dnsmasq ]; then
-                log "🔄 reload DNSMasq 讓 dbroute nftset 生效..."
-                /etc/init.d/dnsmasq reload
+                log "🔄 restart DNSMasq 讓 dbroute nftset 綁定生效..."
+                /etc/init.d/dnsmasq restart
             fi
         fi
 
