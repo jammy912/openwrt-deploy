@@ -66,33 +66,36 @@ LOCK_ESCALATE_WINDOW=86400     # 累計視窗: 24 小時
 DISABLE_DURATION=86400 # 停用秒數（24小時, 保留為相容變數, 未使用）
 
 # --- 參數解析 ---
-# 用法: check-pbr-wg.sh [-q|--quiet] ["wgX;wgY;..."]
-#   -q/--quiet           安靜模式（不寫 logread / 不 echo，log_event 仍寫）
-#   no-fallback 介面清單 = 用「逗號或分號」分隔的單一參數
-#                          （; 在 shell 是指令分隔符，務必加引號避免被切開；
-#                            , 在 shell 無特殊意義，可加可不加引號）
-#   範例: check-pbr-wg.sh -q "wg4;wg5"  或  check-pbr-wg.sh -q wg4,wg5
+# 用法: check-pbr-wg.sh [-q|--quiet] [-n|--no-fallback "wgX;wgY;..."]
+#   -q/--quiet               安靜模式（不寫 logread / 不 echo，log_event 仍寫）
+#   -n/--no-fallback <清單>   NO_FALLBACK 介面清單(下一個 token,逗號或分號分隔)
+#                            也支援 --no-fallback=wg4,wg5 的寫法。
+#   範例: check-pbr-wg.sh -q -n "wg4;wg5"  或  check-pbr-wg.sh -q --no-fallback=wg4,wg5
 #
 # NO_FALLBACK_IFACES：這些介面 ping DOWN 時「不移除 routing、不切回 wan」，
 #   讓流量黑洞(black-hole)卡死在該 wg 上，避免抖動期間漏到 wan(暴露真實
 #   IP / 走錯出口)。wg 回來後第一階段照常跑修復 → 自動恢復正常。
 #   涵蓋：主 PBR rule(client wg) 與 CustRule prio 200(server wg 的 per-IP)。
-# 內部以「空格」儲存（is_no_fallback 的 case 比對靠空格）；
-# 輸入的逗號/分號在此都轉成空格。即使使用者漏加引號被 shell 切成多個參數，
-# 每個參數仍各自再拆一次，逗號/分號/空格混用都能解析。
+# 內部以「空格」儲存（is_no_fallback 的 case 比對靠空格）；輸入的逗號/分號轉空格。
 NO_FALLBACK_IFACES=""
+_expect_nf=0
 for _arg in "$@"; do
-    case "$_arg" in
-        -q|--quiet) QUIET_MODE=1 ;;
-        *)
-            # 把逗號與分號都換成空格後逐段檢查，只收以 wg 開頭者
-            for _if in $(echo "$_arg" | tr ',;' '  '); do
-                case "$_if" in
-                    wg*) NO_FALLBACK_IFACES="$NO_FALLBACK_IFACES $_if" ;;
-                esac
-            done
-            ;;
-    esac
+    if [ "$_expect_nf" = "1" ]; then
+        _nf_val="$_arg"; _expect_nf=0
+    else
+        case "$_arg" in
+            -q|--quiet)        QUIET_MODE=1; continue ;;
+            -n|--no-fallback)  _expect_nf=1; continue ;;
+            --no-fallback=*)   _nf_val="${_arg#--no-fallback=}" ;;
+            *)                 continue ;;   # 不再接受裸位置參數
+        esac
+    fi
+    # 把逗號與分號都換成空格後逐段檢查，只收以 wg 開頭者
+    for _if in $(echo "$_nf_val" | tr ',;' '  '); do
+        case "$_if" in
+            wg*) NO_FALLBACK_IFACES="$NO_FALLBACK_IFACES $_if" ;;
+        esac
+    done
 done
 
 # 介面是否在「DOWN 不切 wan」白名單內：在內回 0，否則回 1
