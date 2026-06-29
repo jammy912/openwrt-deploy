@@ -10,7 +10,7 @@
 | **DBR** | Domain-Based Routing | 依「域名」決定走哪個介面（nft + dnsmasq nftset） |
 | **PBR** | Policy-Based Routing | 依「來源 IP」決定走哪個介面（ip rule） |
 | **CustRule** | Custom Rule PBR | 自訂的 PBR 規則，由 `/etc/init.d/pbr-cust` 管理 |
-| **OpenWrt PBR** | 系統內建 PBR 套件 | 用 nft fwmark 高位（0x00ff0000）標記，table 256~261 |
+| **OpenWrt PBR** | 系統內建 PBR 套件 | 用 nft fwmark 高位（0x00ff0000）標記，table 別名 `pbr_<iface>`（id 動態分配，會漂移） |
 
 ---
 
@@ -78,20 +78,52 @@
   3. `fwmark = printf "0x%x" <table id>`（即 table id 的十六進位）。
 - **為何從 300 起**：OpenWrt PBR 套件本身用 256~261，CustRule 用 1000~4000。DBR 從 300 起，避免 PBR 套件新增介面時搶到 DBR 既有 table id 造成路由互相覆蓋。
 
-### rt_tables 命名空間：`pbr_` vs `dbr_`（兩者分開）
+### rt_tables 命名空間：`pbr_` vs `dbr_`（靠前綴分，不靠 id 區間）
 
-| 前綴 | 擁有者 | table id 區 | 用途 / ip rule priority |
-|------|--------|------------|------------------------|
-| `pbr_<iface>` | **OpenWrt PBR 套件**（`/etc/init.d/pbr`，自動產生） | 256~262 | 主 PBR rule，prio 29000+ |
-| `dbr_<iface>` | **DBR 腳本**（`dbroute-setup.sh` / `sync-googleconfig.sh`） | 300+ | DBR fwmark rule，prio 100 |
+| 前綴 | 擁有者 | 用途 / ip rule priority |
+|------|--------|------------------------|
+| `pbr_<iface>` | **OpenWrt PBR 套件**（`/etc/init.d/pbr`，自動產生） | 主 PBR rule，prio 29000+ |
+| `dbr_<iface>` | **DBR 腳本**（`dbroute-setup.sh` / `sync-googleconfig.sh`） | DBR fwmark rule，prio 100 |
 
-- 兩者**名字前綴不同**，不再靠 table id 區間隱性區分。`check-pbr-wg.sh` 裡查
-  `pbr_<iface>`（prio≥29000，主 PBR）與查 `dbr_<iface>`（DBR 第三階段）各管各的。
-- **遷移**：`dbroute-setup.sh` 開頭有冪等遷移，把 rt_tables 裡 300+ 區的舊 `pbr_*`
-  自動 rename 成 `dbr_*`（保留同 table id）。PBR 套件的 256~262 區 `pbr_*` 不碰。
-  舊機升級後第一次跑 dbroute-setup 即自動轉換，無需手動改 rt_tables。
+- 兩者**唯一可靠的區分是名字前綴**（`pbr_` vs `dbr_`），**不能用 table id 區間**。
+- ⚠️ **table id 會漂移、會交錯**：PBR 套件用 `get_rt_tables_next_id`（= rt_tables
+  目前最大 id + 1）分配，每次 reload/開機找不到自己的 `pbr_<iface>` 就用更大 id
+  重建。DBR 也用「最大 id + 1」。所以 `pbr_*` 不保證落在 256~262、`dbr_*` 也不
+  保證 300+——**實測重開機後 PBR 套件別名可能跑到 302~317**。任何「id ≥ 300 就是
+  DBR」的判斷都是錯的，會誤把套件別名當 DBR。
+- `check-pbr-wg.sh` 裡查 `pbr_<iface>`（prio≥29000，主 PBR，226/242/383/505 四處）
+  與查 `dbr_<iface>`（DBR 第三階段，608）各管各的。
+- **遷移（白名單制）**：`dbroute-setup.sh` 解析 DBR conf 取得介面清單後，**只把
+  「DBR conf 裡確實存在的介面」**對應的舊 `pbr_<iface>` rename 成 `dbr_<iface>`
+  （保留同 id，冪等）。`wan` 跳過（DBR 用 table 254）。**嚴禁用 id 區間遷移**——
+  否則會誤改套件 `pbr_*` → 套件 reload 重建新 `pbr_` → 遷移再改 → 死循環 + 垃圾累積
+  （此坑曾於 commit 299d469 發生，ea82c91 改白名單制修正）。
 
 > 因此 fwmark 數值會依介面在 `rt_tables` 的登錄順序而異，**不要再背特定數值**，一律用 `ip rule show` / `cat /etc/iproute2/rt_tables` 查現值。
+
+### 重開機會自動重建嗎？（會）
+
+重開機後 DBR / PBR 都會自動重建，由多個開機階段分工，互有保底：
+
+| 階段 | 觸發 | 重建內容 |
+|------|------|---------|
+| `S20dbroute`（init.d START=20） | 開機 | `nft -f dbroute.nft`（DBR 的 nft set + 打標 chain）；30s 後 `dbroute-refresh.sh` 填 IP。**注意：不建 ip rule** |
+| `hotplug 99-pbr-cust` | 每個 `wg*`/`wan` ifup | `dbroute-setup.sh`（**遷移** + DBR ip rule prio 100 + route）；`dbroute-refresh.sh` |
+| `S20pbr`（PBR 套件） | 開機 | 套件自己的 `pbr_*` 別名 + 主 PBR rule（prio 29000+） |
+| `S99pbr-cust`（init.d START=99） | 開機 | CustRule（prio 200）diff 套用 |
+| `rc.local` | 開機後台 | `sync-googleconfig.sh --apply`（完整 sync，重產 conf/nft + dbroute-setup，保底） |
+
+重點：
+- **DBR ip rule（prio 100）不在 S20dbroute 建，靠 wg ifup 的 hotplug 建**。
+  若某 wg 介面開機時沒起來（隧道不通），它的 DBR ip rule 就不建——這是**正確
+  行為**（介面沒起，建了也是黑洞），介面恢復 ifup 時自動補。
+- **遷移每次跑 dbroute-setup 都會執行**（白名單制），確保舊 `pbr_<iface>` 平滑
+  轉 `dbr_<iface>`，且不誤碰 PBR 套件別名。
+- PBR 套件別名 id 每次開機可能不同（漂移），但因 DBR 只認名字前綴 + conf 白名單，
+  兩者重開機後仍各自正確、不互踩。
+
+> 已實機重開機驗證兩次（.8 RAX3000Z 混用機）：`dbr_wg2`/`dbr_wg4` 正確重建、
+> 套件 `pbr_*` 原封不動、無 `dbr_` 孤兒、CustRule 與對外連線正常。
 
 ---
 
