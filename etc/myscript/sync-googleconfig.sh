@@ -87,6 +87,7 @@ SATELLITE_MODE=0
 NO_NETWORK_CHECK=0
 DUMP_ONLY=0
 ONLY_SECTIONS=""
+FORCE_APPLY=0
 _expect_only=0
 for arg in "$@"; do
     # --only 後面接的值（支援 "--only dbroute,dhcp" 兩個 token 的寫法）
@@ -118,6 +119,11 @@ for arg in "$@"; do
         --dump)
             DUMP_ONLY=1
             echo "📋 Dump 模式: 只下載解密並顯示設定內容"
+            ;;
+        --force)
+            # 強制重套(即使段內容未變化)。配 --only 時只 force 指定段;
+            # 單獨 --force 則 force 全部段(=強制 full sync,會收斂掉本地多餘設定)。
+            FORCE_APPLY=1
             ;;
     esac
 done
@@ -423,8 +429,8 @@ main() {
     # 下載並解密
     log "下載並解密配置..."
     local _role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
-    if [ "$DUMP_ONLY" = "1" ] || [ -n "$ONLY_SECTIONS" ]; then
-        # --dump / --only: 不帶 md5，強制 server 回完整 payload（否則 md5 相同會回空白早退）
+    if [ "$DUMP_ONLY" = "1" ] || [ -n "$ONLY_SECTIONS" ] || [ "$FORCE_APPLY" = "1" ]; then
+        # --dump / --only / --force: 不帶 md5，強制 server 回完整 payload（否則 md5 相同會回空白早退）
         local dl_url="$URL"
     elif [ "$_role" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ]; then
         # .hitron-pf.json 缺失: 不帶 md5，強制 server 回完整 payload 以補回
@@ -448,9 +454,9 @@ main() {
     current_md5=$(calculate_md5 "$TMP_BASE64")
     log "📊 當前配置 MD5: $current_md5"
 
-    # 檢查 MD5 是否變化（--dump 與 --only 模式跳過，強制下載解密走逐段比對）
-    # --only 需繞過全域 MD5 早退，否則「Sheet 未新變動但想強制重套指定段」會在此 exit
-    if [ "$DUMP_ONLY" != "1" ] && [ -z "$ONLY_SECTIONS" ] && ! check_md5_changed "$current_md5"; then
+    # 檢查 MD5 是否變化（--dump / --only / --force 模式跳過，強制下載解密走逐段比對）
+    # --only/--force 需繞過全域 MD5 早退，否則「Sheet 未新變動但想強制重套」會在此 exit
+    if [ "$DUMP_ONLY" != "1" ] && [ -z "$ONLY_SECTIONS" ] && [ "$FORCE_APPLY" != "1" ] && ! check_md5_changed "$current_md5"; then
         if [ $DRY_RUN -eq 0 ]; then
             save_current_md5 "$current_md5"
         fi
@@ -992,6 +998,31 @@ main() {
         echo "$_norm" | grep -qw dbroute            || CHANGED_DBROUTE=0
         echo "$_norm" | grep -qw routerconfig       || CHANGED_ROUTERCONFIG=0
         echo "$_norm" | grep -qw routerconfig_hitron || CHANGED_ROUTERCONFIG_HITRON=0
+    fi
+
+    # --force: 強制重套(即使段內容未變化)。複用 --only 的段名機制:
+    #   有 --only → 只 force ONLY_SECTIONS 內的段(其餘已被上面歸零,不會被 force)
+    #   無 --only → force 全部段(=強制 full sync)
+    # 判斷依據:該段在 uci/sheet 有對應內容才 force=1(空段不必硬刷)。
+    if [ "$FORCE_APPLY" = "1" ]; then
+        if [ -n "$ONLY_SECTIONS" ]; then
+            _fmask="$_norm"                      # 只 force --only 指定的段
+            log "🔁 --force: 強制重套指定段 [$_norm](即使內容未變化)"
+            echo "🔁 --force: 強制重套指定段 [$_norm]"
+        else
+            _fmask="network dhcp pbr qos_rules qos_interfaces crontab dbroute routerconfig routerconfig_hitron"
+            log "🔁 --force: 強制重套全部段(=強制 full sync,會收斂掉本地多餘設定)"
+            echo "🔁 --force: 強制重套全部段(=強制 full sync)"
+        fi
+        echo "$_fmask" | grep -qw network            && CHANGED_NETWORK=1
+        echo "$_fmask" | grep -qw dhcp               && CHANGED_DHCP=1
+        echo "$_fmask" | grep -qw pbr                && CHANGED_PBR=1
+        echo "$_fmask" | grep -qw qos_rules          && CHANGED_QOS_RULES=1
+        echo "$_fmask" | grep -qw qos_interfaces     && CHANGED_QOS_INTERFACES=1
+        echo "$_fmask" | grep -qw crontab            && CHANGED_CRONTAB=1
+        echo "$_fmask" | grep -qw dbroute            && CHANGED_DBROUTE=1
+        echo "$_fmask" | grep -qw routerconfig       && CHANGED_ROUTERCONFIG=1
+        echo "$_fmask" | grep -qw routerconfig_hitron && CHANGED_ROUTERCONFIG_HITRON=1
     fi
 
     # 如果沒有任何變更，退出
