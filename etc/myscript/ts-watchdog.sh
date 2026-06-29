@@ -127,6 +127,28 @@ if [ "$WANT" = "false" ]; then
   exit 0
 fi
 
+# ---- 健檢 0:節點互通路由(table 52)----
+# 與 exit node 無關。tailscale 把 peer 路由(100.64.x dev tailscale0)裝在
+# table 52(ip rule: from all lookup 52)。網路抖動/角色變動(如 auto-role 改 IP)
+# 後，tailscale 重裝路由可能失敗 → table 52 空 → 普通 ping 100.64.x fallback
+# 走 wan 丟包(節點互通全斷,但 tailscale ping 仍通 → 易誤判)。
+# 此檢查放在 exit-node Gate 之前,因為「無 exit node 的機器(如純互通 client)」
+# 也需要它。修復:重啟 tailscaled 讓它重裝 table 52。
+TS52_CNT=$(ip route show table 52 2>/dev/null | grep -c "dev tailscale0")
+if [ "${TS52_CNT:-0}" -eq 0 ]; then
+  log "FAIL: table 52 無 100.64 路由(節點互通斷)-> 重啟 tailscaled 重裝路由"
+  /etc/init.d/tailscale restart >/dev/null 2>&1
+  sleep 12
+  TS52_CNT2=$(ip route show table 52 2>/dev/null | grep -c "dev tailscale0")
+  if [ "${TS52_CNT2:-0}" -gt 0 ]; then
+    log "RECOVERED: table 52 路由已重建($TS52_CNT2 條),節點互通恢復"
+    notify "✅ Tailscale 節點互通自癒成功(table 52 路由重建,$TS52_CNT2 條)"
+  else
+    log "ERROR: 重啟後 table 52 仍無 100.64 路由,節點互通可能仍斷"
+    notify_fail "🛑 Tailscale 節點互通自癒失敗:table 52 無路由,需人工介入"
+  fi
+fi
+
 TS_IP=$(ts_ip)
 
 # ---- 健檢 1:client 是否設有 exit node 意圖 ----
