@@ -85,11 +85,26 @@ KEY_HEX=$(echo -n "$KEY_STRING" | hexdump -v -e '/1 "%02x"')
 SATELLITE_MODE=0
 NO_NETWORK_CHECK=0
 DUMP_ONLY=0
+ONLY_SECTIONS=""
+_expect_only=0
 for arg in "$@"; do
+    # --only 後面接的值（支援 "--only dbroute,dhcp" 兩個 token 的寫法）
+    if [ "$_expect_only" = "1" ]; then
+        ONLY_SECTIONS="$arg"
+        _expect_only=0
+        continue
+    fi
     case "$arg" in
         --apply)
             DRY_RUN=0
             echo "⚠️ 警告: 使用 --apply 參數，將實際修改系統配置!"
+            ;;
+        --only)
+            # 下一個 token 是段名清單
+            _expect_only=1
+            ;;
+        --only=*)
+            ONLY_SECTIONS="${arg#--only=}"
             ;;
         --satellite)
             SATELLITE_MODE=1
@@ -407,7 +422,8 @@ main() {
     # 下載並解密
     log "下載並解密配置..."
     local _role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
-    if [ "$DUMP_ONLY" = "1" ]; then
+    if [ "$DUMP_ONLY" = "1" ] || [ -n "$ONLY_SECTIONS" ]; then
+        # --dump / --only: 不帶 md5，強制 server 回完整 payload（否則 md5 相同會回空白早退）
         local dl_url="$URL"
     elif [ "$_role" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ]; then
         # .hitron-pf.json 缺失: 不帶 md5，強制 server 回完整 payload 以補回
@@ -431,8 +447,9 @@ main() {
     current_md5=$(calculate_md5 "$TMP_BASE64")
     log "📊 當前配置 MD5: $current_md5"
 
-    # 檢查 MD5 是否變化（--dump 模式跳過，強制下載解密）
-    if [ "$DUMP_ONLY" != "1" ] && ! check_md5_changed "$current_md5"; then
+    # 檢查 MD5 是否變化（--dump 與 --only 模式跳過，強制下載解密走逐段比對）
+    # --only 需繞過全域 MD5 早退，否則「Sheet 未新變動但想強制重套指定段」會在此 exit
+    if [ "$DUMP_ONLY" != "1" ] && [ -z "$ONLY_SECTIONS" ] && ! check_md5_changed "$current_md5"; then
         if [ $DRY_RUN -eq 0 ]; then
             save_current_md5 "$current_md5"
         fi
@@ -945,15 +962,49 @@ main() {
         CHANGED_ROUTERCONFIG_HITRON=1
     fi
 
+    # --only 過濾：只保留白名單內的段，其餘 CHANGED_* 強制歸零
+    # 用法: --only dbroute,dhcp  或  --only=dbroute
+    # 段名: network dhcp pbr qos_rules qos_interfaces crontab dbroute routerconfig routerconfig_hitron
+    if [ -n "$ONLY_SECTIONS" ]; then
+        _norm=$(echo "$ONLY_SECTIONS" | tr 'A-Z,' 'a-z ' )
+        # 校驗每個段名是否合法
+        for _s in $_norm; do
+            case "$_s" in
+                network|dhcp|pbr|qos_rules|qos_interfaces|crontab|dbroute|routerconfig|routerconfig_hitron) ;;
+                *)
+                    log "❌ --only 未知段名: $_s"
+                    echo "❌ --only 未知段名: '$_s'"
+                    echo "   可用段名: network dhcp pbr qos_rules qos_interfaces crontab dbroute routerconfig routerconfig_hitron"
+                    exit 2
+                    ;;
+            esac
+        done
+        log "🎯 --only 模式: 僅套用 [$_norm]，其餘段忽略"
+        echo "🎯 --only 模式: 僅套用 [$_norm]"
+        # 預設全部歸零，再依白名單把該段的「實際變更」狀態還原
+        echo "$_norm" | grep -qw network            || CHANGED_NETWORK=0
+        echo "$_norm" | grep -qw dhcp               || CHANGED_DHCP=0
+        echo "$_norm" | grep -qw pbr                || CHANGED_PBR=0
+        echo "$_norm" | grep -qw qos_rules          || CHANGED_QOS_RULES=0
+        echo "$_norm" | grep -qw qos_interfaces     || CHANGED_QOS_INTERFACES=0
+        echo "$_norm" | grep -qw crontab            || CHANGED_CRONTAB=0
+        echo "$_norm" | grep -qw dbroute            || CHANGED_DBROUTE=0
+        echo "$_norm" | grep -qw routerconfig       || CHANGED_ROUTERCONFIG=0
+        echo "$_norm" | grep -qw routerconfig_hitron || CHANGED_ROUTERCONFIG_HITRON=0
+    fi
+
     # 如果沒有任何變更，退出
     if [ $CHANGED_NETWORK -eq 0 ] && [ $CHANGED_DHCP -eq 0 ] && [ $CHANGED_PBR -eq 0 ] && \
        [ $CHANGED_QOS_RULES -eq 0 ] && [ $CHANGED_QOS_INTERFACES -eq 0 ] && [ $CHANGED_CRONTAB -eq 0 ] && \
        [ $CHANGED_DBROUTE -eq 0 ] && [ $CHANGED_ROUTERCONFIG -eq 0 ] && [ $CHANGED_ROUTERCONFIG_HITRON -eq 0 ]; then
         log "✅ 所有配置均無變化，無需更新"
-        save_current_md5 "$current_md5"
-        # 產生 uploadconfig hash（確保後續 ram2flash 不會重複上傳，但不觸發上傳；僅 gateway）
-        [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
-            [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh --hash-only
+        # --only 模式不寫全域 MD5，避免被排除的段被 MD5 短路永久擋住
+        if [ -z "$ONLY_SECTIONS" ]; then
+            save_current_md5 "$current_md5"
+            # 產生 uploadconfig hash（確保後續 ram2flash 不會重複上傳，但不觸發上傳；僅 gateway）
+            [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
+                [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh --hash-only
+        fi
         rm -f "$TMP_BASE64" "$TMP_BINARY" "$TMP_DECRYPTED" "$TMP_PBR" "$TMP_NETWORK" "$TMP_DHCP" \
               "$TMP_QOS_RULES" "$TMP_QOS_INTERFACES" "$TMP_CRONTAB" "$TMP_DBROUTE" "$TMP_ROUTERCONFIG" "$TMP_ROUTERCONFIG_HITRON"
         exit 0
@@ -1697,10 +1748,16 @@ NFTEOF
         if [ "$NO_NETWORK_CHECK" = "1" ]; then
             log "⚠️ 跳過網路健康檢查 (--no-network-check)"
             echo "🎉 配置更新完成!"
-            save_current_md5 "$current_md5"
-            # 設定有變動，上傳加密設定到 Google Sheet（僅 gateway）
-            [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
-                [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh
+            # --only 模式不寫全域 MD5、不上傳，避免被跳過的段被 MD5 短路永久擋住，
+            # 也避免把「只套部分」的狀態回傳 Sheet。下次仍走完整逐段比對。
+            if [ -z "$ONLY_SECTIONS" ]; then
+                save_current_md5 "$current_md5"
+                # 設定有變動，上傳加密設定到 Google Sheet（僅 gateway）
+                [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
+                    [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh
+            else
+                log "🎯 --only 模式: 跳過全域 MD5 寫入與 Sheet 上傳"
+            fi
         else
             log "🩺 執行網路連接健康檢查..."
             HEALTH_OK=0
@@ -1715,10 +1772,15 @@ NFTEOF
             if [ "$HEALTH_OK" = "1" ]; then
                 log "✅ 網路連接正常。"
                 echo "🎉 配置更新完成!"
-                save_current_md5 "$current_md5"
-                # 設定有變動，上傳加密設定到 Google Sheet（僅 gateway）
-                [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
-                    [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh
+                # --only 模式不寫全域 MD5、不上傳（理由同上）
+                if [ -z "$ONLY_SECTIONS" ]; then
+                    save_current_md5 "$current_md5"
+                    # 設定有變動，上傳加密設定到 Google Sheet（僅 gateway）
+                    [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" != "client" ] && \
+                        [ -x /etc/myscript/sync-uploadconfig.sh ] && /etc/myscript/sync-uploadconfig.sh
+                else
+                    log "🎯 --only 模式: 跳過全域 MD5 寫入與 Sheet 上傳"
+                fi
             else
                 log "❌ 錯誤: 網路連接測試失敗! 正在回滾配置..."
 

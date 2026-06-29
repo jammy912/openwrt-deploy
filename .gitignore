@@ -1,4 +1,4 @@
 .secrets/
 *.enc
 upload_script.py
-etc/myscript/MULTIPEER-FAILOVER-SUMMARY.md
+MULTIPEER-FAILOVER-SUMMARY.md
