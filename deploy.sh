@@ -614,7 +614,22 @@ if ! zone_exists VPN; then
     uci set firewall.@zone[-1].output='ACCEPT'
     uci set firewall.@zone[-1].forward='ACCEPT'
     uci set firewall.@zone[-1].masq='1'
+    # mtu_fix(MSS clamp)必須開:wg 入站再轉出(尤其 wg-over-tailscale 雙層封裝
+    # 有效 MTU 更小)的 TCP 大包會超 MTU 被丟 → ICMP/握手通但 https/大流量 timeout。
+    uci set firewall.@zone[-1].mtu_fix='1'
 fi
+
+# 幂等補設:VPN zone 已存在的舊機(上面 if 跳過)也要確保 mtu_fix=1
+# (早期版本建 VPN zone 漏了 mtu_fix,導致 wg-over-tailscale TCP 不通)
+_vpn_idx=0
+while uci get firewall.@zone[$_vpn_idx].name >/dev/null 2>&1; do
+    if [ "$(uci get firewall.@zone[$_vpn_idx].name)" = "VPN" ]; then
+        [ "$(uci get firewall.@zone[$_vpn_idx].mtu_fix 2>/dev/null)" = "1" ] || \
+            uci set firewall.@zone[$_vpn_idx].mtu_fix='1'
+        break
+    fi
+    _vpn_idx=$((_vpn_idx+1))
+done
 
 # VPN forwardings
 fwd_exists VPN lan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='VPN'; uci set firewall.@forwarding[-1].dest='lan'; }
