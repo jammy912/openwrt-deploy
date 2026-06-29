@@ -128,6 +128,16 @@ for arg in "$@"; do
     esac
 done
 
+# 組執行參數摘要(供 sync start 推播 / log,一眼看出這次怎麼跑的)
+SYNC_ARGS_DESC=""
+[ "$DRY_RUN" = "0" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --apply" || SYNC_ARGS_DESC="$SYNC_ARGS_DESC dry-run"
+[ -n "$ONLY_SECTIONS" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --only=$ONLY_SECTIONS"
+[ "$FORCE_APPLY" = "1" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --force"
+[ "$SATELLITE_MODE" = "1" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --satellite"
+[ "$NO_NETWORK_CHECK" = "1" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --no-network-check"
+[ "$DUMP_ONLY" = "1" ] && SYNC_ARGS_DESC="$SYNC_ARGS_DESC --dump"
+SYNC_ARGS_DESC=$(echo "$SYNC_ARGS_DESC" | sed 's/^ *//')
+
 # 自動偵測身份: override 優先，再看 .mesh_role_active，最後 fallback .mesh_role
 if [ "$SATELLITE_MODE" = "0" ]; then
     _override=$(cat /etc/myscript/.mesh_role_override 2>/dev/null | tr 'A-Z' 'a-z')
@@ -467,7 +477,7 @@ main() {
 
     echo default-on > /sys/class/leds/blue:status/trigger 2>/dev/null
 
-    push_notify "ConfigSync_Start"
+    push_notify "ConfigSync_Start [${SYNC_ARGS_DESC}]"
 
     base64 -d "$TMP_BASE64" > "$TMP_BINARY" 2>/dev/null || { log "Base64解碼失敗"; exit 1; }
     openssl enc -aes-256-cbc -d -K "$KEY_HEX" -iv "$IV_HEX" -in "$TMP_BINARY" -out "$TMP_DECRYPTED" 2>/dev/null || { log "AES解密失敗"; exit 1; }
