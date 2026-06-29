@@ -605,7 +605,7 @@ if [ -f "$DBR_CONF" ]; then
     DBR_HS_TIMEOUT=180  # handshake 超過 180 秒視為對端離線, 直接判 down 不 ping
 
     for DR_IFACE in $DR_IFACES; do
-        DR_TABLE=$(awk -v name="pbr_${DR_IFACE}" '$2 == name {print $1}' "$RT_TABLES")
+        DR_TABLE=$(awk -v name="dbr_${DR_IFACE}" '$2 == name {print $1}' "$RT_TABLES")
         [ -z "$DR_TABLE" ] && continue
         DR_FWMARK=$(printf "0x%x" "$DR_TABLE")
 

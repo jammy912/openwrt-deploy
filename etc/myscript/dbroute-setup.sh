@@ -1,10 +1,25 @@
 #!/bin/sh
-# 動態設定域名 PBR 路由規則
-# 讀取 /etc/iproute2/rt_tables 中所有 pbr_wg_* 項目
+# 動態設定域名路由(DBR)規則
+# 讀取 /etc/iproute2/rt_tables 中所有 dbr_<iface> 項目
 # 為每個有對應 nft set 的介面建立 ip rule + route
+# DBR table 別名用 dbr_ 前綴(300+ 區)，與 OpenWrt PBR 套件的 pbr_(256-262 區)分開
 
 RT_TABLES="/etc/iproute2/rt_tables"
 CONF="/etc/dnsmasq.d/dbroute-domains.conf"
+
+# DBR table 命名遷移：rt_tables 裡 300+ 區的舊 DBR 別名 pbr_* → dbr_*
+# （PBR 套件的 256-262 區 pbr_* 不動）。保留同 table id，冪等。
+# Why：rt_tables 是 >> 只增不刪，改名後新舊會並存；這裡每次啟動主動 rename。
+# 安全：ip rule 用 table id 數字不是別名字串，rename 不影響已建 rule；後段查 id
+#       與重建都在此之後，故用新名查得到。
+if [ -f "$RT_TABLES" ]; then
+    awk '$1>=300 && $2 ~ /^pbr_/ {print $1, $2}' "$RT_TABLES" | while read -r _id _name; do
+        _new="dbr_${_name#pbr_}"
+        sed -i "/^${_id}[[:space:]]\+${_name}\$/d" "$RT_TABLES"
+        grep -q "[[:space:]]${_new}\$" "$RT_TABLES" || echo "$_id $_new" >> "$RT_TABLES"
+        logger -t dbroute "Migrated rt_table alias $_name → $_new (id $_id)"
+    done
+fi
 
 # 清除所有舊的域名路由 fwmark 規則（priority 100）
 ip rule show | grep "priority 100" | while read -r line; do
@@ -41,7 +56,7 @@ for IFACE in $INTERFACES; do
     fi
 
     # 從 rt_tables 找 table ID
-    TABLE_ID=$(awk -v name="pbr_${IFACE}" '$2 == name {print $1}' "$RT_TABLES")
+    TABLE_ID=$(awk -v name="dbr_${IFACE}" '$2 == name {print $1}' "$RT_TABLES")
 
     # 沒對應條目就自動分配下一個可用 table id 並寫入
     # Why: PBR 套件只管 uci 設為 interface 的 wg,wg2 之類「反向接入但 dbroute 要走」
@@ -51,8 +66,8 @@ for IFACE in $INTERFACES; do
         TABLE_ID=$(($(awk '/^[0-9]+/{print $1}' "$RT_TABLES" | sort -n | tail -1) + 1))
         # DBR 從 300 起,跟 PBR 套件 256-261 區隔
         [ "$TABLE_ID" -lt 300 ] && TABLE_ID=300
-        echo "$TABLE_ID pbr_${IFACE}" >> "$RT_TABLES"
-        logger -t dbroute "Auto-registered pbr_${IFACE} → table $TABLE_ID"
+        echo "$TABLE_ID dbr_${IFACE}" >> "$RT_TABLES"
+        logger -t dbroute "Auto-registered dbr_${IFACE} → table $TABLE_ID"
     fi
 
     # fwmark = table ID 的十六進位

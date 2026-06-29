@@ -1355,14 +1355,14 @@ main() {
                     # 從 rt_tables 找 table ID，不存在則自動建立
                     # DBR table id 從 300 起,跟 PBR 套件用的 256-261 區隔,
                     # 避免 PBR 加新介面時搶到 dbroute 既有 table id 造成路由互相覆蓋。
-                    RTABLE_ID=$(awk -v name="pbr_${RIFACE}" '$2 == name {print $1}' "$RT_TABLES")
+                    RTABLE_ID=$(awk -v name="dbr_${RIFACE}" '$2 == name {print $1}' "$RT_TABLES")
                     if [ -z "$RTABLE_ID" ]; then
                         RTABLE_ID=$(awk '/^[0-9]+/ {if($1>max) max=$1} END{print max+1}' "$RT_TABLES")
                         if [ -z "$RTABLE_ID" ] || [ "$RTABLE_ID" -lt 300 ]; then
                             RTABLE_ID=300
                         fi
-                        echo "$RTABLE_ID pbr_${RIFACE}" >> "$RT_TABLES"
-                        log "  自動建立 rt_table: $RTABLE_ID pbr_${RIFACE}"
+                        echo "$RTABLE_ID dbr_${RIFACE}" >> "$RT_TABLES"
+                        log "  自動建立 rt_table: $RTABLE_ID dbr_${RIFACE}"
                     fi
                     RFWMARK=$(printf "0x%x" "$RTABLE_ID")
                 fi

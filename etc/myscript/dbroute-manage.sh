@@ -44,7 +44,7 @@ case "$1" in
 
         for IFACE in $IFACES; do
             SET_NAME="route_${IFACE}_v4"
-            TABLE_ID=$(awk -v name="pbr_${IFACE}" '$2 == name {print $1}' "$RT_TABLES" 2>/dev/null)
+            TABLE_ID=$(awk -v name="dbr_${IFACE}" '$2 == name {print $1}' "$RT_TABLES" 2>/dev/null)
             FWMARK=""
             [ -n "$TABLE_ID" ] && FWMARK=$(printf "0x%x" "$TABLE_ID")
 

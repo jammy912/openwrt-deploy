@@ -1,7 +1,7 @@
 # DBR / PBR 路由機制說明
 
 > 對應 deploy 版本（`sync-googleconfig.sh` + `dbroute-*.sh` + `pbr-cust`）。
-> 重點：DBR 的 table id / fwmark **不再寫死**，改由 `rt_tables` 的 `pbr_<iface>` 動態決定。
+> 重點：DBR 的 table id / fwmark **不再寫死**，改由 `rt_tables` 的 `dbr_<iface>` 動態決定。
 
 ## 名詞定義
 
@@ -43,7 +43,7 @@
 │  priority 100  ← DBR fwmark 規則             │
 │    fwmark 0xfe   → lookup 254 (main → wan)   │
 │    fwmark <hex>  → lookup <table id>         │
-│      （table id = rt_tables 內 pbr_<iface>）  │
+│      （table id = rt_tables 內 dbr_<iface>）  │
 │                                              │
 │  priority 200  ← CustRule PBR                │
 │    from <src ip> → lookup <CustRule 數字>     │
@@ -73,10 +73,23 @@
 
 - **wan**：固定 `table 254`（main）、`fwmark 0xfe`，強制走實體 wan。
 - **其他介面（wg0/wg2/wg_tw…）**：
-  1. 先查 `/etc/iproute2/rt_tables` 中的 `pbr_<iface>` 取得 table id。
+  1. 先查 `/etc/iproute2/rt_tables` 中的 `dbr_<iface>` 取得 table id。
   2. 查不到就自動分配「目前最大 table id + 1」並寫回 `rt_tables`，**最低從 300 起**。
   3. `fwmark = printf "0x%x" <table id>`（即 table id 的十六進位）。
 - **為何從 300 起**：OpenWrt PBR 套件本身用 256~261，CustRule 用 1000~4000。DBR 從 300 起，避免 PBR 套件新增介面時搶到 DBR 既有 table id 造成路由互相覆蓋。
+
+### rt_tables 命名空間：`pbr_` vs `dbr_`（兩者分開）
+
+| 前綴 | 擁有者 | table id 區 | 用途 / ip rule priority |
+|------|--------|------------|------------------------|
+| `pbr_<iface>` | **OpenWrt PBR 套件**（`/etc/init.d/pbr`，自動產生） | 256~262 | 主 PBR rule，prio 29000+ |
+| `dbr_<iface>` | **DBR 腳本**（`dbroute-setup.sh` / `sync-googleconfig.sh`） | 300+ | DBR fwmark rule，prio 100 |
+
+- 兩者**名字前綴不同**，不再靠 table id 區間隱性區分。`check-pbr-wg.sh` 裡查
+  `pbr_<iface>`（prio≥29000，主 PBR）與查 `dbr_<iface>`（DBR 第三階段）各管各的。
+- **遷移**：`dbroute-setup.sh` 開頭有冪等遷移，把 rt_tables 裡 300+ 區的舊 `pbr_*`
+  自動 rename 成 `dbr_*`（保留同 table id）。PBR 套件的 256~262 區 `pbr_*` 不碰。
+  舊機升級後第一次跑 dbroute-setup 即自動轉換，無需手動改 rt_tables。
 
 > 因此 fwmark 數值會依介面在 `rt_tables` 的登錄順序而異，**不要再背特定數值**，一律用 `ip rule show` / `cat /etc/iproute2/rt_tables` 查現值。
 
@@ -275,7 +288,7 @@ ip rule show | grep "200:"
 ip route show table 300
 ip route show table 254        # wan / main
 
-# 查 DBR table id 與介面對應（pbr_<iface>，DBR 從 300 起）
+# 查 DBR table id 與介面對應（dbr_<iface>，DBR 從 300 起）
 cat /etc/iproute2/rt_tables
 ```
 
@@ -346,16 +359,16 @@ logread | grep -i dbroute
 | 域名沒走到指定 VPN | `dbroute-manage.sh status` 看 set 有沒有 IP、ip rule 是否 MISSING |
 | set 內沒有 IP | dnsmasq 是否載入 conf（`cat .../dbroute-domains.conf`）；手動 `dbroute-refresh.sh` |
 | ip rule MISSING | 介面是否 UP（`ip link show wg2`）；跑 `dbroute-setup.sh` |
-| fwmark/table 對不上 | `cat /etc/iproute2/rt_tables` 看 `pbr_<iface>` 實際 table id（DBR 從 300 起） |
+| fwmark/table 對不上 | `cat /etc/iproute2/rt_tables` 看 `dbr_<iface>` 實際 table id（DBR 從 300 起） |
 | CustRule 沒生效 | `uci show pbr` 確認 enabled；`/etc/init.d/pbr-cust start`；看 `/tmp/pbr-cust.log` |
 | firewall restart 後失效 | 確認 `dbroute-fwinclude.sh` 有被 firewall include 觸發重載 |
 
 ### 9. 診斷陷阱（踩過的坑）
 
 - **`ip rule show` 顯示的是 table 別名不是數字、開頭是 `100:` 不是 `priority 100`**：
-  例如 DBR 規則實際顯示為 `100:  from all fwmark 0x12e lookup pbr_wg4`
+  例如 DBR 規則實際顯示為 `100:  from all fwmark 0x12e lookup dbr_wg4`
   （不是 `... lookup 302`，也不是 `priority 100`）。
-  → 驗證 DBR 規則在不在，**grep `pbr_wg4` 或 `0x12e`，不要 grep `"priority 100"`**
+  → 驗證 DBR 規則在不在，**grep `dbr_wg4` 或 `0x12e`，不要 grep `"priority 100"`**
   （後者抓不到，會誤判 DBR 失效）。`ip rule list` 與 `ip rule show` 輸出格式相同。
 
 - **「域名沒走指定 VPN」八成是 set 沒被填 IP，不是路由壞**：
@@ -389,6 +402,6 @@ logread | grep -i dbroute
 | dbroute-refresh.sh | `/etc/myscript/dbroute-refresh.sh` | 重新解析域名刷新 nft set IP |
 | dbroute-fwinclude.sh | `/etc/myscript/dbroute-fwinclude.sh` | firewall include 自動重載 nft |
 | dbroute-manage.sh | `/etc/myscript/dbroute-manage.sh` | 手動管理/除錯（add/del/list/status/reload） |
-| rt_tables | `/etc/iproute2/rt_tables` | DBR table id ↔ `pbr_<iface>` 對應（DBR 從 300 起） |
+| rt_tables | `/etc/iproute2/rt_tables` | DBR table id ↔ `dbr_<iface>` 對應（DBR 從 300 起） |
 | pbr-cust | `/etc/init.d/pbr-cust` | CustRule PBR 服務（diff 模式無感套用） |
 | 99-pbr-cust | `/etc/hotplug.d/iface/99-pbr-cust` | WG 介面 up/down 時觸發 PBR |
