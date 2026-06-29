@@ -333,9 +333,13 @@ log "開始檢查 PBR WireGuard 介面連線狀態..."
 
 SECTIONS=$(uci show pbr | grep ".dest_addr='wg" | cut -d'.' -f2)
 
+# 沒有 wg CustRule 不能直接 exit：DBR(第三階段) 與 server wg failover(第四階段)
+# 不依賴 CustRule。只有 DBR、無 CustRule 的機器(例如某些 client)若在此 exit，
+# DBR 健檢就永遠不跑 → wg 介面 down/disable 後的孤兒 ip rule 沒人清，
+# fwmark 命中後流量進空 table 黑洞(tracert 卡第 2 跳)。
+# 故這裡只記錄並「跳過第一/二階段(CustRule)」，繼續往下跑 DBR / failover。
 if [ -z "$SECTIONS" ]; then
-    log "找不到任何 dest_addr 以 'wg' 開頭的 PBR 策略。"
-    exit 0
+    log "找不到任何 dest_addr 以 'wg' 開頭的 PBR 策略，跳過 CustRule 階段，續做 DBR 健檢。"
 fi
 
 CURRENT_HHMM=$(date '+%H%M')
