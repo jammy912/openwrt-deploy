@@ -1391,6 +1391,13 @@ main() {
                     echo "nftset=/${dom}/4#inet#fw4#${SET_NAME}" >> "$CNROUTE_DNSMASQ"
                 done
 
+                # log 生效的 dbroute 清單(介面 → table/fwmark + 域名數 + 域名)
+                # 此處只列「介面在 uci 有定義、確實產生 nftset」的有效項目;
+                # uci 無定義被跳過的(上面 continue)不會列入,所以這就是「有效清單」。
+                _dom_cnt=$(echo "$DOMAINS" | grep -c .)
+                _dom_list=$(echo "$DOMAINS" | tr '\n' ',' | sed 's/,$//')
+                log "  📋 DBR 生效: ${RIFACE} (table ${RTABLE_ID}, fwmark ${RFWMARK}) ← ${_dom_cnt} 域名: ${_dom_list}"
+
                 # 寫 nft set
                 cat >> "$CNROUTE_NFT" << NFTEOF
 
