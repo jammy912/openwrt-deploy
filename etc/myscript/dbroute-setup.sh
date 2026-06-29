@@ -2,24 +2,12 @@
 # 動態設定域名路由(DBR)規則
 # 讀取 /etc/iproute2/rt_tables 中所有 dbr_<iface> 項目
 # 為每個有對應 nft set 的介面建立 ip rule + route
-# DBR table 別名用 dbr_ 前綴(300+ 區)，與 OpenWrt PBR 套件的 pbr_(256-262 區)分開
+# DBR table 別名用 dbr_<iface> 前綴，與 OpenWrt PBR 套件的 pbr_<iface> 分開。
+# 注意：兩者 table id 都是「rt_tables 最大 id + 1」動態分配，會交錯/漂移，
+#       不能用 id 區間區分；只能用名字前綴(dbr_ vs pbr_)與 DBR conf 白名單。
 
 RT_TABLES="/etc/iproute2/rt_tables"
 CONF="/etc/dnsmasq.d/dbroute-domains.conf"
-
-# DBR table 命名遷移：rt_tables 裡 300+ 區的舊 DBR 別名 pbr_* → dbr_*
-# （PBR 套件的 256-262 區 pbr_* 不動）。保留同 table id，冪等。
-# Why：rt_tables 是 >> 只增不刪，改名後新舊會並存；這裡每次啟動主動 rename。
-# 安全：ip rule 用 table id 數字不是別名字串，rename 不影響已建 rule；後段查 id
-#       與重建都在此之後，故用新名查得到。
-if [ -f "$RT_TABLES" ]; then
-    awk '$1>=300 && $2 ~ /^pbr_/ {print $1, $2}' "$RT_TABLES" | while read -r _id _name; do
-        _new="dbr_${_name#pbr_}"
-        sed -i "/^${_id}[[:space:]]\+${_name}\$/d" "$RT_TABLES"
-        grep -q "[[:space:]]${_new}\$" "$RT_TABLES" || echo "$_id $_new" >> "$RT_TABLES"
-        logger -t dbroute "Migrated rt_table alias $_name → $_new (id $_id)"
-    done
-fi
 
 # 清除所有舊的域名路由 fwmark 規則（priority 100）
 ip rule show | grep "priority 100" | while read -r line; do
@@ -43,6 +31,24 @@ if [ -z "$INTERFACES" ]; then
     logger -t dbroute "No domain route interfaces found in $CONF"
     exit 0
 fi
+
+# DBR table 命名遷移：把舊的 pbr_<iface> 改名為 dbr_<iface>，保留同 table id。
+# **只遷移 DBR conf 裡確實存在的介面（$INTERFACES 白名單）**，
+# 嚴禁用 table id 區間判斷——OpenWrt PBR 套件的 pbr_* 別名 id 會漂移(可能 >300)，
+# 若用 id 區間會誤改套件別名，觸發套件 reload 重建新 pbr_ → 本函式再改 → 死循環。
+# 套件用 get_rt_tables_id 以名字 pbr_<iface> 查 id，故只要不碰它的別名即安全。
+# wan 不進此區(DBR 的 wan 用 table 254/main)，故白名單裡的 wan 不會有 pbr_wan 被改。
+for _if in $INTERFACES; do
+    [ "$_if" = "wan" ] && continue
+    _old="pbr_${_if}"
+    _new="dbr_${_if}"
+    _id=$(awk -v n="$_old" '$2 == n {print $1; exit}' "$RT_TABLES")
+    [ -z "$_id" ] && continue   # 沒有舊 pbr_<iface> 就不用遷移
+    # 已有同名 dbr_<iface> 則只刪舊 pbr_，否則改名(保留 id)
+    sed -i "/^${_id}[[:space:]]\+${_old}\$/d" "$RT_TABLES"
+    grep -q "[[:space:]]${_new}\$" "$RT_TABLES" || echo "$_id $_new" >> "$RT_TABLES"
+    logger -t dbroute "Migrated rt_table alias $_old → $_new (id $_id)"
+done
 
 for IFACE in $INTERFACES; do
     # wan 使用固定 table 254 (main)，讓域名走回預設路由
