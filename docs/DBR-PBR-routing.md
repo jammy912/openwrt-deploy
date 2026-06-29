@@ -117,7 +117,7 @@ config dbroute 區塊（UCI）
 | `sync-googleconfig.sh` | 從 Google Sheet 下載設定，**直接生成** `dbroute-domains.conf` 與 `dbroute.nft`，並載入 nft、觸發後續腳本 |
 | `dbroute-domains.conf` | 告訴 dnsmasq：解析域名時把 IP 加入對應的 nft set |
 | `dbroute.nft` | 定義 nft set 和 prerouting chain（打 fwmark） |
-| `dbroute-setup.sh` | 建立 ip rule（fwmark → lookup table）和 ip route；priority 100 規則先清後建，table 動態解析/自動登錄 |
+| `dbroute-setup.sh` | 建立 ip rule（fwmark → lookup table）和 ip route；priority 100 規則先清後建（**add 前先 `ip rule del` 同 key 確保冪等**，避免清除迴圈漏清時 `add` 撞 `RTNETLINK answers: File exists` 導致規則沒建成、DBR 失效），table 動態解析/自動登錄 |
 | `dbroute-refresh.sh` | 透過 `nslookup ... 127.0.0.1` 重新解析所有域名，填充 nft set（cron 定時 + 全域鎖） |
 | `dbroute-fwinclude.sh` | firewall restart/reload 時，若 chain 不存在則重載 `dbroute.nft` 並排程刷新 |
 | `dbroute-manage.sh` | 手動管理/除錯工具（add / del / list / status / reload） |
@@ -125,9 +125,19 @@ config dbroute 區塊（UCI）
 ### sync-googleconfig 觸發順序（CHANGED_DBROUTE=1 時）
 
 1. 生成 `dbroute-domains.conf` + `dbroute.nft`（含動態 table/fwmark）
+   - **介面不存在則跳過**：產生迴圈對每個非 wan 介面先 `ip link show` 檢查，
+     介面不存在（打錯名 / 多機共用 Sheet 但此機無此介面）就 `continue`——
+     不產 nftset/set/打標、不分配 table，並 log + 推播 `DBR_SkipMissingIface_<iface>`。
+     **Why**：否則 nft 仍把封包打上孤兒 mark，但 `dbroute-setup` 因介面不在
+     不建 ip rule → 封包回落 main table **靜默走 wan（洩真實 IP）**。
 2. 先 `nft delete chain ... domain_prerouting` 與舊 `route_*_v4` set，再 `nft -f dbroute.nft`
-3. 標記 `CHANGED_DHCP=1` → 重啟 dnsmasq 讓 nftset 生效
-4. `dbroute-setup.sh`（建立 ip rule + route）
+3. **`dnsmasq reload`（不是 restart）讓 nftset 生效**——用 DBR 專用旗標
+   `CHANGED_DBROUTE_DNS=1`，**不借用全域 `CHANGED_DHCP`**。
+   **Why**：`dnsmasq restart` 在 hybrid role 會連帶叫起 `udhcpc`，把 LAN 重新
+   協商（`udhcpc no lease` → LAN 掉線）。`--only dbroute` 過去借 `CHANGED_DHCP=1`
+   而 restart，正是它弄掛 LAN 的原因。`reload` 只重讀 config 不重起 interface，
+   nftset 一樣生效。
+4. `dbroute-setup.sh`（建立 ip rule + route；add 前先 del 確保冪等）
 5. `dbroute-refresh.sh`（填充 nft set IP）
 
 ### wan 介面的特殊處理
@@ -289,8 +299,9 @@ nft list set inet fw4 route_wg2_v4 | grep -A100 elements
 # 確認 dbroute-domains.conf 內容（自動生成，勿手改）
 cat /etc/dnsmasq.d/dbroute-domains.conf
 
-# 重啟 dnsmasq 後手動觸發一次刷新填充
-service dnsmasq restart
+# 讓 dnsmasq 重讀 conf 後手動觸發一次刷新填充
+# ⚠️ 用 reload 不要用 restart：hybrid role 上 restart 會叫起 udhcpc 震掉 LAN
+/etc/init.d/dnsmasq reload
 /etc/myscript/dbroute-refresh.sh
 logread -e dbroute-refresh | tail
 ```
@@ -338,6 +349,32 @@ logread | grep -i dbroute
 | fwmark/table 對不上 | `cat /etc/iproute2/rt_tables` 看 `pbr_<iface>` 實際 table id（DBR 從 300 起） |
 | CustRule 沒生效 | `uci show pbr` 確認 enabled；`/etc/init.d/pbr-cust start`；看 `/tmp/pbr-cust.log` |
 | firewall restart 後失效 | 確認 `dbroute-fwinclude.sh` 有被 firewall include 觸發重載 |
+
+### 9. 診斷陷阱（踩過的坑）
+
+- **`ip rule show` 顯示的是 table 別名不是數字、開頭是 `100:` 不是 `priority 100`**：
+  例如 DBR 規則實際顯示為 `100:  from all fwmark 0x12e lookup pbr_wg4`
+  （不是 `... lookup 302`，也不是 `priority 100`）。
+  → 驗證 DBR 規則在不在，**grep `pbr_wg4` 或 `0x12e`，不要 grep `"priority 100"`**
+  （後者抓不到，會誤判 DBR 失效）。`ip rule list` 與 `ip rule show` 輸出格式相同。
+
+- **「域名沒走指定 VPN」八成是 set 沒被填 IP，不是路由壞**：
+  路由層（ip rule + table + nft 打標）通常都對；破口多在「封包有沒有被打上 mark」，
+  而打標靠 dnsmasq 解析時把 IP 填進 `route_<iface>_v4` set。
+  dnsmasq 一旦壞掉/沒解析（例如被 `restart` 連帶弄掛），set 空 → 沒打標 → 回落 wan。
+  → 先 `nft list set inet fw4 route_<iface>_v4` 看有沒有 IP；
+    再用 `ip route get <IP> from <src> mark <fwmark>` 確認帶 mark 時走對介面。
+
+- **端到端確認出口公網 IP**（最直接，不靠推論）：
+  ```sh
+  curl -s --interface wg4 --max-time 8 https://wtfismyip.com/text   # 經 wg4 出口的公網 IP
+  curl -s --max-time 8 https://wtfismyip.com/text                   # 預設(wan)出口，對照組
+  ```
+  兩者不同即代表 VPN 出口正常；相同代表流量其實走了 wan。
+
+- **同一 domain 設給多個 wg**：nft `meta mark set` 是賦值非疊加，
+  `domain_prerouting` chain **最後命中的規則勝**（介面名字典序最大者，如 wg4 > wg2）。
+  結果只走字典序最大的那個介面，其餘靜默失效，**不報錯**。避免重複設定。
 
 ---
 

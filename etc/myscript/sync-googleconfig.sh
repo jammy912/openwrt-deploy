@@ -73,6 +73,7 @@ CHANGED_QOS_RULES=0
 CHANGED_QOS_INTERFACES=0
 CHANGED_CRONTAB=0
 CHANGED_DBROUTE=0
+CHANGED_DBROUTE_DNS=0   # DBR 專用：需 dnsmasq reload 重讀 nftset(不借 CHANGED_DHCP，避免 restart 震 LAN)
 CHANGED_ROUTERCONFIG=0
 CHANGED_ROUTERCONFIG_HITRON=0
 
@@ -1340,6 +1341,17 @@ main() {
                     RTABLE_ID=254
                     RFWMARK="0xfe"
                 else
+                    # 介面在這台機根本不存在(打錯名 / 多機共用 Sheet 但此機無此介面)：
+                    # 跳過產生 nftset/set/打標、不分配 table。否則 nft 仍會把封包打上
+                    # 孤兒 mark，但 dbroute-setup 因介面不在而不建 ip rule → 封包回落
+                    # main table 靜默走 wan(洩真實 IP)。這裡直接當「此機沒設這條」。
+                    # 註：ip link show 只擋「不存在」；介面存在但暫時 down 仍回 0，不誤擋。
+                    if ! ip link show "$RIFACE" >/dev/null 2>&1; then
+                        log "  ⚠️  介面 $RIFACE 不存在，跳過其 dbroute(避免靜默走 wan 洩 IP)"
+                        push_notify "DBR_SkipMissingIface_${RIFACE}"
+                        continue
+                    fi
+
                     # 從 rt_tables 找 table ID，不存在則自動建立
                     # DBR table id 從 300 起,跟 PBR 套件用的 256-261 區隔,
                     # 避免 PBR 加新介面時搶到 dbroute 既有 table id 造成路由互相覆蓋。
@@ -1405,8 +1417,12 @@ NFTEOF
 
             log "  ✅ DB Route 配置已生成 ($CNROUTE_DNSMASQ, $CNROUTE_NFT)"
 
-            # 重啟 dnsmasq 讓 nftset 指令生效
-            CHANGED_DHCP=1
+            # 讓 dnsmasq 重讀 nftset 指令。用「DBR 專用旗標 + reload」而非
+            # 借全域 CHANGED_DHCP + restart：restart 在 hybrid role 會連帶叫起
+            # udhcpc 把 LAN 重新協商(no lease → LAN 掉)；reload 只重讀 config
+            # 不重起 interface，nftset 指令一樣生效。也讓 --only dbroute 不會
+            # 因 CHANGED_DHCP 被打開而誤重啟 dnsmasq。
+            CHANGED_DBROUTE_DNS=1
 
             # 載入 nft 規則（先清除 dbroute 的 chain/set 再載入新的）
             nft delete chain inet fw4 domain_prerouting 2>/dev/null
@@ -1730,6 +1746,17 @@ NFTEOF
                 /etc/init.d/qosify restart
             else
                 log "⚠️  qosify 未安裝，跳過重啟"
+            fi
+        fi
+
+        # DBR 讓 dnsmasq 重讀新 dbroute-domains.conf(nftset= 對應)。
+        # 用 reload 不用 restart：restart 在 hybrid role 會叫起 udhcpc 震掉 LAN。
+        # dbroute-refresh.sh 不重啟 dnsmasq，只主動查域名觸發 nftset，
+        # 故必須先讓 dnsmasq 載入新 conf，refresh 才填得進去。
+        if [ "${CHANGED_DBROUTE_DNS:-0}" -eq 1 ]; then
+            if [ -x /etc/init.d/dnsmasq ]; then
+                log "🔄 reload DNSMasq 讓 dbroute nftset 生效..."
+                /etc/init.d/dnsmasq reload
             fi
         fi
 

@@ -32,6 +32,9 @@ fi
 for IFACE in $INTERFACES; do
     # wan 使用固定 table 254 (main)，讓域名走回預設路由
     if [ "$IFACE" = "wan" ]; then
+        # 冪等：add 前先 del 同 key，避免開頭清除迴圈漏清(格式沒被 sed 抓到)
+        # 時 add 撞 "RTNETLINK answers: File exists" 導致規則沒建成、DBR 失效。
+        ip rule del fwmark 0xfe lookup 254 priority 100 2>/dev/null
         ip rule add fwmark 0xfe lookup 254 priority 100 2>/dev/null
         logger -t dbroute "Domain routing via wan (table 254/main, fwmark 0xfe) configured"
         continue
@@ -61,6 +64,8 @@ for IFACE in $INTERFACES; do
         continue
     fi
 
+    # 冪等：add 前先 del 同 key(理由同 wan 段)，避免 File exists 讓規則沒建成
+    ip rule del fwmark "$FWMARK" lookup "$TABLE_ID" priority 100 2>/dev/null
     ip rule add fwmark "$FWMARK" lookup "$TABLE_ID" priority 100
     ip route replace default dev "$IFACE" table "$TABLE_ID"
 
