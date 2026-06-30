@@ -9,9 +9,9 @@
 #   只擋「隧道網段上的 41641」,公網/LAN 上的 41641(其他 peer 直連)不受影響。
 #
 # 每次 firewall restart/reload 由 fw4 呼叫,冪等重建 table ts_endpoint_filter。
-#
+# nft list table inet ts_endpoint_filter 
 # 換隧道網段只改這一行(空格分隔多段;wg4/wg4ts=251、wg5=252…):
-WG_TUNNEL_NETS="192.168.251.0/24 192.168.252.0/24"
+WG_TUNNEL_NETS="192.168.250.0/24 192.168.251.0/24 192.168.252.0/24"
 
 TS_PORT=41641              # tailscaled 直連 UDP port
 TABLE="inet ts_endpoint_filter"
