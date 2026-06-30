@@ -749,15 +749,19 @@ uci set firewall.dbroute.type='script'
 uci set firewall.dbroute.path='/etc/myscript/dbroute-fwinclude.sh'
 uci set firewall.dbroute.fw4_compatible='1'
 
-# --- ts_endpoint_filter firewall include ---
-# 阻斷 tailscale 把 wg 隧道網段(192.168.251/252…）上的 UDP 41641 當 endpoint
-# candidate(wg 隧道一抖 tailscale 會死抱隧道 IP 直連 → 節點互通全垮)。
-# tailscale 無官方排除 candidate 設定 → firewall 讓該路徑探測失敗使其棄用。
-# 隧道網段清單在 ts-endpoint-filter-fwinclude.sh 的 WG_TUNNEL_NETS(空格分隔)。
-uci set firewall.ts_endpoint_filter=include
-uci set firewall.ts_endpoint_filter.type='script'
-uci set firewall.ts_endpoint_filter.path='/etc/myscript/ts-endpoint-filter-fwinclude.sh'
-uci set firewall.ts_endpoint_filter.fw4_compatible='1'
+# --- Allow-Tailscale-UDP:放行 wan 入站 udp/41641(tailscale 打洞) ---
+# wan zone 預設 input=REJECT 會擋掉別人打洞進來的「首包」(新連線、無 conntrack)
+# → 該節點只能當主動方,被動被打洞時失敗 → 退 DERP(延遲爆增)。放行 41641 入站
+# 後別人才打得進來,雙向都能升 direct。主動方靠 ct established 放行,本不需此規則,
+# 但每台都加最穩(誰當被動方都能被打洞)。冪等:存在則不重複加。
+if ! uci show firewall | grep -q "name='Allow-Tailscale-UDP'"; then
+    uci add firewall rule >/dev/null
+    uci set firewall.@rule[-1].name='Allow-Tailscale-UDP'
+    uci set firewall.@rule[-1].src='wan'
+    uci set firewall.@rule[-1].proto='udp'
+    uci set firewall.@rule[-1].dest_port='41641'
+    uci set firewall.@rule[-1].target='ACCEPT'
+fi
 
 uci commit firewall
 echo "  ✅ firewall (UCI)"
