@@ -151,6 +151,65 @@ fi
 
 TS_IP=$(ts_ip)
 
+# ---- 健檢 0.5:peer 真實互通(ICMP)退化偵測 ----
+# 與 exit node 無關,放在 exit-node Gate 之前 → 純互通機(無 exit node)也會跑。
+# Why: 健檢0 只看 table 52 是否「空」。但有一類故障是 table 52 路由都在、
+#   tailscale ping 經 DERP 也通,但普通 ICMP 對 peer 100% 掉(NAT 打洞退化、
+#   兩端 endpoint 學歪成隧道內 IP、資料面只剩 DERP 走不乾淨)。table 52 非空 →
+#   健檢0 不觸發 → 過去無人自修。這裡用「對在線 peer 真實 ping」補這個洞。
+# 判定:挑最多 3 個在線 peer,普通 ping(每個 2 包),只要任一通就算健康;
+#   全不通才算 FAIL。連續 PEER_FAIL_CONFIRM 輪 FAIL 才重啟 tailscaled(避免單次
+#   抖動亂重啟)。重啟會重新 netcheck + 清掉學歪的 endpoint 重新協商。
+PEER_FAIL_CONFIRM=2                               # 連續 N 輪(每輪10分)互通失敗才重啟
+PEER_FAIL_FILE="/tmp/.ts-peer-failcount"
+peer_fail_get()   { cat "$PEER_FAIL_FILE" 2>/dev/null || echo 0; }
+peer_fail_inc()   { echo $(( $(peer_fail_get) + 1 )) > "$PEER_FAIL_FILE"; }
+peer_fail_reset() { rm -f "$PEER_FAIL_FILE"; }
+
+# 只有 table 52 有路由時才做(健檢0 剛補過會是非空;真的空已由健檢0 處理)
+TS52_NOW=$(ip route show table 52 2>/dev/null | grep -c "dev tailscale0")
+if [ "${TS52_NOW:-0}" -gt 0 ]; then
+  # 在線 peer 的 tailscale IPv4(排除自己、offline);最多取 3 個
+  PEER_IPS=$(tailscale status 2>/dev/null \
+    | awk -v me="$TS_IP" '$1 ~ /^100\./ && $1 != me && $0 !~ /offline/ {print $1}' \
+    | head -3)
+  if [ -n "$PEER_IPS" ]; then
+    PEER_OK=0
+    for _pip in $PEER_IPS; do
+      if ping -c 2 -W 2 "$_pip" >/dev/null 2>&1; then PEER_OK=1; break; fi
+    done
+    if [ "$PEER_OK" = "1" ]; then
+      peer_fail_reset                            # 有任一 peer 通 → 互通健康
+    else
+      peer_fail_inc
+      _pfc=$(peer_fail_get)
+      if [ "$_pfc" -lt "$PEER_FAIL_CONFIRM" ]; then
+        log "PENDING: peer 互通 ICMP 全不通(${_pfc}/${PEER_FAIL_CONFIRM} 輪),暫不重啟(避免抖動)"
+      else
+        log "FAIL: peer 互通連 ${_pfc} 輪 ICMP 全不通(table 52 在=非健檢0 場景)-> 重啟 tailscaled 重新協商 endpoint"
+        /etc/init.d/tailscale restart >/dev/null 2>&1
+        sleep 14
+        # 重啟後重驗
+        PEER_IPS2=$(tailscale status 2>/dev/null \
+          | awk -v me="$TS_IP" '$1 ~ /^100\./ && $1 != me && $0 !~ /offline/ {print $1}' | head -3)
+        PEER_OK2=0
+        for _pip in $PEER_IPS2; do
+          if ping -c 2 -W 2 "$_pip" >/dev/null 2>&1; then PEER_OK2=1; break; fi
+        done
+        if [ "$PEER_OK2" = "1" ]; then
+          log "RECOVERED: 重啟 tailscaled 後 peer 互通已恢復"
+          notify "✅ Tailscale 節點互通自癒成功(peer ICMP 退化→重啟 tailscaled 重新協商)"
+          peer_fail_reset
+        else
+          log "ERROR: 重啟後 peer 互通仍不通(可能 double-NAT 打洞失敗,只剩 DERP),需人工介入"
+          notify_fail "🛑 Tailscale 節點互通自癒失敗:重啟後 peer ICMP 仍不通,需人工介入"
+          peer_fail_reset                        # 重置避免每輪狂重啟;下輪重新累計
+        fi
+      fi
+    fi
+  fi
+fi
+
 # ---- 健檢 1:client 是否設有 exit node 意圖 ----
 # ExitNodeID 空可能是:(a)你手動/UI 清 (b)watchdog 先前 fallback 走 WAN 清掉的。
 # 兩者外觀一樣,靠「fallback 旗標檔」區分:
