@@ -3,10 +3,10 @@
 # 定時重新解析所有 dbroute 域名，填充 nft set
 # 透過 dnsmasq (127.0.0.1) 查詢，觸發 nftset 指令
 
-# 全域 cron 排隊鎖
-. /etc/myscript/lock-handler.sh
-cron_global_lock 60 || exit 0
-trap 'rm -f /tmp/cron_global.lock' EXIT
+# 不排全域 cron 隊:每分鐘跑且僅數個 nslookup,輕量冪等,無需與其他 cron 序列化
+# (排隊反而會因長任務持鎖而等待/跳過)。PATH 原由 lock-handler.sh 提供,自行補上。
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
+export PATH
 
 CONF="/etc/dnsmasq.d/dbroute-domains.conf"
 LOG_TAG="dbroute-refresh"
