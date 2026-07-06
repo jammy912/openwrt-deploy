@@ -543,8 +543,8 @@ main() {
 
     # 6. 檢查非法 config type (解密金鑰錯誤時會產生亂碼如 0config, 0onfig)
     #    合法前綴: policy, interface, wireguard_wg, host, qosrule, qosinterface,
-    #    crontab, dbroute, pushkey (後面可接任意後綴如 _tw, _satellite 等)
-    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|routerconfig|batmanmesh)")
+    #    crontab, dbroute, pushkey, linecmd (後面可接任意後綴如 _tw, _satellite 等)
+    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|linecmd|routerconfig|batmanmesh)")
     if [ -n "$BAD_CONFIG" ]; then
         BAD_COUNT=$(echo "$BAD_CONFIG" | wc -l)
         BAD_SAMPLE=$(echo "$BAD_CONFIG" | head -3 | tr '\n' '; ')
@@ -933,6 +933,34 @@ main() {
                 ;;
         esac
     done
+
+    # ---- LineCMD: 執行 Sheet 下發的白名單動作 ----
+    # 段格式: config linecmd / option action '<代號>' / option arg '<參數>'
+    # 不做 id 去重(由 App Script 端「取完清空」控制單次觸發)。每筆讀到即執行。
+    # 安全: action 只是代號,真正指令由 linecmd-handler.sh 的 case 白名單決定;
+    #       arg 一律引用不 eval。多筆依序執行。
+    if grep -q '^config linecmd' "$TMP_DECRYPTED" 2>/dev/null; then
+        # 抽出 linecmd 段,每筆壓成一行 "action<TAB>arg"(避免 while|read subshell
+        # 吃掉變數)。段邊界靠 awk 狀態機;引號用 sed 去除,tab 縮排一併吃掉。
+        _LC_TSV=/tmp/linecmd_actions.txt
+        awk '
+            /^config linecmd/ { if(seen) print a"\t"g; a=""; g=""; seen=1; next }
+            /^config /        { if(seen){print a"\t"g; seen=0}; next }
+            seen && /option action/ { a=$0; sub(/^[[:space:]]*option action[[:space:]]*/,"",a) }
+            seen && /option arg/    { g=$0; sub(/^[[:space:]]*option arg[[:space:]]*/,"",g) }
+            END { if(seen) print a"\t"g }
+        ' "$TMP_DECRYPTED" | sed "s/'//g" > "$_LC_TSV"
+        while IFS="$(printf '\t')" read -r _lc_action _lc_arg; do
+            [ -z "$_lc_action" ] && continue
+            log "🎮 LineCMD 執行: action='$_lc_action' arg='$_lc_arg'"
+            if /etc/myscript/linecmd-handler.sh "$_lc_action" "$_lc_arg"; then
+                push_notify "LineCMD ✅ ${_lc_action}${_lc_arg:+ ($_lc_arg)}"
+            else
+                push_notify "LineCMD ❌ ${_lc_action}${_lc_arg:+ ($_lc_arg)} (未知動作或失敗)"
+            fi
+        done < "$_LC_TSV"
+        rm -f "$_LC_TSV"
+    fi
 
     # 檢查各組件是否有變更
     log "檢查 Network 配置..."
