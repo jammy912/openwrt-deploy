@@ -763,6 +763,24 @@ if ! uci show firewall | grep -q "name='Allow-Tailscale-UDP'"; then
     uci set firewall.@rule[-1].target='ACCEPT'
 fi
 
+# --- Block-DoT:擋 lan/VPN → wan 的 853(DoT)，防 DNS 繞過 hijack ---
+# Android/Google TV「私人 DNS」= DoT:853,繞過 :53 hijack → AAAA 擋與 DBR 全失效。
+# 853 一擋,Private DNS「自動」的裝置回落明文 :53(被 hijack 接住);「強制」的裝置
+# DNS 直接壞(看得見,使用者會自己關),沒有靜默洩漏。REJECT 讓 client 快速回落。
+# DoH(443) 無法在此擋:Firefox 預設 DoH 由 AGH canary(use-application-dns.net)擋,
+# Chrome 自動升級不觸發(系統 DNS 是路由器 IP);僅剩手動設定 DoH 者,接受。
+for _z in lan VPN; do
+    if ! uci show firewall | grep -q "name='Block-DoT-${_z}'"; then
+        uci add firewall rule >/dev/null
+        uci set firewall.@rule[-1].name="Block-DoT-${_z}"
+        uci set firewall.@rule[-1].src="$_z"
+        uci set firewall.@rule[-1].dest='wan'
+        uci set firewall.@rule[-1].proto='tcp udp'
+        uci set firewall.@rule[-1].dest_port='853'
+        uci set firewall.@rule[-1].target='REJECT'
+    fi
+done
+
 uci commit firewall
 echo "  ✅ firewall (UCI)"
 
