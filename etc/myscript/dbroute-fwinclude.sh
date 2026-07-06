@@ -1,14 +1,18 @@
 #!/bin/sh
-# firewall include ¡X ¨C¦¸ firewall restart/reload ®É¦Û°Ê¸ü¤J dbroute nft ³W«h
+# firewall include ï¿½X ï¿½Cï¿½ï¿½ firewall restart/reload ï¿½É¦Û°Ê¸ï¿½ï¿½J dbroute nft ï¿½Wï¿½h
 NFT_FILE="/etc/myscript/dbroute.nft"
 
-# ÀË¬d chain ¸Ì¬O§_¦³ mark ³W«h¡]¤£¬O¥uÀË¬d chain ¦s¦b¡^
+# ï¿½Ë¬d chain ï¿½Ì¬Oï¿½_ï¿½ï¿½ mark ï¿½Wï¿½hï¿½]ï¿½ï¿½ï¿½Oï¿½uï¿½Ë¬d chain ï¿½sï¿½bï¿½^
 if nft list chain inet fw4 domain_prerouting 2>/dev/null | grep -q "meta mark set"; then
-    logger -t dbroute "nft rules already loaded, skip (firewall include)"
+    # self-heal: firewall reload has been observed to wipe prio-100 DBR ip rules
+    # while the nft chain survives. dbroute-setup is idempotent and cheap, so
+    # re-run it on every firewall event to restore lost rules automatically.
+    /etc/myscript/dbroute-setup.sh
+    logger -t dbroute "nft rules already loaded, setup re-run (firewall include)"
     exit 0
 fi
 
-# §R°£¥i¯à´Ý¯dªºªÅ chain/set¡A¦A­«·s¸ü¤J§¹¾ã³W«h
+# ï¿½Rï¿½ï¿½ï¿½iï¿½ï¿½Ý¯dï¿½ï¿½ï¿½ï¿½ chain/setï¿½Aï¿½Aï¿½ï¿½ï¿½sï¿½ï¿½ï¿½Jï¿½ï¿½ï¿½ï¿½Wï¿½h
 nft delete chain inet fw4 domain_prerouting 2>/dev/null
 for _set in $(nft list sets inet fw4 2>/dev/null | grep -o 'route_.*_v4'); do
     nft delete set inet fw4 "$_set" 2>/dev/null
@@ -16,6 +20,8 @@ done
 
 if [ -f "$NFT_FILE" ]; then
     nft -f "$NFT_FILE" 2>/dev/null && logger -t dbroute "nft rules loaded (firewall include)" || logger -t dbroute "nft rules load failed (firewall include)"
-    # ­I´º¡G­«±Ò dnsmasq Åý¥¦­«·s¸ü¤J nftset «ü¥O¡A¦A refresh ¶ñ¥R
+    # self-heal: rebuild DBR ip rules too (see comment above)
+    /etc/myscript/dbroute-setup.sh
+    # ï¿½Iï¿½ï¿½ï¿½Gï¿½ï¿½ï¿½ï¿½ dnsmasq ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½J nftset ï¿½ï¿½ï¿½Oï¿½Aï¿½A refresh ï¿½ï¿½R
     ( sleep 5 && service dnsmasq restart && sleep 3 && /etc/myscript/dbroute-refresh.sh && logger -t dbroute "nft sets refreshed (firewall include)" ) &
 fi
