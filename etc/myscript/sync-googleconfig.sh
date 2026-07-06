@@ -439,8 +439,9 @@ main() {
     # 下載並解密
     log "下載並解密配置..."
     local _role=$(cat /etc/myscript/.mesh_role 2>/dev/null)
-    if [ "$DUMP_ONLY" = "1" ] || [ -n "$ONLY_SECTIONS" ] || [ "$FORCE_APPLY" = "1" ]; then
-        # --dump / --only / --force: 不帶 md5，強制 server 回完整 payload（否則 md5 相同會回空白早退）
+    if [ "$DUMP_ONLY" = "1" ] || [ "$FORCE_APPLY" = "1" ]; then
+        # --dump / --force: 不帶 md5，強制 server 回完整 payload（否則 md5 相同會回空白早退）
+        # 註: --only 已改為受全域 md5 控管(帶 md5)，全域未變時直接早退，不再強制下載逐段比對。
         local dl_url="$URL"
     elif [ "$_role" != "client" ] && [ ! -f /etc/myscript/.hitron-pf.json ]; then
         # .hitron-pf.json 缺失: 不帶 md5，強制 server 回完整 payload 以補回
@@ -464,9 +465,11 @@ main() {
     current_md5=$(calculate_md5 "$TMP_BASE64")
     log "📊 當前配置 MD5: $current_md5"
 
-    # 檢查 MD5 是否變化（--dump / --only / --force 模式跳過，強制下載解密走逐段比對）
-    # --only/--force 需繞過全域 MD5 早退，否則「Sheet 未新變動但想強制重套」會在此 exit
-    if [ "$DUMP_ONLY" != "1" ] && [ -z "$ONLY_SECTIONS" ] && [ "$FORCE_APPLY" != "1" ] && ! check_md5_changed "$current_md5"; then
+    # 檢查 MD5 是否變化（--dump / --force 模式跳過，強制下載解密走逐段比對）
+    # --force 需繞過全域 MD5 早退，否則「Sheet 未新變動但想強制重套」會在此 exit
+    # --only 已改為受全域 MD5 控管: 全域未變 → 直接早退(此時指定段必然也未變)。
+    #   .hitron-pf.json 缺失的強制處理例外由 check_md5_changed 內部沿用。
+    if [ "$DUMP_ONLY" != "1" ] && [ "$FORCE_APPLY" != "1" ] && ! check_md5_changed "$current_md5"; then
         if [ $DRY_RUN -eq 0 ]; then
             save_current_md5 "$current_md5"
         fi
