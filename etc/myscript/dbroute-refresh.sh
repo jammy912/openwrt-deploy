@@ -32,4 +32,7 @@ for DOM in $DOMAINS; do
     COUNT=$((COUNT + 1))
 done
 
-logger -t $LOG_TAG "Refreshed $COUNT domains"
+# 降噪：cron 已改每分鐘跑，成功時靜默(否則 1440 行/天沖掉 logread ring buffer)
+# 只在異常(conf 有內容卻一個域名都沒解析到)時出聲
+[ "$COUNT" -eq 0 ] && logger -t $LOG_TAG "WARNING: refreshed 0 domains (conf 異常?)"
+exit 0
