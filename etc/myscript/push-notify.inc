@@ -1,8 +1,13 @@
 
 
 #!/bin/sh
-# push-notify.inc - 多通道通知模組 (PushDeer + LINE Notify)
+# push-notify.inc - 多通道通知模組 (PushDeer + LINE Messaging API)
 # 放置位置：/etc/myscript/push-notify.inc
+# pushkey.<name> 內容決定通道:
+#   PD 開頭            → PushDeer
+#   U/C/R + 32 hex     → LINE Messaging API (userId/groupId/roomId,
+#                        需 .secrets/line.token = Channel access token)
+#   40+ 字元英數       → 舊 LINE Notify token (2025-03-31 停服,僅印 WARN)
 
 # 通知服務設定
 # 代號對應 /etc/myscript/.secrets/pushkey.<代號> 檔案
@@ -49,13 +54,27 @@ push_notify() {
                 --data-urlencode "text=${full_msg}" \
                 >/dev/null 2>&1
 
-        # LINE Notify Token 偵測 (40 字元以上)
+        # LINE Messaging API 偵測 (U=userId / C=groupId / R=roomId, 各+32 hex)
+        elif echo "$key" | grep -qE '^[UCR][0-9a-fA-F]{32}$'; then
+            local _ltoken=$(cat /etc/myscript/.secrets/line.token 2>/dev/null)
+            if [ -z "$_ltoken" ]; then
+                echo "[WARN] 缺 .secrets/line.token，LINE 推播跳過 (to: $key)" >&2
+            else
+                # JSON 跳脫: 反斜線、雙引號、換行
+                local _jmsg=$(printf '%s' "$full_msg" \
+                    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+                    | awk 'BEGIN{ORS=""} {if(NR>1)print "\\n"; print}')
+                curl -s --connect-timeout 5 --max-time 10 \
+                    -X POST "https://api.line.me/v2/bot/message/push" \
+                    -H "Authorization: Bearer ${_ltoken}" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"to\":\"${key}\",\"messages\":[{\"type\":\"text\",\"text\":\"${_jmsg}\"}]}" \
+                    >/dev/null 2>&1
+            fi
+
+        # 舊 LINE Notify token (服務已於 2025-03-31 停止)
         elif echo "$key" | grep -qE '^[0-9A-Za-z]{40,}$'; then
-            curl -s --connect-timeout 5 --max-time 10 \
-                -H "Authorization: Bearer ${key}" \
-                -F "message=${full_msg}" \
-                "https://notify-api.line.me/api/notify" \
-                >/dev/null 2>&1
+            echo "[WARN] LINE Notify 已停服，pushkey 請改填 Messaging API userId (U開頭)" >&2
 
         else
             echo "[WARN] 未知通知 Key 格式: $key" >&2

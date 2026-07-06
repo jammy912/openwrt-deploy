@@ -512,6 +512,7 @@ else
     echo "      /etc/myscript/.secrets/secret.iv"
     echo "      /etc/myscript/.secrets/secret.url"
     echo "      /etc/myscript/.secrets/pushkey.<名稱>"
+    echo "      /etc/myscript/.secrets/line.token (LINE Messaging API)"
     mkdir -p /etc/myscript/.secrets
     chmod 700 /etc/myscript/.secrets
 fi
@@ -978,12 +979,21 @@ else
     echo ""
     setup_secret "tdx.appid"  "TDX APP ID"
     setup_secret "tdx.appkey" "TDX APP Key"
+
+    echo ""
+    echo "🔑 設定 LINE Messaging API..."
+    echo "   push-notify 的 LINE 通道用。Channel access token 於 LINE Developers"
+    echo "   Console 的 Messaging API channel 發行 (bot 級共用，一台一份相同值)"
+    echo "   💡 也可在 Google Sheet PushKey 表加一筆 name=linetoken，同步自動寫入"
+    setup_secret "line.token" "LINE Channel access token"
 fi
 
 echo ""
 echo "📌 推播通知密鑰 (pushkey) 將由 Google Sheet 同步自動寫入"
 echo "   pushkey 存放在 Google Sheet 的 PushKey 工作表"
 echo "   同步時會自動寫入 /etc/myscript/.secrets/pushkey.<名稱>"
+echo "   內容格式決定通道: PD開頭=PushDeer, U開頭33字元=LINE userId"
+echo "   name=linetoken 的特例會寫成 line.token (LINE Channel access token)"
 
 # =====================
 # 5. WiFi 設定

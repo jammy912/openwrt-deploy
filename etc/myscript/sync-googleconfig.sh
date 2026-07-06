@@ -917,11 +917,16 @@ main() {
             *"option key"*)
                 _pk_key=$(echo "$line" | sed "s/.*option key *//; s/^'//; s/'$//")
                 if [ -n "$_pk_name" ] && [ -n "$_pk_key" ]; then
-                    local _old_key=$(cat "$SECRET_DIR/pushkey.${_pk_name}" 2>/dev/null)
+                    # 特例: name=linetoken → 寫成 line.token
+                    # (LINE Messaging API 的 Channel access token,bot 級共用,
+                    #  放 Sheet PushKey 表即自動下發全機隊 + 重刷機自動復原)
+                    local _pk_file="pushkey.${_pk_name}"
+                    [ "$_pk_name" = "linetoken" ] && _pk_file="line.token"
+                    local _old_key=$(cat "$SECRET_DIR/${_pk_file}" 2>/dev/null)
                     if [ "$_old_key" != "$_pk_key" ]; then
-                        echo -n "$_pk_key" > "$SECRET_DIR/pushkey.${_pk_name}"
-                        chmod 600 "$SECRET_DIR/pushkey.${_pk_name}"
-                        log "🔑 pushkey.${_pk_name} 已更新"
+                        echo -n "$_pk_key" > "$SECRET_DIR/${_pk_file}"
+                        chmod 600 "$SECRET_DIR/${_pk_file}"
+                        log "🔑 ${_pk_file} 已更新"
                     fi
                     _pk_name="" _pk_key=""
                 fi
