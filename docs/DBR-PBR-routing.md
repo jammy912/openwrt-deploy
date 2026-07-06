@@ -133,7 +133,7 @@
 |------|:----------:|-------------|
 | `S20dbroute` | ❌ | 用已存在的 `/etc/myscript/dbroute.nft` 載入 nft set + chain |
 | `hotplug 99-pbr-cust`（wg ifup） | ❌ | 用已存在的 `dbroute-domains.conf` 跑 `dbroute-setup.sh`（含遷移 + 建 ip rule） |
-| `dbroute-refresh`（cron 每 2h） | ❌ | 刷新 nft set IP |
+| `dbroute-refresh`（cron 每分鐘） | ❌ | 刷新 nft set IP |
 
 三類路由的設定來源與重建分工：
 
@@ -184,8 +184,8 @@ config dbroute 區塊（UCI）
 | `dbroute-domains.conf` | 告訴 dnsmasq：解析域名時把 IP 加入對應的 nft set |
 | `dbroute.nft` | 定義 nft set 和 prerouting chain（打 fwmark） |
 | `dbroute-setup.sh` | 建立 ip rule（fwmark → lookup table）和 ip route；priority 100 規則先清後建（**add 前先 `ip rule del` 同 key 確保冪等**，避免清除迴圈漏清時 `add` 撞 `RTNETLINK answers: File exists` 導致規則沒建成、DBR 失效），table 動態解析/自動登錄 |
-| `dbroute-refresh.sh` | 透過 `nslookup ... 127.0.0.1` 重新解析所有域名，填充 nft set（cron 定時 + 全域鎖） |
-| `dbroute-fwinclude.sh` | firewall restart/reload 時，若 chain 不存在則重載 `dbroute.nft` 並排程刷新 |
+| `dbroute-refresh.sh` | 透過 `nslookup ... 127.0.0.1` 重新解析所有域名，填充 nft set（cron **每分鐘**；無全域鎖、成功靜默，僅解析 0 域名時告警） |
+| `dbroute-fwinclude.sh` | firewall restart/reload 時重載 `dbroute.nft`（chain 缺失時），且**每次都補跑 `dbroute-setup.sh` 自癒** DBR ip rule（見診斷陷阱） |
 | `dbroute-manage.sh` | 手動管理/除錯工具（add / del / list / status / reload） |
 
 ### sync-googleconfig 觸發順序（CHANGED_DBROUTE=1 時）
@@ -218,8 +218,58 @@ config dbroute 區塊（UCI）
 ### nft set IP 的生命週期
 
 1. dnsmasq 解析域名時，自動將 IP 加入 nft set
+   - ⚠️ **有 AGH 的機器 client 查詢不經過 dnsmasq**（:53 被 hijack 直送 AGH:53535），
+     此路徑只對「路由器本機查詢 + dbroute-refresh」有效，見「DNS 繞過防護」一節
 2. nft set 設定 `timeout 3h`，IP 3 小時後自動過期
-3. `dbroute-refresh.sh`（cron）重新解析域名刷新
+3. `dbroute-refresh.sh`（cron **每分鐘**）重新解析域名刷新
+   - **Why 每分鐘**：Netflix API 域名 TTL 短（~60s）、AWS IP 池輪替，refresh 太疏
+     會讓 client 從 AGH 拿到的新 IP 不在 set 內 → 該連線靜默走 wan。每分鐘 refresh
+     配合 AGH `cache_ttl_min=1800` 等於持續預熱共用快取，殘餘縫隙 ≤60s
+
+---
+
+## DNS 繞過防護（Netflix 同戶必讀）
+
+DBR 成立的前提是「client 的 DNS 解析路徑受控」。任何繞過受控 DNS 的路徑，都會讓
+封包對應不到 set 內的 IP → 不打 mark → **靜默走預設路由**（同戶場景 = 洩真實 IP）。
+
+### client DNS 鏈（有 AGH 的機器）
+
+```
+client :53 (UDP) ──firewall DNAT (adgh_l-a-n / adgh_v-p-n)──► AGH :53535 ──► 上游
+router 本機 / dbroute-refresh ──► dnsmasq :53 ──► AGH :53535 ──► 上游
+```
+
+- **client 查詢不經過 dnsmasq**（被 hijack 直送 AGH）→ nftset 不由 client 查詢
+  即時填充，只靠 `dbroute-refresh.sh`（每分鐘）經 dnsmasq 解析填入。
+- refresh 與 client 共用 AGH 快取（deploy 設 `cache_ttl_min=1800`），每分鐘 refresh
+  等於持續預熱 → client 拿到的 IP 幾乎必在 set 內。
+- **在 dnsmasq 層做的任何過濾（如 filter_aaaa）管不到 client**——設定要下在 AGH。
+- 走 TCP:53 的少數 client 會繞過 hijack 打到 dnsmasq，但 dnsmasq 上游是 AGH，
+  過濾一樣生效，且 nftset 反而即時填充，無破口。
+
+### 繞過路徑與對應防護
+
+| 繞過路徑 | 防護 | 部署位置 |
+|---------|------|---------|
+| **IPv6（AAAA）**：DBR 只有 v4 set，client 走 v6 直接繞過 | 有 AGH：user_rules 對 Netflix 9 域名回 NOERROR 擋 AAAA；無 AGH：dnsmasq 全域 `filter_aaaa=1` | deploy.sh 依 AGH_BIN 自動二選一 |
+| **DoT :853**（Android/Google TV「私人 DNS」） | firewall `Block-DoT`：`src='*' dest='*'` 853 REJECT（僅 forward chain）。「自動」模式裝置回落明文 :53 被 hijack 接住；「強制」模式 DNS 明壞、無靜默洩漏 | deploy.sh |
+| **DoH :443**（瀏覽器） | Firefox 預設 DoH 由 AGH canary（`use-application-dns.net` → NXDOMAIN）自動停用；Chrome 自動升級不觸發（系統 DNS 是路由器 IP） | AGH 內建 |
+| 手動設定 DoH 的裝置 | 無乾淨解，接受風險 | — |
+
+- **Block-DoT 不能只擋 →wan**：被 CustRule 走 VPN 出口的裝置，DoT 從 lan→vpn
+  （小寫 zone）出隧道一樣繞過。`src`/`dest` 用 `'*'` 一條蓋所有 zone 組合。
+- 路由器自身的 AGH DoT 上游（tls://quad9 等）走 output chain，**不受** Block-DoT 影響。
+
+### AAAA 擋規則（AGH user_rules，deploy.sh 自動寫入）
+
+```
+||netflix.com^$dnstype=AAAA,dnsrewrite=NOERROR
+（netflix.net / nflxext.com / nflximg.net / nflximg.com / nflxso.net
+ / nflxsearch.net / nflxvideo.net / netflix.com.tw 共 9 條）
+```
+
+驗證（LAN client 上）：`nslookup -type=AAAA netflix.com` 應查不到、A 記錄照常。
 
 ---
 
@@ -266,6 +316,31 @@ ip route add default dev wg0 table 1001
 ## 實際範例
 
 > 範例中的 fwmark/table 數值依 `rt_tables` 實際登錄而定，以下為示意。
+
+### 情境：Netflix 同戶（功能走 VPN、影片走 WAN）
+
+Sheet DBR 段設定（wg2 = 通往家用出口的隧道）：
+
+| 介面 | 域名 |
+|------|------|
+| wg2 | netflix.com netflix.net nflxext.com nflximg.net nflximg.com nflxso.net nflxsearch.net netflix.com.tw |
+| wan | nflxvideo.net |
+
+原理：
+
+1. 同戶判定看 **API 流量來源 IP**（`api-global.netflix.com` 等 netflix.com 子網域）
+   → 走 wg2，Netflix 看到家用出口 IP。
+2. 播放時 App 經 API（走 VPN）拿 manifest，steering 依家用 IP 回覆 OCA 節點
+   （`*.oca.nflxvideo.net`）→ 命中 wan 規則直連，影片大流量不佔隧道。
+3. `wan nflxvideo.net` **必須明設**：若裝置被 CustRule 全走 VPN，靠 DBR fwmark
+   0xfe（prio 100 < 200）才能把影片搶回 wan。
+4. 需配合「DNS 繞過防護」一節（AAAA/DoT），否則 IPv6 或私人 DNS 會讓功能流量
+   洩真實 IP。
+5. 選配：`wan fast.com`（Netflix 測速站，打 OCA，不必走隧道）。
+
+副作用：OCA 依家用 ISP 選節點，異地 wan 直連非最近節點，影片速度可能略遜本地。
+wg 斷線時功能流量靜默回落 wan（同戶提示可能再跳）——同戶有約一個月寬限，可接受；
+隧道恢復 ifup 時 hotplug 自動重建 DBR rule。
 
 ### 情境：192.168.200.3 存取 netflix.com（DBR → wg2，假設 wg2 table=300）
 
@@ -418,9 +493,19 @@ logread | grep -i dbroute
 | ip rule MISSING | 介面是否 UP（`ip link show wg2`）；跑 `dbroute-setup.sh` |
 | fwmark/table 對不上 | `cat /etc/iproute2/rt_tables` 看 `dbr_<iface>` 實際 table id（DBR 從 300 起） |
 | CustRule 沒生效 | `uci show pbr` 確認 enabled；`/etc/init.d/pbr-cust start`；看 `/tmp/pbr-cust.log` |
-| firewall restart 後失效 | 確認 `dbroute-fwinclude.sh` 有被 firewall include 觸發重載 |
+| firewall restart 後失效 | fwinclude 會自動重載 nft + 補跑 setup 自癒；沒復原看 `logread -e dbroute` |
+| 域名走 IPv6 繞過 DBR | client 上 `nslookup -type=AAAA netflix.com` 應查不到（見「DNS 繞過防護」） |
 
 ### 9. 診斷陷阱（踩過的坑）
+
+- **firewall reload 有機率清掉 prio 100 的 DBR ip rule（wg 介面仍 UP、nft chain 也在）**：
+  實測觸發（2026-07-06，.1）：reload 後只剩 fwmark 0xfe，`dbr_wg2/wg4` 消失，
+  Netflix 功能流量靜默回落 wan。觸發源多（check-adguard 切 adgh 規則、sync、
+  deploy 都會 reload），且非每次重現，真兇未查明。
+  → **自癒**：`dbroute-fwinclude.sh` 已改為每次 firewall 事件都補跑
+  `dbroute-setup.sh`（冪等、毫秒級），rule 流失數秒內復原。驗證：
+  `/etc/init.d/firewall reload; sleep 3; ip rule show | grep '^100:'`
+  應見全部規則 + logread 出現 `setup re-run (firewall include)`。
 
 - **`ip rule show` 顯示的是 table 別名不是數字、開頭是 `100:` 不是 `priority 100`**：
   例如 DBR 規則實際顯示為 `100:  from all fwmark 0x12e lookup dbr_wg4`
@@ -456,8 +541,8 @@ logread | grep -i dbroute
 | dbroute-domains.conf | `/etc/dnsmasq.d/dbroute-domains.conf` | dnsmasq nftset 對應（動態產生） |
 | dbroute.nft | `/etc/myscript/dbroute.nft` | nft set + chain 規則（動態產生，priority -150） |
 | dbroute-setup.sh | `/etc/myscript/dbroute-setup.sh` | 建立 ip rule + ip route（table 動態解析/自動登錄） |
-| dbroute-refresh.sh | `/etc/myscript/dbroute-refresh.sh` | 重新解析域名刷新 nft set IP |
-| dbroute-fwinclude.sh | `/etc/myscript/dbroute-fwinclude.sh` | firewall include 自動重載 nft |
+| dbroute-refresh.sh | `/etc/myscript/dbroute-refresh.sh` | 重新解析域名刷新 nft set IP（cron 每分鐘，成功靜默） |
+| dbroute-fwinclude.sh | `/etc/myscript/dbroute-fwinclude.sh` | firewall include 自動重載 nft + 補跑 dbroute-setup 自癒 |
 | dbroute-manage.sh | `/etc/myscript/dbroute-manage.sh` | 手動管理/除錯（add/del/list/status/reload） |
 | rt_tables | `/etc/iproute2/rt_tables` | DBR table id ↔ `dbr_<iface>` 對應（DBR 從 300 起） |
 | pbr-cust | `/etc/init.d/pbr-cust` | CustRule PBR 服務（diff 模式無感套用） |
