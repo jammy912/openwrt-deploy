@@ -1367,6 +1367,30 @@ if [ -f "$AGH_YAML" ] && [ -n "$AGH_BIN" ]; then
     ' "$AGH_YAML" > "${AGH_YAML}.tmp" && mv "${AGH_YAML}.tmp" "$AGH_YAML"
     echo "  ✅ 預設過濾清單已啟用 (AdGuard DNS + AdAway)"
 
+    # --- Netflix 同戶: 擋 AAAA (必要，不詢問) ---
+    # DBR (dbroute) 只有 v4 set;client 拿到 AAAA 會走 IPv6 繞過 DBR，
+    # 同戶驗證看到非家用 IP。在 AGH user_rules 對 Netflix 域名回 NOERROR 擋 AAAA，
+    # A 記錄不受影響 → client 只能走 v4，全部落入 DBR。冪等: 已存在則跳過。
+    if grep -qF 'netflix.com^$dnstype=AAAA' "$AGH_YAML"; then
+        echo "  ✅ Netflix AAAA 擋規則已存在 (跳過)"
+    else
+        awk '
+        function emit_rules(   d, n, i) {
+            n = split("netflix.com netflix.net nflxext.com nflximg.net nflximg.com nflxso.net nflxsearch.net nflxvideo.net netflix.com.tw", d, " ")
+            for (i = 1; i <= n; i++)
+                print "  - \"||" d[i] "^$dnstype=AAAA,dnsrewrite=NOERROR\""
+        }
+        /^user_rules: *\[\]/ { print "user_rules:"; emit_rules(); next }
+        /^user_rules:/       { print; emit_rules(); next }
+        { print }
+        ' "$AGH_YAML" > "${AGH_YAML}.tmp" && mv "${AGH_YAML}.tmp" "$AGH_YAML"
+        if grep -qF 'netflix.com^$dnstype=AAAA' "$AGH_YAML"; then
+            echo "  ✅ Netflix AAAA 擋規則已加入 user_rules (9 域名)"
+        else
+            echo "  ⚠️  yaml 無 user_rules 鍵，請手動於 AGH 自訂過濾規則加入 AAAA 擋"
+        fi
+    fi
+
     # --- 快取設定 ---
     if [ "$AUTO_MODE" != "1" ]; then
         printf "${C_PROMPT}  套用快取設定？(2MB, TTL 1800-7200, optimistic cache) (y/n) [y]: ${C_RESET}"
