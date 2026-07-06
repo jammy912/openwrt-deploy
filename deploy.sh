@@ -1238,6 +1238,30 @@ mkdir -p "$AGH_DIR"
 AGH_BIN=$(command -v AdGuardHome 2>/dev/null || which AdGuardHome 2>/dev/null || echo "")
 [ -z "$AGH_BIN" ] && [ -x /usr/bin/AdGuardHome ] && AGH_BIN="/usr/bin/AdGuardHome"
 echo "  AGH yaml 路徑: $AGH_YAML"
+
+# --- Netflix 同戶 AAAA 擋 — 依有無 AGH 二選一 ---
+# 有 AGH: client :53 被 hijack 到 AGH，AAAA 由 AGH user_rules 每域名擋(見下方客製化)，
+#         dnsmasq 不做全域過濾(避免其他域名也失去 v6)。
+# 無 AGH: client 直接問 dnsmasq，而 dnsmasq 無每域名擋 AAAA 能力 → 開全域 filter_aaaa，
+#         DNS 層變 v4-only，Netflix 流量才不會走 IPv6 繞過 DBR(只有 v4 set)。
+_cur_faaaa=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa)
+if [ -n "$AGH_BIN" ]; then
+    if [ "$_cur_faaaa" = "1" ]; then
+        uci delete dhcp.@dnsmasq[0].filter_aaaa
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+        echo "  ✅ 有 AGH → 移除 dnsmasq filter_aaaa (AAAA 改由 AGH user_rules 每域名擋)"
+    fi
+else
+    if [ "$_cur_faaaa" != "1" ]; then
+        uci set dhcp.@dnsmasq[0].filter_aaaa='1'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+        echo "  ✅ 無 AGH → dnsmasq filter_aaaa=1 (全域擋 AAAA，Netflix 走 DBR v4)"
+    else
+        echo "  ✅ 無 AGH → dnsmasq filter_aaaa 已設 (跳過)"
+    fi
+fi
 # AGH 首次安裝不會自動產生 yaml (會進入 setup wizard)
 # 需要透過 install API 完成初始設定
 
