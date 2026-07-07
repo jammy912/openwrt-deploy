@@ -2,6 +2,9 @@
 
 > 對應 deploy 版本（`sync-googleconfig.sh` + `dbroute-*.sh` + `pbr-cust`）。
 > 重點：DBR 的 table id / fwmark **不再寫死**，改由 `rt_tables` 的 `dbr_<iface>` 動態決定。
+>
+> 📖 **接手維護請先讀 [`MAINTAINER-GUIDE-netflix-dbr.md`](MAINTAINER-GUIDE-netflix-dbr.md)**
+> （三層心智模型、設計決策 why、踩過的坑、診斷 SOP）。本文件是機制細節參考。
 
 ## 名詞定義
 
