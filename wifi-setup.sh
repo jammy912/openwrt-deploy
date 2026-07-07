@@ -61,6 +61,14 @@ for radio in $RADIO_LIST; do
     # 頻道: 先給安全預設 (非 DFS)；實際值由 auto-role.sh 依角色/mesh 狀態套用
     case "$band" in
         5g) uci set wireless.$radio.channel='149' ;;
+        2g)
+            # 2.4G 限 channel 1-5 + HT20，避開 Zigbee(Aqara 網關會自動選到高頻
+            # 乾淨區 2450-2480/Zigbee 20-26)。ACS 在 1-5 內挑最乾淨者。
+            # HT20(非 40MHz)佔用最窄,不侵蝕高頻 Zigbee 空間。
+            uci set wireless.$radio.channel='auto'
+            uci set wireless.$radio.channels='1 2 3 4 5'
+            uci set wireless.$radio.htmode='HT20'
+            ;;
         *)  uci set wireless.$radio.channel='auto' ;;
     esac
 

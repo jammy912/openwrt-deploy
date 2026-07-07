@@ -927,6 +927,50 @@ apply_5g_channel_policy() {
     [ "$NEED_WIFI_RELOAD" = "1" ] && uci commit wireless
 }
 
+# =====================
+# 2.4G 頻道政策：限 channel 1-5 + HT20，避開 Zigbee
+# Why: Aqara/Zigbee 走 2.4G，WiFi 佔滿 1/6/11 會蓋掉 Zigbee 常用頻道。把 WiFi
+#   集中在低頻 1-5(佔 2401-2435)，讓出高頻 2450-2480(Zigbee 20-26)給 Zigbee。
+#   Aqara 官方網關自動選頻會避開被 WiFi 佔的低頻,自然落到高頻乾淨區。
+#   HT20 佔用最窄(非 40MHz),不侵蝕高頻。與角色無關,所有機型一致。
+# =====================
+apply_2g_channel_policy() {
+    local ap_channels="1 2 3 4 5"
+    local radio band tgt_chs cur_chs cur_ht _phy _avail _ch
+    for radio in radio0 radio1 radio2 radio3; do
+        band=$(uci get wireless.$radio.band 2>/dev/null)
+        [ "$band" != "2g" ] && continue
+
+        # 過濾掉該 radio 硬體不支援的頻道
+        _phy=$(echo "$radio" | sed 's/radio/phy/')
+        _avail=$(iw phy "$_phy" channels 2>/dev/null | grep -v disabled | grep -oE '\[([0-9]+)\]' | tr -d '[]')
+        tgt_chs=""
+        for _ch in $ap_channels; do
+            echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
+        done
+        tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
+        # 硬體連 1-5 都不支援(異常)則不動,避免清空 channels 讓它亂選
+        [ -z "$tgt_chs" ] && continue
+
+        cur_chs=$(uci get wireless.$radio.channels 2>/dev/null)
+        cur_ht=$(uci get wireless.$radio.htmode 2>/dev/null)
+
+        if [ "$cur_chs" != "$tgt_chs" ]; then
+            uci set wireless.$radio.channels="$tgt_chs"
+            uci set wireless.$radio.channel='auto'
+            NEED_WIFI_RELOAD=1
+            log "[channel-policy] $radio (2g) channels: [$cur_chs] -> [$tgt_chs] (避 Zigbee)"
+        fi
+        if [ "$cur_ht" != "HT20" ]; then
+            uci set wireless.$radio.htmode='HT20'
+            NEED_WIFI_RELOAD=1
+            log "[channel-policy] $radio (2g) htmode: $cur_ht -> HT20"
+        fi
+    done
+
+    [ "$NEED_WIFI_RELOAD" = "1" ] && uci commit wireless
+}
+
 # 決定 GW_TYPE (line 677 才最終定，這裡用同邏輯提早算)
 if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ]; then
     _GW_TYPE_FOR_CH="主gw"
@@ -936,6 +980,7 @@ else
     _GW_TYPE_FOR_CH="client"
 fi
 apply_5g_channel_policy "$_GW_TYPE_FOR_CH" "$WANT_WIRELESS"
+apply_2g_channel_policy
 
 [ "$NEED_WIFI_RELOAD" = "1" ] && wifi reload
 
