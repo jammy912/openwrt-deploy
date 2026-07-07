@@ -614,21 +614,27 @@ if [ -f "$DBR_CONF" ]; then
 
         # --- 判定 up/down ---
         # 介面消失 (ifdown) / 對端離線 (handshake 過期) / ping 失敗 → 都視為 down
+        # DBR_HS_DESC / DBR_PING_DESC 供摘要 log 顯示「為什麼 up/down」
         DBR_RESULT="down"
+        DBR_HS_DESC="" DBR_PING_DESC="-"
         if ! ip link show "$DR_IFACE" >/dev/null 2>&1; then
             # 介面不存在, 直接 down (避免 fwmark 命中後流量進空 table)
             log_event "[PENDING] $DR_IFACE 介面不存在 (ifdown), 視為 down"
+            DBR_HS_DESC="介面不存在"
         elif [ "$DR_IFACE" = "wan" ]; then
             # wan 沒 wg handshake, 直接 ping
             DBR_HS_OK=1
+            DBR_HS_DESC="wan(免handshake)"
         else
             DBR_LATEST_HS=$(wg show "$DR_IFACE" latest-handshakes 2>/dev/null \
                 | awk '{print $2}' | sort -n | tail -1)
             if [ -z "$DBR_LATEST_HS" ] || [ "$DBR_LATEST_HS" = "0" ]; then
                 DBR_HS_OK=0
+                DBR_HS_DESC="handshake=從未"
             else
                 DBR_AGE=$(( DBR_NOW - DBR_LATEST_HS ))
                 [ "$DBR_AGE" -le "$DBR_HS_TIMEOUT" ] && DBR_HS_OK=1 || DBR_HS_OK=0
+                DBR_HS_DESC="handshake=${DBR_AGE}s"
             fi
         fi
 
@@ -638,12 +644,16 @@ if [ -f "$DBR_CONF" ]; then
             DBR_RX=${DBR_RX:-0}
             DBR_NEED=$(( PING_COUNT - PING_LOSS_TOLERATE ))
             [ "$DBR_RX" -ge "$DBR_NEED" ] && DBR_RESULT="up"
+            DBR_PING_DESC="${DBR_RX}/${PING_COUNT}"
         fi
         unset DBR_HS_OK
 
         DBR_PREV=$(db_prev_get "$DR_IFACE")
         DBR_HAS_RULE=0
         ip rule show | grep -q "fwmark $DR_FWMARK" && DBR_HAS_RULE=1
+
+        # 每介面摘要（不帶 -q 手動跑時列出「介面/handshake/ping/判定/rule」）
+        log "  [DBR] ${DR_IFACE}: ${DBR_HS_DESC} ping=${DBR_PING_DESC} → ${DBR_RESULT} (fwmark ${DR_FWMARK}, rule=$([ "$DBR_HAS_RULE" = "1" ] && echo 有 || echo 無))"
 
         if [ "$DBR_RESULT" = "up" ]; then
             db_fail_reset "$DR_IFACE"
