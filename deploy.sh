@@ -794,18 +794,20 @@ if ! uci show firewall | grep -q "name='Block-DoT'"; then
     uci set firewall.@rule[-1].target='REJECT'
 fi
 
-# --- Block-LAN-IPv6-WAN:擋 lan → wan 的 IPv6,斷 v6 繞過 DNS/DBR ---
+# --- Block-IPv6-WAN:擋所有轉發 client → wan 的 IPv6,斷 v6 繞過 DNS/DBR ---
 # 問題:client(尤其 Android Netflix App)拿到公網 v6 後,會走 IPv6 DoH(443)
 # 自帶 DNS(繞過 :53 hijack 與 AAAA 擋),並以 v6 直出功能流量 → Netflix 看到
 # 非家用 v6 IP → 同戶失效 + 影片擋播。DoH 藏在 443 無法靠埠擋,且走 v6 連
 # filter_aaaa/DBR(只有 v4 set)都碰不到 → 唯一乾淨解是斷 v6 出網。
 # 為何不關 RA/DHCPv6:auto-role.sh 主 gw 會強制 lan.ra=server(第 602 行),手動
 # 關會被打回。改在 firewall 擋 v6 forward,不與 auto-role 衝突,內網 v6 仍可用。
-# 影響:整個 lan 失去 v6 上網(v4 不動)。DBR 全 v4,不受影響。
-if ! uci show firewall | grep -q "name='Block-LAN-IPv6-WAN'"; then
+# src='*':client 可能在 lan 或 VPN zone(wg1 進來的 client=200 網段),用 '*'
+# 一條蓋所有 zone → wan;dest='wan' 只擋出網,zone 內/跨 zone v6 不受影響。
+# 影響:所有 client 失去 v6 上網(v4 不動)。DBR 全 v4,不受影響。
+if ! uci show firewall | grep -q "name='Block-IPv6-WAN'"; then
     uci add firewall rule >/dev/null
-    uci set firewall.@rule[-1].name='Block-LAN-IPv6-WAN'
-    uci set firewall.@rule[-1].src='lan'
+    uci set firewall.@rule[-1].name='Block-IPv6-WAN'
+    uci set firewall.@rule[-1].src='*'
     uci set firewall.@rule[-1].dest='wan'
     uci set firewall.@rule[-1].family='ipv6'
     uci set firewall.@rule[-1].proto='all'
