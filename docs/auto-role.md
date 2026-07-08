@@ -13,6 +13,10 @@
 
 **觸發時機**：rc.local 開機 / WAN hotplug 變化 / cron 定時。
 
+> ⚠️ **已知問題**：主 gateway 仲裁靠 alfred 讀彼此 priority，但 **alfred 資料跨機不互通**
+> （auto-role 靠 fallback 勉強收斂，priority 接近時會雙主搶 IP）。詳見
+> [alfred-mesh-sync-issue.md](alfred-mesh-sync-issue.md)。
+
 ## 角色判斷邏輯（階段順序）
 
 ```

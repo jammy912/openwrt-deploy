@@ -26,6 +26,7 @@
 | 文件 | 內容 |
 |------|------|
 | [auto-role.md](auto-role.md) | ⚠️ **角色切換大腦**（主/副 gateway/client）。會覆蓋很多 uci 設定，改前必看 |
+| [alfred-mesh-sync-issue.md](alfred-mesh-sync-issue.md) | ⚠️ **未解問題**：alfred 資料跨機不互通 → 仲裁失效 → 雙主搶 IP。已排除的死路 + 待試方向 |
 | [tailscale.md](tailscale.md) | tailscale/headscale mesh + exit node + 定時開關 |
 | [zerotier-backup-vpn.md](zerotier-backup-vpn.md) | ZeroTier 備援 VPN 建置 + 加節點 SOP + 三個坑 |
 
