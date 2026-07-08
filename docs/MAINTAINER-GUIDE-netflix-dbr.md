@@ -180,10 +180,12 @@ Google Sheet ──sync-googleconfig(解密)──► config dbroute 區塊
   v6 DNS 到路由器被擋 + AAAA 被擋 → client 只能用 v4 問 DNS(被 :53 hijack → AGH)→
   Netflix 功能域名全走 v4 → 現有 v4 DBR 接住 → 走 VPN → 同戶成立。**client 的 v6
   一般上網不擋** → Netflix App 需要的 v6 正常 → App 不壞。
-- **✅ 正確規則 `Block-LAN-IPv6-ToRouter`**(input lan → 此裝置, family ipv6, tcp+udp, REJECT):
-  只擋「client 用 IPv6 連路由器本身的服務(尤其 :53 v6 DNS)」,逼 DNS 走 v4。
-  **關鍵:input 方向(到路由器),不是 forward(出網)**——所以不影響 client v6 上網。
+- **✅ 正確規則 `Block-LAN-IPv6-ToRouter`**(src=lan, family ipv6, tcp+udp, **dest_port='53'**, REJECT):
+  只擋「client 用 IPv6 問路由器的 **:53 DNS**」,逼 DNS 走 v4。
+  **關鍵:input 方向(到路由器,無 dest)**——不影響 client v6 上網。
   → input/output/forward 三方向原理見 [`firewall-direction-basics.md`](firewall-direction-basics.md)。
+  ⚠️ **必須限 `dest_port='53'`**(2026-07-08 修):沒限 port 會擋掉 lan→路由器的**所有**
+  v6 tcp/udp,**含 DHCPv6(547)** → Android 卡在 v6 配置 → **Wi-Fi 拿不到 IP**。只擋 :53 才對。
 - **❌ 踩過的坑(勿重蹈)**:
   - `Block-DoT`(853 REJECT forward):擋 DoT → AppleTV/手機 Netflix 圖不出/影片不播。移除。
   - `Block-IPv6-WAN`(forward lan→wan v6 REJECT):擋 client v6 出網 → 太廣,同樣害 App。移除。
@@ -223,14 +225,17 @@ Google Sheet ──sync-googleconfig(解密)──► config dbroute 區塊
 > 或手動下對應 uci。這是最常見的「某台沒防護」原因。
 > **RAM overlay 機器手動改 uci 後,必須跑 `sync-ram2flash.sh` 落地,否則重開機掉。**
 
-Block-LAN-IPv6-ToRouter 立即套用（冪等，只擋 v6 DNS 到路由器，不擋 v6 上網）：
+Block-LAN-IPv6-ToRouter 立即套用（冪等，只擋 v6 DNS(:53) 到路由器，不擋 v6 上網/DHCPv6）：
 ```sh
 uci show firewall | grep -q "name='Block-LAN-IPv6-ToRouter'" || {
   uci add firewall rule; uci set firewall.@rule[-1].name='Block-LAN-IPv6-ToRouter'
   uci set firewall.@rule[-1].src='lan'; uci set firewall.@rule[-1].proto='tcp udp'
-  uci set firewall.@rule[-1].family='ipv6'; uci set firewall.@rule[-1].target='REJECT'
+  uci set firewall.@rule[-1].family='ipv6'
+  uci set firewall.@rule[-1].dest_port='53'    # ★必須限 53,否則擋 DHCPv6(547) 害 Android 拿不到 IP
+  uci set firewall.@rule[-1].target='REJECT'
   uci commit firewall; /etc/init.d/firewall reload; }
 /etc/myscript/sync-ram2flash.sh   # RAM overlay 機器要落地
+# ⚠️ 已部署過「無 dest_port」舊版的機器:先 uci delete 舊規則再重建(見 deploy.sh)
 ```
 
 ---

@@ -789,15 +789,24 @@ for _rn in Block-DoT Block-DoT-lan Block-DoT-VPN Block-IPv6-WAN Block-LAN-IPv6-W
         _i=$((_i + 1))
     done
 done
-# 加正確規則(冪等)
-if ! uci show firewall | grep -q "name='Block-LAN-IPv6-ToRouter'"; then
-    uci add firewall rule >/dev/null
-    uci set firewall.@rule[-1].name='Block-LAN-IPv6-ToRouter'
-    uci set firewall.@rule[-1].src='lan'
-    uci set firewall.@rule[-1].proto='tcp udp'
-    uci set firewall.@rule[-1].family='ipv6'
-    uci set firewall.@rule[-1].target='REJECT'
-fi
+# 加正確規則:★必須限 dest_port='53' 只擋 v6 DNS
+# (2026-07-08 修:沒限 port 會擋掉 lan→路由器的所有 v6 tcp/udp,含 DHCPv6(547),
+#  害 Android 卡在 v6 配置 → Wi-Fi 拿不到 IP。只擋 :53 才對。)
+# 先移除任何舊版(可能無 dest_port 的害 App 版),再建正確版,確保已部署機器重跑會更新。
+_i=0
+while uci get firewall.@rule[$_i] >/dev/null 2>&1; do
+    if [ "$(uci -q get firewall.@rule[$_i].name)" = "Block-LAN-IPv6-ToRouter" ]; then
+        uci delete firewall.@rule[$_i]; continue
+    fi
+    _i=$((_i + 1))
+done
+uci add firewall rule >/dev/null
+uci set firewall.@rule[-1].name='Block-LAN-IPv6-ToRouter'
+uci set firewall.@rule[-1].src='lan'
+uci set firewall.@rule[-1].proto='tcp udp'
+uci set firewall.@rule[-1].family='ipv6'
+uci set firewall.@rule[-1].dest_port='53'
+uci set firewall.@rule[-1].target='REJECT'
 
 uci commit firewall
 echo "  ✅ firewall (UCI)"

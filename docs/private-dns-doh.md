@@ -68,7 +68,8 @@ AGH → 過濾器 → 自訂規則,加:
 擋不了「手動填 IP 的 DoH」。**
 
 ### 層 2：擋 v6 DNS 到路由器(已部署)
-`Block-LAN-IPv6-ToRouter`(input lan→此裝置 v6 REJECT)逼 v6 DNS 走 v4。**不擋 v6 上網。**
+`Block-LAN-IPv6-ToRouter`(input lan→此裝置 v6 **dest_port=53** REJECT)逼 v6 DNS 走 v4。
+**不擋 v6 上網、不擋 DHCPv6。** ⚠️ 必須限 :53,否則擋 DHCPv6(547) 害 Android 拿不到 IP。
 見 MAINTAINER-GUIDE §4 與 firewall-direction-basics.md。
 
 ### 層 3：擋已知公共 DNS 的 IP(443+853)
