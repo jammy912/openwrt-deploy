@@ -2,6 +2,9 @@
 
 這批機器（OpenWrt 多機隊 + Google Sheet 同步 + tailscale/headscale）的維護文件。
 
+> 📐 **先讀 [ARCHITECTURE.md](ARCHITECTURE.md)** — 頂層全局架構（機器角色、設定/腳本兩條
+> 分發線、開機流程、各子系統怎麼互動）。看懂整體再查下面各子系統細節。
+
 ## Netflix 同戶 / DBR / PBR
 
 | 文件 | 內容 |
