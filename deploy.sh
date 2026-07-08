@@ -764,12 +764,22 @@ if ! uci show firewall | grep -q "name='Allow-Tailscale-UDP'"; then
     uci set firewall.@rule[-1].target='ACCEPT'
 fi
 
-# --- ROLLBACK: 移除 Block-DoT / Block-IPv6-WAN(2026-07-07 實測害正常裝置不能看 Netflix) ---
-# 這兩條原為防 DoT/IPv6 繞過 DNS hijack 而加,但實測 Netflix App(手機/AppleTV/平板)
-# 需要 DoT(853)/IPv6 正常運作,擋掉後主頁圖出不來、影片轉圈不播。取捨:可用性優先,
-# 移除這兩條。DoH 繞過改靠「使用者自行關 Private DNS」處理(見 MAINTAINER-GUIDE §4)。
-# 主動清除:讓曾部署過這兩條的機器重跑 deploy 時也一併移除(含舊版每 zone 名)。
-for _rn in Block-DoT Block-DoT-lan Block-DoT-VPN Block-IPv6-WAN Block-LAN-IPv6-WAN; do
+# --- IPv6 DNS 繞過防護(2026-07-07 實測定案的正確做法) ---
+# 目標:逼 client DNS 走 v4(被 :53 hijack → AGH,AAAA 又被擋)→ Netflix 功能域名
+#   全走 v4 → 現有 v4 DBR 接住 → 走 VPN → 同戶成立。**不需做 v6 DBR。**
+#
+# ★ 正確規則 = Block-LAN-IPv6-ToRouter(input lan → 此裝置, family ipv6, REJECT):
+#   只擋「client 用 IPv6 連路由器本身的服務(尤其 :53 v6 DNS)」,逼 DNS 走 v4。
+#   **不擋 client 的 v6 一般上網(forward)** → Netflix App 需要的 v6 正常 → App 不壞。
+#
+# ⚠️ 曾踩的坑(已移除,勿再加):
+#   - Block-DoT(853 REJECT):擋 DoT → Netflix App(AppleTV/手機)主頁圖不出、影片
+#     轉圈不播。Netflix 裝置**需要 DoT 正常**,硬擋會壞。
+#   - Block-IPv6-WAN(forward lan→wan v6 REJECT):擋 client v6 出網 → 太廣,同樣害 App。
+#   DoH(443)繞過無法用防火牆乾淨擋,靠「使用者自行關 Private DNS」處理(見 MAINTAINER-GUIDE)。
+#
+# 主動清除舊的錯規則(曾部署過的機器重跑 deploy 一併移除)
+for _rn in Block-DoT Block-DoT-lan Block-DoT-VPN Block-IPv6-WAN Block-LAN-IPv6-WAN Deny-ipv6; do
     _i=0
     while uci get firewall.@rule[$_i] >/dev/null 2>&1; do
         if [ "$(uci -q get firewall.@rule[$_i].name)" = "$_rn" ]; then
@@ -779,6 +789,15 @@ for _rn in Block-DoT Block-DoT-lan Block-DoT-VPN Block-IPv6-WAN Block-LAN-IPv6-W
         _i=$((_i + 1))
     done
 done
+# 加正確規則(冪等)
+if ! uci show firewall | grep -q "name='Block-LAN-IPv6-ToRouter'"; then
+    uci add firewall rule >/dev/null
+    uci set firewall.@rule[-1].name='Block-LAN-IPv6-ToRouter'
+    uci set firewall.@rule[-1].src='lan'
+    uci set firewall.@rule[-1].proto='tcp udp'
+    uci set firewall.@rule[-1].family='ipv6'
+    uci set firewall.@rule[-1].target='REJECT'
+fi
 
 uci commit firewall
 echo "  ✅ firewall (UCI)"

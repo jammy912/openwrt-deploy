@@ -138,16 +138,29 @@ Google Sheet ──sync-googleconfig(解密)──► config dbroute 區塊
 
 ### DNS 繞過（同戶的主戰場）
 
-- **IPv6 繞過**：client 拿公網 v6 → Netflix App（尤其 Android）優先走 v6 → 繞過只有 v4 set 的
-  DBR → 洩真實 v6 IP → 同戶失效 + **影片擋播**。擋法見 §5。
-  ⚠️ **診斷陷阱**：查 client v6 時，若 client 不在場，neigh 表只剩過期 ULA(`fd6d:`)，
-  **看不到它在家時拿的公網 v6**——別因此誤判「沒 v6」。要在 client 在線時查。
-- **DoH（443）繞過**：Android「私人 DNS」設 DoH、或 App 自帶 DoH，走 443 混在 HTTPS 裡，
-  **無法靠埠號擋**。Firefox 預設 DoH 由 AGH canary(`use-application-dns.net`→NXDOMAIN)自動停用；
-  Chrome 自動升級不觸發(系統 DNS 是路由器 IP)；**手動設 DoH 者無乾淨解**。走 v6 的 DoH 靠
-  Block-IPv6-WAN 一起擋掉。
-- **DoT（853）繞過**：Android Private DNS「自動」模式走 DoT。Block-DoT(`5c3ecad`/`209e2b7`)
-  REJECT 853 → 回落明文 :53 被 hijack 接住。
+> ⚠️ **2026-07-07 重大修正**：原本用 **Block-DoT(853)** + **Block-IPv6-WAN(forward v6→wan)**
+> 硬擋,實測**害 Netflix App(AppleTV/手機/平板)主頁圖不出、影片轉圈不播**——Netflix 裝置
+> 需要 DoT/IPv6 正常運作。**兩條已移除,勿再加**(`9322ec0`)。正解改用下面的
+> `Block-LAN-IPv6-ToRouter`(只擋 v6 DNS 到路由器,不擋 v6 上網)。
+
+- **核心策略**：**不做 v6 DBR**(工程大又脆弱)。改用「逼 client DNS 走 v4」:
+  v6 DNS 到路由器被擋 + AAAA 被擋 → client 只能用 v4 問 DNS(被 :53 hijack → AGH)→
+  Netflix 功能域名全走 v4 → 現有 v4 DBR 接住 → 走 VPN → 同戶成立。**client 的 v6
+  一般上網不擋** → Netflix App 需要的 v6 正常 → App 不壞。
+- **✅ 正確規則 `Block-LAN-IPv6-ToRouter`**(input lan → 此裝置, family ipv6, tcp+udp, REJECT):
+  只擋「client 用 IPv6 連路由器本身的服務(尤其 :53 v6 DNS)」,逼 DNS 走 v4。
+  **關鍵:input 方向(到路由器),不是 forward(出網)**——所以不影響 client v6 上網。
+- **❌ 踩過的坑(勿重蹈)**:
+  - `Block-DoT`(853 REJECT forward):擋 DoT → AppleTV/手機 Netflix 圖不出/影片不播。移除。
+  - `Block-IPv6-WAN`(forward lan→wan v6 REJECT):擋 client v6 出網 → 太廣,同樣害 App。移除。
+- **DoH(443)繞過**:無法靠防火牆乾淨擋(藏在 HTTPS)。**真兇實例**:平板自己開了 Private DNS
+  (DoH 到 Google/Cloudflare)→ 繞過 :53 hijack → 功能流量沒進 DBR → 圖出不來。
+  **解法:使用者自行關 Private DNS**(Android 設定→網路→私人 DNS→關閉/自動)。Firefox 預設
+  DoH 由 AGH canary(`use-application-dns.net`→NXDOMAIN)自動停用;Chrome 自動升級不觸發。
+- **診斷陷阱**:①查 client v6 要在它**在線時**查(離線時 neigh 只剩過期 ULA `fd6d:`,誤判沒 v6)。
+  ②client conntrack 若「有連一堆 Google IP(142.250/216.239/108.177)但 dport=53 查詢=0」→
+  它在用 **v4 DoH**(那些是 dns.google),不是問你的 DNS。③平板 IP 會變(DHCP/MAC 隨機化),
+  抓流量前先從 dhcp.leases 確認當下 IP。
 - **filter_aaaa 對「有 AGH」機器無效**：client :53 被 hijack 到 AGH，不經 dnsmasq
   （`19c9cc3` 的自動二選一就是為此）。
 
@@ -167,21 +180,23 @@ Google Sheet ──sync-googleconfig(解密)──► config dbroute 區塊
 |---|------|------------|------------|---------|
 | 1 | DBR 域名分流 | 功能→wg / nflxvideo→wan（同） | 同 | Sheet + sync |
 | 2 | AAAA 擋 | AGH user_rules 9 域名 | dnsmasq `filter_aaaa=1` | deploy.sh 依 AGH_BIN 自動二選一(`19c9cc3`) |
-| 3 | DoT 擋 | Block-DoT 853 全域 | 同 | deploy.sh(`209e2b7`) |
-| 4 | IPv6 出網擋 | Block-IPv6-WAN(`src='*' dest='wan' family=ipv6`) | 同 | deploy.sh(`43cc8e5`) |
-| 5 | DBR rule 自癒 | fwinclude 補跑 setup | 同 | 腳本(`6b706bf`) |
+| 3 | v6 DNS 擋 | **Block-LAN-IPv6-ToRouter**(input lan→此裝置 v6 REJECT) | 同 | deploy.sh |
+| 4 | DBR rule 自癒 | fwinclude 補跑 setup | 同 | 腳本(`6b706bf`) |
+| — | ~~DoT 擋 / IPv6 出網擋~~ | ❌ **已移除**(害 App,見 §4) | — | — |
 
-> **注意**：#2#3#4 是 **deploy.sh** 裡的，`sync-deploy.sh` 只同步 `etc/myscript`，**不含
+> **注意**：#2#3 是 **deploy.sh** 裡的，`sync-deploy.sh` 只同步 `etc/myscript`，**不含
 > deploy.sh**。所以「只跑 sync-deploy」的機器不會自動有這些 firewall 規則——需重跑 deploy.sh，
-> 或手動下對應 uci（各 commit 訊息有完整指令）。這是最常見的「某台沒防護」原因。
+> 或手動下對應 uci。這是最常見的「某台沒防護」原因。
+> **RAM overlay 機器手動改 uci 後,必須跑 `sync-ram2flash.sh` 落地,否則重開機掉。**
 
-Block-IPv6-WAN 立即套用（冪等）：
+Block-LAN-IPv6-ToRouter 立即套用（冪等，只擋 v6 DNS 到路由器，不擋 v6 上網）：
 ```sh
-uci show firewall | grep -q "name='Block-IPv6-WAN'" || {
-  uci add firewall rule; uci set firewall.@rule[-1].name='Block-IPv6-WAN'
-  uci set firewall.@rule[-1].src='*'; uci set firewall.@rule[-1].dest='wan'
-  uci set firewall.@rule[-1].family='ipv6'; uci set firewall.@rule[-1].proto='all'
-  uci set firewall.@rule[-1].target='REJECT'; uci commit firewall; /etc/init.d/firewall reload; }
+uci show firewall | grep -q "name='Block-LAN-IPv6-ToRouter'" || {
+  uci add firewall rule; uci set firewall.@rule[-1].name='Block-LAN-IPv6-ToRouter'
+  uci set firewall.@rule[-1].src='lan'; uci set firewall.@rule[-1].proto='tcp udp'
+  uci set firewall.@rule[-1].family='ipv6'; uci set firewall.@rule[-1].target='REJECT'
+  uci commit firewall; /etc/init.d/firewall reload; }
+/etc/myscript/sync-ram2flash.sh   # RAM overlay 機器要落地
 ```
 
 ---
