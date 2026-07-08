@@ -86,19 +86,43 @@ OpenWrt 的 forward 有兩層設定：
 
 ---
 
+## 對照 LuCI「防火牆 → 區域」畫面的欄位
+
+LuCI 的 網路 → 防火牆 → 區域,每個 zone 一列,欄位就是這三方向:
+
+```
+區域   區域⇒轉送          傳入   傳出   區域內轉送   NAT
+lan  ⇒ wan/wg_disable/ts  接受   接受    接受        ✓
+       (REJECT all others)
+```
+
+| LuCI 欄位 | = 三方向 | 意思 | 動它會影響 |
+|-----------|---------|------|-----------|
+| **傳入** | INPUT | lan 裝置**連路由器自己**(問 DNS :53、開 LuCI、ssh) | 只影響「存取路由器服務」,**不影響上網** |
+| **傳出** | OUTPUT | 路由器**回應/主動發**給 lan | 路由器自己的流量 |
+| **區域內轉送** | FORWARD(同 zone) | lan 裝置**互連**(手機↔NAS) | 內網互通 |
+| **區域⇒轉送: wan** | FORWARD(跨 zone) | lan **穿過路由器上網** | **這才是上網那條路** |
+| **NAT** | — | lan→wan 出去做位址轉換 | v4 上網靠它 |
+
+**關鍵**:「傳入」和「區域⇒轉送」是**兩個獨立欄位**。這就是「擋 input 不影響上網」的
+UI 層證據——上網是「區域⇒轉送: wan」,連路由器是「傳入」,動一個不碰另一個。
+
+---
+
 ## 實例：為什麼「擋 v6 DNS」要用 input 而不是 forward
 
 2026-07-07 的教訓——目標是「逼 client 的 DNS 走 v4」（讓 Netflix 功能流量進 v4 DBR），
 但**不能斷 client 的 v6 上網**（否則 Netflix App 需要的 v6 掛掉）。
 
-| 規則 | chain | 擋到 | 沒擋到 | 結果 |
-|------|-------|------|--------|------|
-| **Block-LAN-IPv6-ToRouter**<br>`input, src=lan, family=ipv6, REJECT` | **INPUT** | client 用 v6 問**路由器**的 :53 DNS | client v6 上網(forward)<br>路由器自己的 v6(output) | ✅ 正解：只擋 v6 DNS，逼走 v4，App 不壞 |
-| ~~Block-IPv6-WAN~~（已移除）<br>`forward, dest=wan, family=ipv6` | **FORWARD** | client v6 **上網** | — | ❌ 擋掉上網 → Netflix App 圖不出、影片不播 |
-| ~~Block-DoT~~（已移除）<br>`forward, dport=853` | **FORWARD** | client DoT 上網 | — | ❌ Netflix 裝置需要 DoT，擋掉就壞 |
+| 規則 | chain / LuCI 欄位 | 擋到 | 沒擋到 | 結果 |
+|------|------------------|------|--------|------|
+| **Block-LAN-IPv6-ToRouter**<br>`input, src=lan, family=ipv6, REJECT` | **INPUT**<br>=「傳入」欄 | client 用 v6 問**路由器**的 :53 DNS | client v6 上網(forward)<br>路由器自己的 v6(output) | ✅ 正解：只擋 v6 DNS，逼走 v4，App 不壞 |
+| ~~Block-IPv6-WAN~~（已移除）<br>`forward, dest=wan, family=ipv6` | **FORWARD**<br>=「區域⇒轉送 wan」 | client v6 **上網** | — | ❌ 擋掉上網 → Netflix App 圖不出、影片不播 |
+| ~~Block-DoT~~（已移除）<br>`forward, dport=853` | **FORWARD**<br>=「區域⇒轉送 wan」 | client DoT 上網 | — | ❌ Netflix 裝置需要 DoT，擋掉就壞 |
 
-**關鍵**：`Block-IPv6-WAN` 擋 forward（=上網）→ 害 App；`ToRouter` 擋 input（=連路由器自己）
-→ 只斷 v6 DNS，上網照常。**一字之差（input vs forward），一個能用一個害死。**
+**關鍵**：`Block-IPv6-WAN` 動的是 LuCI 的「**區域⇒轉送 wan**」（=上網）→ 害 App；
+`ToRouter` 動的是「**傳入**」（=連路由器自己）→ 只斷 v6 DNS，上網照常。
+**同樣擋 v6，差別只在動哪一欄——一字之差（input vs forward），一個能用一個害死。**
 
 ---
 
