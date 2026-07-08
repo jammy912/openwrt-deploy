@@ -150,6 +150,7 @@ Google Sheet ──sync-googleconfig(解密)──► config dbroute 區塊
 - **✅ 正確規則 `Block-LAN-IPv6-ToRouter`**(input lan → 此裝置, family ipv6, tcp+udp, REJECT):
   只擋「client 用 IPv6 連路由器本身的服務(尤其 :53 v6 DNS)」,逼 DNS 走 v4。
   **關鍵:input 方向(到路由器),不是 forward(出網)**——所以不影響 client v6 上網。
+  → input/output/forward 三方向原理見 [`firewall-direction-basics.md`](firewall-direction-basics.md)。
 - **❌ 踩過的坑(勿重蹈)**:
   - `Block-DoT`(853 REJECT forward):擋 DoT → AppleTV/手機 Netflix 圖不出/影片不播。移除。
   - `Block-IPv6-WAN`(forward lan→wan v6 REJECT):擋 client v6 出網 → 太廣,同樣害 App。移除。
