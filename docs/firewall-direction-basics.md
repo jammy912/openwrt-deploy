@@ -65,9 +65,27 @@
 
 **上網、看影片、走 VPN 全都是 forward。** 這是「路由/轉發」，路由器只是借道穿過。
 
-OpenWrt 的 forward 有兩層設定：
-- **zone 的 `forward`**：該 zone **內部**裝置互相轉送（如 lan↔lan）。
-- **`config forwarding`（src→dest）**：**跨 zone** 轉送（如 lan→wan 才能上網）。
+#### ⚠️ forward 有兩種，LuCI 是兩個不同欄位（容易混）
+
+| | 管什麼 | LuCI 欄位 | 例子 |
+|---|--------|-----------|------|
+| **區域內轉送** | 該 zone **內部**裝置互相轉發（**同 zone**） | 「區域內轉送」欄（zone 的 `forward`） | lan 裝置 ↔ lan 裝置（手機連 NAS） |
+| **區域 ⇒ 轉送** | **跨 zone** 轉發（**不同 zone**） | 「區域 ⇒ 轉送」欄（`config forwarding` src→dest） | lan → wan（**上網**） |
+
+**LuCI「區域 ⇒ 轉送」怎麼讀**：`lan ⇒ wan / wg_disable / ts / (REJECT all others)` =
+「從 lan 來的流量,**准許穿過路由器轉發**到 wan/wg_disable/ts;轉去其他 zone 一律 REJECT」。
+箭頭 `⇒` 是**方向性**的(lan→這些),不是雙向。沒列出的 zone = 沒 forwarding 規則 = 預設 REJECT。
+
+對應 uci:
+```
+config forwarding        # 每條一個「src→dest」
+    option src 'lan'
+    option dest 'wan'    # = lan ⇒ wan(上網)
+```
+
+**踩過的坑對照**:`Block-IPv6-WAN`(害 App)動的是「**區域 ⇒ 轉送 lan→wan**」(=擋 v6 上網);
+`Block-LAN-IPv6-ToRouter`(正解)動的是「**傳入**」(=連路由器本機),不碰「區域 ⇒ 轉送」,
+所以不影響上網。
 
 ---
 
