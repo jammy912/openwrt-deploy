@@ -48,14 +48,21 @@ etc/myscript / etc/init.d / etc/hotplug.d / etc/rc.local
 
 用法:
 ```sh
-/etc/myscript/sync-deploy.sh          # 正常同步(有變動才更新)
-/etc/myscript/sync-deploy.sh --check  # 只比對,有差異推播,不覆蓋
-/etc/myscript/sync-deploy.sh --force  # 強制覆蓋
+/etc/myscript/sync-deploy.sh                    # 正常同步(有變動才更新)
+/etc/myscript/sync-deploy.sh --check            # 只比對,有差異推播,不覆蓋
+/etc/myscript/sync-deploy.sh --force            # 強制覆蓋
+/etc/myscript/sync-deploy.sh --only "a.sh,b.sh" # ★只同步指定檔(basename),其餘完全不碰
 ```
+
+- **`--only <檔名清單>`**:只更新點名的檔(用 basename 比對,逗號/空白分隔),**未指定
+  的檔完全不碰**(連 md5 比對都不做)。適合獨立體系機器只想更新某幾個腳本、不想動其他。
+  可配 `--force`。例:`sync-deploy.sh --only "watchdog.sh,push-status.sh"`。
+  注意 basename 精準比對——`watchdog.sh` 不會誤匹配 `wg-reboot-watchdog.sh`。
 
 **流程**:push 腳本到 GitHub main → 各機 `sync-deploy.sh` → 落地。
 - **獨立體系機器**(如 .6 RT-AC66U)**沒有 sync-deploy**,腳本要手動傳(scp/stdin),
   且推播模組名可能不同要適配。見 memory `independent-routers`。
+  → 或用 `--only` 精準更新(若該機有 sync-deploy)。
 
 ### 3. `sync-ram2flash.sh`（RAM overlay 落地）
 

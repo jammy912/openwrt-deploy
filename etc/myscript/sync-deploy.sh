@@ -3,9 +3,11 @@
 # sync-deploy.sh - 從 GitHub 同步最新的部署腳本到路由器
 # 放置位置：/etc/myscript/sync-deploy.sh
 # 用法：
-#   sync-deploy.sh          # 正常同步（有變動才更新）
-#   sync-deploy.sh --check  # 只比對，有差異推播通知，不覆蓋
-#   sync-deploy.sh --force  # 強制覆蓋
+#   sync-deploy.sh                    # 正常同步（有變動才更新）
+#   sync-deploy.sh --check            # 只比對，有差異推播通知，不覆蓋
+#   sync-deploy.sh --force            # 強制覆蓋
+#   sync-deploy.sh --only "a.sh,b.sh" # 只同步指定檔(basename),其餘完全不碰
+#                                     # (獨立體系機器只想更新某幾個檔用;可配 --force)
 
 # 防止自我更新時 ash 逐行讀取出錯：複製到 /tmp 重新執行
 if [ "$_SYNC_DEPLOY_RELAUNCHED" != "1" ]; then
@@ -42,11 +44,32 @@ EXTRACT_DIR="$TMP_DIR/openwrt-deploy-main"
 HASH_FILE="/tmp/.sync-deploy_hash"
 FORCE=0
 CHECK_ONLY=0
+ONLY_FILES=""     # 指定只同步的檔(basename,逗號/空白分隔);空=全部
 
-case "$1" in
-    --force) FORCE=1 ;;
-    --check) CHECK_ONLY=1 ;;
-esac
+# 參數解析:支援 --only "a.sh,b.sh"、--only=a.sh,b.sh、--force、--check
+_expect_only=0
+for _arg in "$@"; do
+    if [ "$_expect_only" = "1" ]; then ONLY_FILES="$_arg"; _expect_only=0; continue; fi
+    case "$_arg" in
+        --force)   FORCE=1 ;;
+        --check)   CHECK_ONLY=1 ;;
+        --only)    _expect_only=1 ;;
+        --only=*)  ONLY_FILES="${_arg#--only=}" ;;
+    esac
+done
+# 正規化:逗號/分號轉空白,前後空白清掉
+ONLY_FILES=$(echo "$ONLY_FILES" | tr ',;' '  ')
+
+# 判斷某 REL_PATH 是否在 --only 清單內(比對 basename)。
+# ONLY_FILES 空 → 一律回 0(不過濾,全部同步)。
+_only_match() {
+    [ -z "$ONLY_FILES" ] && return 0
+    local _bn=$(basename "$1")
+    for _o in $ONLY_FILES; do
+        [ "$_bn" = "$_o" ] && return 0
+    done
+    return 1
+}
 
 # 要同步的目錄對應 (來源 → 目的)
 # .secrets 目錄排除，避免覆蓋本機密鑰
@@ -80,6 +103,7 @@ cleanup() {
 # =====================================================
 main() {
     log "🚀 開始同步部署腳本..."
+    [ -n "$ONLY_FILES" ] && log "🎯 --only 模式: 只同步 [$ONLY_FILES],其餘檔案完全不碰"
 
     # 清理舊的暫存
     rm -rf "$TMP_DIR"
@@ -140,6 +164,7 @@ main() {
         [ ! -d "$SRC_DIR" ] && continue
 
         find "$SRC_DIR" -type f ! -path "*/.secrets/*" ! -name "dbroute.nft" | while read -r SRC_FILE; do
+            _only_match "$SRC_FILE" || continue   # --only:不在清單就跳過
             REL_PATH="${SRC_FILE#$SRC_DIR/}"
             DEST_FILE="$DEST/$REL_PATH"
 
@@ -158,6 +183,7 @@ main() {
         [ -z "$SRC" ] && continue
         SRC_FILE="$EXTRACT_DIR/$SRC"
         [ ! -f "$SRC_FILE" ] && continue
+        _only_match "$SRC_FILE" || continue   # --only:不在清單就跳過
         if [ ! -f "$DEST" ]; then
             echo "NEW:$SRC"
         else
@@ -207,6 +233,7 @@ main() {
         mkdir -p "$DEST"
 
         find "$SRC_DIR" -type f ! -path "*/.secrets/*" ! -name "dbroute.nft" | while read -r SRC_FILE; do
+            _only_match "$SRC_FILE" || continue   # --only:不在清單就跳過
             REL_PATH="${SRC_FILE#$SRC_DIR/}"
             DEST_FILE="$DEST/$REL_PATH"
 
@@ -227,6 +254,7 @@ main() {
         [ -z "$SRC" ] && continue
         SRC_FILE="$EXTRACT_DIR/$SRC"
         [ ! -f "$SRC_FILE" ] && continue
+        _only_match "$SRC_FILE" || continue   # --only:不在清單就跳過
         SRC_MD5=$(md5sum "$SRC_FILE" | awk '{print $1}')
         DEST_MD5=$(md5sum "$DEST" 2>/dev/null | awk '{print $1}')
         if [ "$SRC_MD5" != "$DEST_MD5" ]; then
