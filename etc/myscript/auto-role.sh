@@ -355,17 +355,56 @@ if [ "$NEW_ROLE" = "gateway" ]; then
     esac
 fi
 
-# ARP DAD 防撞: 判定為主但自己還沒是 .1 → 用 arping -D (source 0.0.0.0) 探測
-# 若有別台 reply 且 MAC 不是自己 → 讓位為副，避免雙主
+# ARP DAD 防撞 (V2 2026-07-08): 修兩個漏洞,治 IP 衝突(雙主搶 .1)
+#   舊漏洞1: 只在「自己還不是 .1」時探測 → 兩台同時開機都不是 .1,同時 arping 都
+#           撲空 → 都搶 .1 (race)。修法: 探測前依 priority 退避,高 pri 先佔,低 pri
+#           探測時就看得到。
+#   舊漏洞2: 搶到 .1 後就不再探測 → 事後另一台也搶 .1 時,佔著的永不發現。
+#           修法: 已是 .1 也持續偵測「.1 有沒有第二個 MAC」,衝突時比 priority 讓位。
+# alfred 仲裁不通時(見 docs/alfred-mesh-sync-issue.md),這是防雙主的最後防線。
 if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ] && command -v arping >/dev/null 2>&1; then
     CUR_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    MY_BRLAN_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
+
     if [ "$CUR_IP" != "192.168.1.1" ]; then
+        # --- 情境A: 自己還不是 .1,要搶 → 先依 priority 退避再探測 ---
+        # 退避 = (100-pri)*0.3 秒: pri=99→0.3s, pri=66→10s, pri=33→20s。
+        # 高 pri 幾乎不等先佔;低 pri 等完再探測,就會看到高 pri 已佔 → 讓位。
+        _BACKOFF=$(awk "BEGIN{printf \"%.1f\", (100 - $MY_PRI) * 0.3}")
+        [ "$(awk "BEGIN{print ($_BACKOFF > 0)}")" = "1" ] && sleep "$_BACKOFF"
         ARP_OUT=$(arping -c 2 -w 2 -D -I br-lan 192.168.1.1 2>&1)
-        MY_BRLAN_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
         REMOTE_MAC=$(echo "$ARP_OUT" | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | tr 'A-Z' 'a-z' | grep -v "^${MY_BRLAN_MAC}$" | head -1)
         if [ -n "$REMOTE_MAC" ]; then
             IS_PRIMARY=0
-            log "ARP DAD: 192.168.1.1 已被 $REMOTE_MAC 佔用 (我 br-lan MAC=$MY_BRLAN_MAC)，讓位為副 gw"
+            log "ARP DAD: 192.168.1.1 已被 $REMOTE_MAC 佔用 (退避 ${_BACKOFF}s 後探測,我 pri=$MY_PRI),讓位為副 gw"
+        fi
+    else
+        # --- 情境B: 自己已是 .1 → 持續偵測有沒有第二台也佔 .1 ---
+        # 一般 arping (非 -D) 從 .1 問 .1,收所有 reply 的 MAC。只有自己=正常;
+        # 出現別的 MAC = 衝突。此時比 priority: 讀對方 priority(alfred/gwl)決定讓不讓。
+        # 保守:偵測到衝突就讓位(priority 低者退),避免持續雙主。由高 pri 那台留守。
+        ARP_OUT=$(arping -c 3 -w 3 -I br-lan 192.168.1.1 2>&1)
+        OTHER_MAC=$(echo "$ARP_OUT" | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | tr 'A-Z' 'a-z' | grep -v "^${MY_BRLAN_MAC}$" | sort -u | head -1)
+        if [ -n "$OTHER_MAC" ]; then
+            # 有第二台佔 .1 → 衝突。決定誰讓位,★確定性只一台讓(不能兩台都讓=沒人當主)。
+            # 規則(與 §3 主 gw 仲裁一致): priority 大者留守;相同或讀不到 pri 時,MAC 小者留守。
+            _OTHER_PRI=$(alfred -r 64 2>/dev/null | tr ',' '\n' | grep -i "$OTHER_MAC" -A5 2>/dev/null | grep -oE '"priority\\":[0-9]+' | grep -oE '[0-9]+' | head -1)
+            _YIELD=0   # 1=我讓位
+            if [ -n "$_OTHER_PRI" ] 2>/dev/null; then
+                if [ "$_OTHER_PRI" -gt "$MY_PRI" ]; then _YIELD=1                       # 對方 pri 高 → 我讓
+                elif [ "$_OTHER_PRI" -eq "$MY_PRI" ] && [ "$OTHER_MAC" \< "$MY_BRLAN_MAC" ]; then _YIELD=1  # pri 同,對方 MAC 小 → 我讓
+                fi
+                # 對方 pri 低、或 pri 同但我 MAC 小 → 我留守(_YIELD=0)
+            else
+                # 讀不到對方 pri → 純用 MAC tie-break(確定性,不會兩台都讓): 我 MAC 大就讓
+                [ "$OTHER_MAC" \< "$MY_BRLAN_MAC" ] && _YIELD=1
+            fi
+            if [ "$_YIELD" = "1" ]; then
+                IS_PRIMARY=0
+                log "ARP DAD衝突: .1 被第二台 $OTHER_MAC 佔(對方pri=${_OTHER_PRI:-未知}),我(pri=$MY_PRI mac=$MY_BRLAN_MAC)讓位為副 gw"
+            else
+                log "ARP DAD衝突: .1 也被 $OTHER_MAC 佔(對方pri=${_OTHER_PRI:-未知}),我(pri=$MY_PRI)留守主 gw(對方應讓)"
+            fi
         fi
     fi
 fi
