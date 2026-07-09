@@ -73,6 +73,10 @@ auto-role 的 alfred 仲裁失效,但退化到 fallback 勉強收斂:
 
 所以多數情況慢慢會好,只有 priority 接近或開機時序巧合才暴露成雙主搶 IP。
 
+**防雙主搶 IP 的最後防線 = ARP DAD V2**(`4b78023`,見 [auto-role.md]):即使 alfred
+仲裁失效,DAD 用「priority 退避 + 持續偵測 .1 第二個 MAC + MAC tie-break」確保最終
+只一台佔 .1。所以 alfred 沒修好也不會持續雙主(DAD 會收斂),只是切換仍靠慢速 fallback。
+
 ## 🔜 待試方向（未做，需規劃）
 
 | 方案 | 做法 | 評估 |

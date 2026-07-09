@@ -14,8 +14,20 @@
 **觸發時機**：rc.local 開機 / WAN hotplug 變化 / cron 定時。
 
 > ⚠️ **已知問題**：主 gateway 仲裁靠 alfred 讀彼此 priority，但 **alfred 資料跨機不互通**
-> （auto-role 靠 fallback 勉強收斂，priority 接近時會雙主搶 IP）。詳見
-> [alfred-mesh-sync-issue.md](alfred-mesh-sync-issue.md)。
+> （auto-role 靠 fallback 勉強收斂）。詳見 [alfred-mesh-sync-issue.md](alfred-mesh-sync-issue.md)。
+> **防雙主搶 .1 的最後防線 = ARP DAD V2**(見下)。
+
+### ARP DAD V2：防雙主搶 .1（IP 衝突）
+
+alfred 仲裁不通時,兩台可能都判自己 primary → 都搶 `.1` → IP 衝突。DAD V2 是最後防線:
+- **情境A(要搶 .1)**:探測前依 priority **退避** `(100-pri)*0.3s` → 高 pri 先佔,
+  低 pri 等完探測就看到高 pri 已佔 → 讓位。**解決「同時開機都撲空都搶」的 race。**
+- **情境B(已是 .1)**:持續 arping 偵測「.1 有沒有第二個 MAC」→ 有衝突就比 priority。
+  **解決「搶到後不再探測,事後另一台也搶時永不發現」。**
+- **確定性 tie-break**:衝突時 priority 大者留守;相同/讀不到 pri 時 **MAC 小者留守**
+  → 保證**只一台讓位**(不會兩台都讓=沒人當主,也不會都留=雙主)。
+
+## 角色判斷邏輯（階段順序）
 
 ## 角色判斷邏輯（階段順序）
 
