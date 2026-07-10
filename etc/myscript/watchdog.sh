@@ -26,6 +26,11 @@ TIMEOUT=5
 REBOOT_COUNT_FILE="/etc/myscript/.reboot_count"
 HITRON_THRESHOLD=3
 
+# 升級重開 Hitron 後的冷卻檔 (存「暫停截止 epoch」; 持久, 跨 reboot 保留)
+# 自己連重開 3 次 + 重開上層都做了仍斷網 → 再重試無意義, 冷卻期內跳過連網檢查
+HITRON_PAUSE_FILE="/etc/myscript/.hitron_pause_until"
+HITRON_PAUSE_SEC=14400  # 4 小時
+
 # 日誌函式
 log() {
     echo "$1"
@@ -202,6 +207,19 @@ if [ "$LOAD_1M" -ge 12 ]; then
     fi
 fi
 
+# === Hitron 升級後冷卻期: 期間內跳過連網檢查/重啟 (上面的 load 監控照常跑) ===
+if [ -f "$HITRON_PAUSE_FILE" ]; then
+    PAUSE_UNTIL=$(cat "$HITRON_PAUSE_FILE" 2>/dev/null)
+    case "$PAUSE_UNTIL" in ''|*[!0-9]*) PAUSE_UNTIL=0 ;; esac
+    NOW=$(date +%s)
+    if [ "$NOW" -lt "$PAUSE_UNTIL" ]; then
+        log "⏸️ Hitron 重開後冷卻中 (剩 $(( (PAUSE_UNTIL - NOW) / 60 )) 分)，跳過連網檢查"
+        exit 0
+    fi
+    rm -f "$HITRON_PAUSE_FILE"; sync 2>/dev/null
+    log "▶️ 冷卻期結束，恢復連網檢查"
+fi
+
 # 主邏輯
 # 檢查三個 IP
 check_ip "$IP1"
@@ -271,13 +289,16 @@ if [ $failed_count -gt 0 ]; then
         # 這次不 reboot 自己 (等上層回來自己應恢復; 下輪再判)。
         if [ "$REBOOT_N" -ge "$HITRON_THRESHOLD" ]; then
             log "⚠️ 已連續重啟 $REBOOT_N 次仍斷網，改重開上層 Hitron 分享器"
-            queue_push "reboot-watchdog" "hitron-escalate" "連續自重啟 ${REBOOT_N} 次仍斷網, 改重開上層 Hitron| failed=${failed_ips}| ${NETDIAG_SUMMARY}"
+            queue_push "reboot-watchdog" "hitron-escalate" "連續自重啟 ${REBOOT_N} 次仍斷網, 改重開上層 Hitron, watchdog 冷卻 4h| failed=${failed_ips}| ${NETDIAG_SUMMARY}"
             rm -f "$REBOOT_COUNT_FILE"; sync 2>/dev/null    # 升級打 hitron = 換策略, 計數歸零重新算
             if [ -x /etc/myscript/hitron_reboot.sh ]; then
                 /etc/myscript/hitron_reboot.sh -y
             else
                 log "❌ /etc/myscript/hitron_reboot.sh 不存在或不可執行"
             fi
+            # 自己重開 3 次 + 打上層都試過 → 再 try 無意義, 冷卻 4h 不再檢查/重啟
+            echo $(( $(date +%s) + HITRON_PAUSE_SEC )) > "$HITRON_PAUSE_FILE"; sync 2>/dev/null
+            log "⏸️ 進入冷卻期 $((HITRON_PAUSE_SEC / 3600)) 小時，期間跳過連網檢查與自動重啟"
             log "ℹ️ 已下達 Hitron 重開，本輪不 reboot 自己，等上層恢復"
             exit 0
         fi
