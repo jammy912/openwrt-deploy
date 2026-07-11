@@ -14,10 +14,15 @@
 #   /etc/myscript/wg-status.sh --no-push           # 只印不推播 (debug / 手動查)
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
-# 輸出範例 (第一行 title, 之後每介面一行):
+# 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行, 段間空行):
 #   WG Status
-#   wg2:1/1連入(hs56s) PBR:on DBR:on
-#   wg5:up PBR:on DBR:off
+#   wg2:1/1連入(hs56s)
+#     PBR:on
+#     DBR:on
+#
+#   wg5:up
+#     PBR:on
+#     DBR:off
 
 # 不排全域 cron 隊: 唯讀查詢, 不與其他 cron 競態; on-demand 查詢也不該被長任務卡住
 PATH=/usr/sbin:/sbin:/usr/bin:/bin
@@ -136,7 +141,7 @@ EOF
         fi
     fi
 
-    ITEM="${IF}:${ST} PBR:${PBR} DBR:${DBR}"
+    ITEM="${IF}:${ST}${NL}  PBR:${PBR}${NL}  DBR:${DBR}"
     [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
     MSG="${MSG}${ITEM}"
 done
