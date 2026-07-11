@@ -57,7 +57,7 @@ for IF in $IFACES; do
     # 指定的介面不存在時明講 (只掃到的不會進這裡)
     if ! ip link show "$IF" >/dev/null 2>&1; then
         ITEM="${IF}:介面不存在"
-        [ -n "$MSG" ] && MSG="${MSG}${NL}"
+        [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
         MSG="${MSG}${ITEM}"
         continue
     fi
@@ -129,7 +129,7 @@ EOF
     fi
 
     ITEM="${IF}:${ST} PBR:${PBR} DBR:${DBR}"
-    [ -n "$MSG" ] && MSG="${MSG}${NL}"
+    [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
     MSG="${MSG}${ITEM}"
 done
 
