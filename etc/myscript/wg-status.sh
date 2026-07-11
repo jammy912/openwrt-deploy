@@ -14,7 +14,8 @@
 #   /etc/myscript/wg-status.sh --no-push           # 只印不推播 (debug / 手動查)
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
-# 輸出範例 (每介面一行):
+# 輸出範例 (第一行 title, 之後每介面一行):
+#   WG Status
 #   wg2:1/1連入(hs56s) PBR:on DBR:on
 #   wg5:up PBR:on DBR:off
 
@@ -133,6 +134,9 @@ EOF
 done
 
 [ -z "$MSG" ] && MSG="無任何 wg 介面"
+
+# 第一行 title (push 時與 hostname 前綴同行, 介面各自成行)
+MSG="WG Status${NL}${MSG}"
 
 echo "$MSG"
 # syslog 保持單行好查
