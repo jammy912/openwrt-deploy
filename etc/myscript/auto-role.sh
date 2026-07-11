@@ -1089,10 +1089,12 @@ if [ "$CURRENT_ROLE" != "$NEW_ROLE" ]; then
 elif [ "$NEW_ROLE" = "gateway" ] && [ "$PREV_GWTYPE" != "$GW_TYPE" ]; then
     push_notify "AutoRole: ${PREV_GWTYPE:-?}→${GW_TYPE} ${FINAL_IP}"
 fi
+# 變更才寫: 每分鐘 cron + /etc/myscript 在 flash 上(RAM overlay 只蓋 config/crontabs),
+# 無條件寫 = 1440 次/天磨 flash
 if [ "$NEW_ROLE" = "gateway" ]; then
-    echo "$GW_TYPE" > "$GWTYPE_FILE"
+    [ "$PREV_GWTYPE" != "$GW_TYPE" ] && echo "$GW_TYPE" > "$GWTYPE_FILE"
 else
-    > "$GWTYPE_FILE"
+    [ -n "$PREV_GWTYPE" ] && > "$GWTYPE_FILE"
 fi
 
 # =====================
