@@ -63,8 +63,16 @@ for IF in $IFACES; do
     fi
 
     # --- 介面狀態 ---
+    # pingresult 超過 5 分鐘沒更新 = 殭屍快照(check-pbr-wg 每分鐘跑, 正常不會這麼舊),
+    # 視為無效退回 handshake 判定
     ST=""
-    PR=$(cat "${STATE_DIR}/${IF}.pingresult" 2>/dev/null)
+    PR=""
+    PR_FILE="${STATE_DIR}/${IF}.pingresult"
+    if [ -f "$PR_FILE" ]; then
+        _mt=$(date -r "$PR_FILE" +%s 2>/dev/null)
+        case "$_mt" in ''|*[!0-9]*) _mt=0 ;; esac
+        [ $(( NOW - _mt )) -le 300 ] && PR=$(cat "$PR_FILE" 2>/dev/null)
+    fi
     if [ -n "$PR" ] && [ "$PR" != "skip" ]; then
         ST="$PR"
     else

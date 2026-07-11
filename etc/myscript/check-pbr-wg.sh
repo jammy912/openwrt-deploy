@@ -587,6 +587,21 @@ done
 # 如果有任何變更，則提交設定並重載服務
 uci changes pbr | grep -q . && uci commit pbr
 
+# === 清理孤兒狀態檔 ===
+# CustRule 被移除(如 Sheet 異動)的介面, 第一階段不再更新它的狀態檔,
+# pingresult 會凍成殭屍快照誤導讀取方(如 wg-status)。只清第一/二階段的檔;
+# 保留 flap 鎖(.downlog/.disabled_until/.lockhistory, 規則重加時鎖要還在)
+# 與 DBR 檔(.db*, 介面可能仍在 domain routing)。
+for _pf in "${STATE_DIR}"/*.pingresult; do
+    [ -f "$_pf" ] || continue
+    _oif=$(basename "$_pf" .pingresult)
+    echo "$CHECKED_IFACES" | grep -qw "$_oif" && continue
+    rm -f "${STATE_DIR}/${_oif}.pingresult" "${STATE_DIR}/${_oif}.prevresult" \
+          "${STATE_DIR}/${_oif}.upcount" "${STATE_DIR}/${_oif}.failcount" \
+          "${STATE_DIR}/${_oif}.rule" "${STATE_DIR}/${_oif}.custrules"
+    log " -> 清理孤兒狀態檔: $_oif (已無 CustRule)"
+done
+
 # === 域名路由健康檢查（動態，所有 route_*_v4 介面） ===
 RT_TABLES="/etc/iproute2/rt_tables"
 DBR_CONF="/etc/dnsmasq.d/dbroute-domains.conf"
