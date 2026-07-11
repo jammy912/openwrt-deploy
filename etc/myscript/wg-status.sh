@@ -14,8 +14,9 @@
 #   /etc/myscript/wg-status.sh --no-push           # 只印不推播 (debug / 手動查)
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
-# 輸出範例:
-#   wg2:1/1連入(hs56s) PBR:on DBR:on | wg5:up PBR:on DBR:off
+# 輸出範例 (每介面一行):
+#   wg2:1/1連入(hs56s) PBR:on DBR:on
+#   wg5:up PBR:on DBR:off
 
 # 不排全域 cron 隊: 唯讀查詢, 不與其他 cron 競態; on-demand 查詢也不該被長任務卡住
 PATH=/usr/sbin:/sbin:/usr/bin:/bin
@@ -38,6 +39,8 @@ DBR_CONF="/etc/dnsmasq.d/dbroute-domains.conf"
 RT_TABLES="/etc/iproute2/rt_tables"
 HS_TIMEOUT=180
 NOW=$(date +%s)
+NL="
+"
 
 # 介面清單: 有帶參數用參數 (逗號分隔), 不帶 = 所有 wg 介面
 if [ -n "$IFLIST" ]; then
@@ -53,7 +56,7 @@ for IF in $IFACES; do
     # 指定的介面不存在時明講 (只掃到的不會進這裡)
     if ! ip link show "$IF" >/dev/null 2>&1; then
         ITEM="${IF}:介面不存在"
-        [ -n "$MSG" ] && MSG="${MSG} | "
+        [ -n "$MSG" ] && MSG="${MSG}${NL}"
         MSG="${MSG}${ITEM}"
         continue
     fi
@@ -125,13 +128,14 @@ EOF
     fi
 
     ITEM="${IF}:${ST} PBR:${PBR} DBR:${DBR}"
-    [ -n "$MSG" ] && MSG="${MSG} | "
+    [ -n "$MSG" ] && MSG="${MSG}${NL}"
     MSG="${MSG}${ITEM}"
 done
 
 [ -z "$MSG" ] && MSG="無任何 wg 介面"
 
 echo "$MSG"
-logger -t wg-status "$MSG"
+# syslog 保持單行好查
+logger -t wg-status "$(echo "$MSG" | tr '\n' '|')"
 [ "$NO_PUSH" = "0" ] && push_notify "$MSG"
 exit 0
