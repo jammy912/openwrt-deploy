@@ -62,13 +62,30 @@
 
 ## 優先順序
 
-**DBR (100) > CustRule PBR (200) > OpenWrt PBR (29995+)**
+**DBR (100) > CustRule PBR (200) > Tailscale (5210~5270) > OpenWrt PBR (29987~30000)**
 
-- DBR 的 fwmark 規則在 priority 100，最先被檢查
-- CustRule 的 from 規則在 priority 200，次之
-- OpenWrt PBR 套件在 priority 29995+，最後
+完整 prio 全圖（.1 實查 2026-07-12，數字越小越先評估）：
+
+| prio | 建立者 | 內容 |
+|------|--------|------|
+| 0 | kernel | `lookup local`（本機位址） |
+| 100 | **DBR** | `fwmark <dbr table號hex> lookup dbr_<if>`；含 wan 強制規則 `fwmark 0xfe lookup main` |
+| 200 | **CustRule**（pbr-cust） | `from <src IP> lookup <CustRule編號>`（table 1000~4000） |
+| 5210/5230/5250 | Tailscale | `fwmark 0x80000`：依序 main → default → **unreachable** |
+| 5270 | Tailscale | `from all lookup 52`（TS 主路由表） |
+| 29987 | PBR 套件 | `lookup main suppress_prefixlength 1` |
+| 29988~29991 | PBR 套件 | `sport 516xx/51820 → pbr_wan`（WG 服務埠回應固定走 wan） |
+| 29992~29999 | PBR 套件 | 各介面主 rule `fwmark 0xN0000/0xff0000 → pbr_<if>` |
+| 30000 | PBR 套件 | uplink `fwmark 0x10000 → pbr_wan` |
+| 32766/32767 | kernel | main / default（兜底） |
 
 這代表：**即使某裝置被 CustRule 指定走 VPN，只要該域名有 DBR 設定，DBR 會優先生效。**
+
+> ⚠️ **fwmark 0x80000 撞號地雷**：PBR 套件依介面順序分配 fwmark，第 8 個介面會拿到
+> `0x80000`——與 **Tailscale 保留的 fwmark 撞號**，且 TS 的 prio 5250 `unreachable`
+> 排在 PBR 套件規則之前 → 被套件標上 0x80000 的封包會先被判 unreachable。
+> .1 上 wg0 正好排在這個位置（目前無害：wg0 走 CustRule，套件不會為它標記），
+> **不要對排在 0x80000 位置的介面用 PBR 套件的 `interface=` 方式路由**。
 
 ### Table id / fwmark 分配（重要變更）
 
@@ -304,7 +321,7 @@ ip route add default dev wg0 table 1001
 - **HAVE**：從 `ip rule list` 取 priority 200、table 1000~4000 的現有規則。
 - **要刪**：HAVE 有、WANT 沒有 → `ip rule del prio 200 ...` + flush table。
 - **要加/更新**：WANT 有、HAVE 沒有 → 新增；route 的 dev 有變則重建。
-- 套用後寫入 `check-pbr-wg` cache（`/tmp/check-pbr-wg.<iface>.rule` 與 `.custrules`），供 wg 介面 DOWN/UP 無感切換用。
+- 套用後寫入 `check-pbr-wg` cache（`/tmp/check-pbr-wg/<iface>.rule` 與 `.custrules`），供 wg 介面 DOWN/UP 無感切換用。
 
 > sync-googleconfig 中：wg 介面本身有變動才 `pbr reload`；只有 CustRule 變動則只跑 `pbr-cust start`（diff 無感）。
 
@@ -313,6 +330,21 @@ ip route add default dev wg0 table 1001
 - `CustRule` + 數字 = table ID（例如 `CustRule1001` → table 1001）
 - table ID 範圍：1000~4000
 - dest_addr 支援：`wan`（走 wan gateway）、`wg*`（走 WG 介面）
+
+### 兩型介面：client-wg 型 vs CustRule-only 型（2026-07-12 釐清）
+
+| | client-wg 型（wg3/wg_tw/wg_hk…） | CustRule-only 型（wg0/wg2） |
+|---|---|---|
+| 路由機制 | PBR 套件 fwmark 主 rule（prio 2999x）+ `pbr_<if>` 具名 table | **prio 200 rules + 編號 table（1001…）**，pbr-cust 維護 |
+| rt_tables | 有 `pbr_<if>` 具名條目 | **沒有具名條目是常態**（如 337 缺號） |
+| PBR 套件參與? | 是 | **否**——CustRule 的 uci policy 沒有 `interface` 欄位，套件把 `dest_addr='wg0'` **當域名解析**，生出 `nftset=/wg0/...` 垃圾 dnsmasq 設定（無害），並不建 fwmark 路由 |
+| check-pbr-wg 健檢 | `rule_exists`（fwmark 主 rule 在不在）+ RULE_CACHE 還原 | `custrules_complete`（.custrules cache 的 prio 200 rules 齊全即健康） |
+
+> ⚠️ **踩過的坑（commit 2ceedd8 修）**：舊版 check-pbr-wg 對 CustRule-only 型也用
+> `rule_exists` 判——這型永遠沒有 fwmark 主 rule → 永遠 false → UP 冷靜期無限迴圈，
+> `pingresult` 每 4 輪 3 次 `pending`（wg-status 看起來一直 pending）。**期間流量其實
+> 正常走 prio 200 rules**，純誤報。同 commit 也讓 wg-status 的 `(rule缺)` 判定認得這型。
+> 驗證這型路由健在：`ip rule show | grep '^200:'` + `ip route show table 1001`。
 
 ---
 
@@ -470,8 +502,8 @@ cat /tmp/pbr-cust.log
 uci show pbr | grep -i custrule
 
 # 看 wg 介面 DOWN/UP 無感切換用的 cache
-ls -l /tmp/check-pbr-wg.*
-cat /tmp/check-pbr-wg.wg2.custrules
+ls -l /tmp/check-pbr-wg/
+cat /tmp/check-pbr-wg/wg2.custrules
 ```
 
 ### 7. 系統日誌
@@ -496,6 +528,7 @@ logread | grep -i dbroute
 | ip rule MISSING | 介面是否 UP（`ip link show wg2`）；跑 `dbroute-setup.sh` |
 | fwmark/table 對不上 | `cat /etc/iproute2/rt_tables` 看 `dbr_<iface>` 實際 table id（DBR 從 300 起） |
 | CustRule 沒生效 | `uci show pbr` 確認 enabled；`/etc/init.d/pbr-cust start`；看 `/tmp/pbr-cust.log` |
+| wg-status 顯示一直 pending（流量卻正常） | 多半是 CustRule-only 型被舊版 rule_exists 誤判，見「兩型介面」一節；`ip rule show \| grep '^200:'` 確認路由其實健在 |
 | firewall restart 後失效 | fwinclude 會自動重載 nft + 補跑 setup 自癒；沒復原看 `logread -e dbroute` |
 | 域名走 IPv6 繞過 DBR | client 上 `nslookup -type=AAAA netflix.com` 應查不到（見「DNS 繞過防護」） |
 
