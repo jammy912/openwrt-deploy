@@ -14,15 +14,16 @@
 #   /etc/myscript/wg-status.sh --no-push           # 只印不推播 (debug / 手動查)
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
-# 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行, 段間空行):
+# 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行, 段間空行;
+#           圖示: 🟢on / 🔴off·flap停用 / 🟠部分啟用):
 #   WG Status
 #   wg2:1/1連入(hs56s)
-#     PBR:on
-#     DBR:on
+#     PBR:🟢on
+#     DBR:🟢on
 #
 #   wg5:up
-#     PBR:on
-#     DBR:off
+#     PBR:🔴off(flap停用120m)
+#     DBR:🔴off
 
 # 不排全域 cron 隊: 唯讀查詢, 不與其他 cron 競態; on-demand 查詢也不該被長任務卡住
 PATH=/usr/sbin:/sbin:/usr/bin:/bin
@@ -121,10 +122,22 @@ EOF
     else
         PBR="${pbr_on}/${pbr_total}"
     fi
-    # 高頻震盪停用中另標 (check-pbr-wg 的 flap disable)
+    # 高頻震盪停用註記 (check-pbr-wg 的 flap disable)
     _until=$(cat "${STATE_DIR}/${IF}.disabled_until" 2>/dev/null)
+    FLAP=""
     if [ "$_until" -gt "$NOW" ] 2>/dev/null; then
-        PBR="${PBR}(flap停用$(( (_until - NOW) / 60 ))m)"
+        FLAP="(flap停用$(( (_until - NOW) / 60 ))m)"
+    fi
+    # 圖示: on=🟢 off=🔴 部分啟用=🟠; flap 停用中一律 🔴; 無規則(-)平常不加圖示
+    if [ -n "$FLAP" ]; then
+        PBR="🔴${PBR}${FLAP}"
+    else
+        case "$PBR" in
+            on)  PBR="🟢on" ;;
+            off) PBR="🔴off" ;;
+            -)   ;;
+            *)   PBR="🟠${PBR}" ;;
+        esac
     fi
 
     # --- DBR (domain routing) enable 狀態 ---
@@ -134,9 +147,9 @@ EOF
         if [ -n "$_tbl" ]; then
             _fwmark=$(printf "0x%x" "$_tbl")
             if ip rule show | grep -q "fwmark $_fwmark "; then
-                DBR="on"
+                DBR="🟢on"
             else
-                DBR="off"
+                DBR="🔴off"
             fi
         fi
     fi

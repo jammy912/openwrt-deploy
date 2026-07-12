@@ -309,6 +309,8 @@ if [ $failed_count -gt 0 ]; then
 
         # 額外推一筆 snapshot 關鍵段 (route + wg handshakes + batctl n),
         # 控制長度避免被通知服務截斷
+        # wg 段第二欄是 peer 公鑰: 推播只留前 8 碼(足以分辨 peer, 不外洩完整金鑰;
+        # 本地 NETDIAG_LOG / .last_reboot_snapshot.log 仍是完整版)
         SNAP_TAIL=$(awk '
             /^\[routes\]/        {sec="route"; print; next}
             /^\[wg peers\]/      {sec="wg";    print; next}
@@ -321,6 +323,7 @@ if [ $failed_count -gt 0 ]; then
             /^\[logread/         {sec="";      next}
             /^\[traceroute/      {sec="";      next}
             /^=== end ===/       {exit}
+            sec=="wg" { if (NF >= 2) $2 = substr($2, 1, 8) ".."; print; next }
             sec!="" {print}
         ' "$NETDIAG_LOG" | head -c 800)
         queue_push "reboot-snapshot-tail" "" "$SNAP_TAIL"
