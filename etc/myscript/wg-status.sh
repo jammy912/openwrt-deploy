@@ -15,13 +15,13 @@
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
 # 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行, 段間空行;
-#           圖示: 🟢on / 🔴off·flap停用 / 🟠部分啟用):
+#           圖示: 🟢健康(up/連入/on) / 🔴斷線·off·flap停用 / 🟠過渡態(pending/無peer/部分啟用)):
 #   WG Status
-#   wg2:1/1連入(hs56s)
+#   wg2:🟢1/1連入(hs56s)
 #     PBR:🟢on
 #     DBR:🟢on
 #
-#   wg5:up
+#   wg5:🟢up
 #     PBR:🔴off(flap停用120m)
 #     DBR:🔴off
 
@@ -62,7 +62,7 @@ for IF in $IFACES; do
 
     # 指定的介面不存在時明講 (只掃到的不會進這裡)
     if ! ip link show "$IF" >/dev/null 2>&1; then
-        ITEM="${IF}:介面不存在"
+        ITEM="${IF}:🔴介面不存在"
         [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
         MSG="${MSG}${ITEM}"
         continue
@@ -105,6 +105,16 @@ EOF
             ST="${online}/${total}斷線"
         fi
     fi
+    # 介面狀態圖示: 健康🟢 / 斷線・不通🔴 / 過渡態🟠
+    case "$ST" in
+        up)        ST="🟢up" ;;
+        down)      ST="🔴down" ;;
+        down-hold) ST="🔴down-hold" ;;
+        pending)   ST="🟠pending" ;;
+        無peer)    ST="🟠無peer" ;;
+        *連入*)    ST="🟢${ST}" ;;
+        *斷線*)    ST="🔴${ST}" ;;
+    esac
 
     # --- PBR (CustRule) enable 狀態 ---
     pbr_total=0; pbr_on=0
