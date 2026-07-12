@@ -182,7 +182,7 @@ check_flap_disable() {
             rm -f "$disabled_until_file" "$downlog"
             log_event "[FLAP] $iface 停用期滿，自動恢復"
             log "    [$iface] 停用期滿，已自動恢復"
-            push_notify "${iface}_FLAP_Unlock"
+            push_notify "${iface}_FLAP_🟢Unlock"
         fi
     fi
 
@@ -202,11 +202,11 @@ check_flap_disable() {
             if [ "$lock_count" -ge "$LOCK_ESCALATE_THRESHOLD" ]; then
                 lock_dur=$LONG_LOCK_DURATION
                 lock_label="長鎖 $(fmt_duration $LONG_LOCK_DURATION) (累計第 ${lock_count} 次)"
-                notify_tag="${iface}_FLAP_Lock_Long"
+                notify_tag="${iface}_FLAP_🔴Lock_Long"
             else
                 lock_dur=$SHORT_LOCK_DURATION
                 lock_label="短鎖 $(fmt_duration $SHORT_LOCK_DURATION) (累計第 ${lock_count}/${LOCK_ESCALATE_THRESHOLD} 次)"
-                notify_tag="${iface}_FLAP_Lock_Short"
+                notify_tag="${iface}_FLAP_🟠Lock_Short"
             fi
 
             local until=$((now + lock_dur))
