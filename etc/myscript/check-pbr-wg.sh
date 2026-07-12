@@ -182,7 +182,7 @@ check_flap_disable() {
             rm -f "$disabled_until_file" "$downlog"
             log_event "[FLAP] $iface 停用期滿，自動恢復"
             log "    [$iface] 停用期滿，已自動恢復"
-            push_notify "${iface}_FlapDisable_Recovered"
+            push_notify "${iface}_FLAP_Unlock"
         fi
     fi
 
@@ -202,11 +202,11 @@ check_flap_disable() {
             if [ "$lock_count" -ge "$LOCK_ESCALATE_THRESHOLD" ]; then
                 lock_dur=$LONG_LOCK_DURATION
                 lock_label="長鎖 $(fmt_duration $LONG_LOCK_DURATION) (累計第 ${lock_count} 次)"
-                notify_tag="${iface}_FlapDisable_Long"
+                notify_tag="${iface}_FLAP_Lock_Long"
             else
                 lock_dur=$SHORT_LOCK_DURATION
                 lock_label="短鎖 $(fmt_duration $SHORT_LOCK_DURATION) (累計第 ${lock_count}/${LOCK_ESCALATE_THRESHOLD} 次)"
-                notify_tag="${iface}_FlapDisable_Short"
+                notify_tag="${iface}_FLAP_Lock_Short"
             fi
 
             local until=$((now + lock_dur))
@@ -575,9 +575,9 @@ for SECTION in $SECTIONS; do
     # down-hold(NO_FALLBACK 保持) 會更新 prevresult 並推一次，讓 UP 回來能正確對比
     if [ "$PING_RESULT" != "$PREV" ] && [ "$PING_RESULT" != "pending" ] && [ "$PING_RESULT" != "skip" ]; then
         case "$PING_RESULT" in
-            up)        push_notify "${INTERFACE}_UP" ;;
-            down)      push_notify "${INTERFACE}_Down" ;;
-            down-hold) push_notify "${INTERFACE}_DownHold" ;;  # 斷線但不切 wan(black-hole)
+            up)        push_notify "${INTERFACE}_PBR_🟢UP" ;;
+            down)      push_notify "${INTERFACE}_PBR_🔴Down" ;;
+            down-hold) push_notify "${INTERFACE}_PBR_🔴DownHold" ;;  # 斷線但不切 wan(black-hole)
         esac
         echo "$PING_RESULT" > "$PREV_RESULT"
     fi
@@ -613,7 +613,7 @@ if [ -f "$DBR_CONF" ]; then
         if [ -f "$DBR_NFT" ]; then
             nft -f "$DBR_NFT" && log "nft table fw4 重建成功" || log "nft table fw4 重建失敗"
             service dnsmasq restart
-            push_notify "dbroute_nft_rebuilt"
+            push_notify "DBR_nft_rebuilt"
         fi
     fi
 
@@ -679,7 +679,7 @@ if [ -f "$DBR_CONF" ]; then
                 # dbroute-setup.sh / sync-googleconfig) 補回, 推一次 UP 同步狀態
                 if [ "$DBR_PREV" = "down" ]; then
                     log_event "[REPAIR] $DR_IFACE dbroute fwmark 已由外部重建, 同步狀態"
-                    push_notify "${DR_IFACE}_DomainRoute_UP"
+                    push_notify "${DR_IFACE}_DBR_🟢UP"
                     db_prev_set "$DR_IFACE" "up"
                 fi
             else
@@ -693,7 +693,7 @@ if [ -f "$DBR_CONF" ]; then
                     log_event "[UP] $DR_IFACE dbroute 冷靜期完成, fwmark $DR_FWMARK 已建"
                     db_up_reset "$DR_IFACE"
                     if [ "$DBR_PREV" != "up" ]; then
-                        push_notify "${DR_IFACE}_DomainRoute_UP"
+                        push_notify "${DR_IFACE}_DBR_🟢UP"
                         db_prev_set "$DR_IFACE" "up"
                     fi
                 fi
@@ -720,7 +720,7 @@ if [ -f "$DBR_CONF" ]; then
                     log "${DR_IFACE} DOWN → 移除 domain routing"
                     log_event "[DOWN] $DR_IFACE dbroute 連 ${DOWN_CONFIRM} 輪確認失敗, fwmark $DR_FWMARK 已移除"
                     if [ "$DBR_PREV" != "down" ]; then
-                        push_notify "${DR_IFACE}_DomainRoute_Down"
+                        push_notify "${DR_IFACE}_DBR_🔴Down"
                         db_prev_set "$DR_IFACE" "down"
                     fi
                 fi
@@ -871,7 +871,7 @@ for SWG in $SERVER_WG_IFACES; do
     fi
     log_event "[EXITFO] $SWG 出口 0.0.0.0/0 → $WINNER_DESC（active, 字典序優先）"
     log "    動作: $SWG 0.0.0.0/0 搬給 $WINNER_DESC"
-    push_notify "${SWG}_ExitFailover_${WINNER_DESC}"
+    push_notify "${SWG}_EXIT_Failover_${WINNER_DESC}"
 done
 
 log "檢查完畢。"
