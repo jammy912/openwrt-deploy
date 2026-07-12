@@ -122,15 +122,34 @@ EOF
     else
         PBR="${pbr_on}/${pbr_total}"
     fi
+    # 實況檢查: uci 說 on 但實際路由規則不在 = PBR 空轉 (rule 缺)。兩種型都查:
+    #   client-wg 型: fwmark 主 rule (lookup pbr_<if>)
+    #   CustRule-only 型 (wg0/wg2): .custrules cache 的 prio 200 rules 齊全即健康
+    RULEMISS=""
+    if [ "$pbr_on" -gt 0 ] && ! ip rule show | grep -q "lookup pbr_${IF}\$"; then
+        _cr="${STATE_DIR}/${IF}.custrules"
+        _cr_ok=1
+        if [ -s "$_cr" ]; then
+            while read -r _src _tbl; do
+                [ -z "$_src" ] && continue
+                ip rule show | grep -q "from ${_src} lookup ${_tbl}" || { _cr_ok=0; break; }
+            done < "$_cr"
+        else
+            _cr_ok=0
+        fi
+        [ "$_cr_ok" = "1" ] || RULEMISS="(rule缺)"
+    fi
     # 高頻震盪停用註記 (check-pbr-wg 的 flap disable)
     _until=$(cat "${STATE_DIR}/${IF}.disabled_until" 2>/dev/null)
     FLAP=""
     if [ "$_until" -gt "$NOW" ] 2>/dev/null; then
         FLAP="(flap停用$(( (_until - NOW) / 60 ))m)"
     fi
-    # 圖示: on=🟢 off=🔴 部分啟用=🟠; flap 停用中一律 🔴; 無規則(-)平常不加圖示
+    # 圖示: on=🟢 off=🔴 部分啟用=🟠; flap 停用中一律 🔴; rule 缺=🟠; 無規則(-)不加圖示
     if [ -n "$FLAP" ]; then
-        PBR="🔴${PBR}${FLAP}"
+        PBR="🔴${PBR}${RULEMISS}${FLAP}"
+    elif [ -n "$RULEMISS" ]; then
+        PBR="🟠${PBR}${RULEMISS}"
     else
         case "$PBR" in
             on)  PBR="🟢on" ;;

@@ -250,6 +250,22 @@ rule_exists() {
         END { exit !found }'
 }
 
+# CustRule-only 介面 (server-wg 型, 如 wg0/wg2) 健康判定:
+# 這型介面設計上沒有 pbr fwmark 主 rule (pbr 不參與, dest_addr='wgX' 對 pbr
+# 是無效設定), 路由靠 prio 200 rules + 編號 table (custrule 機制)。
+# .custrules cache 有內容且每條 prio 200 rule 都在 = 路由健全。
+# 回 0=齊全, 1=cache 不存在或有缺 (缺的由 custrule_rule_repair 補)
+custrules_complete() {
+    local cache="${STATE_DIR}/${1}.custrules"
+    [ -s "$cache" ] || return 1
+    local _src _tbl
+    while read -r _src _tbl; do
+        [ -z "$_src" ] && continue
+        ip rule show | grep -q "from ${_src} lookup ${_tbl}" || return 1
+    done < "$cache"
+    return 0
+}
+
 # CustRule per-IP rule del（介面 DOWN 時移除）
 custrule_del() {
     local iface="$1"
@@ -417,6 +433,13 @@ for SECTION in $SECTIONS; do
             fi
 
             echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
+        elif custrules_complete "$INTERFACE"; then
+            # CustRule-only 型 (wg0/wg2): 沒有 fwmark 主 rule 是常態, prio 200
+            # rules 齊全(上面 repair 剛補過)即健康 → 直接 up, 不進冷靜期。
+            # (修正: 舊邏輯對這型介面永遠 rule_exists=false → 永久 pending 迴圈)
+            up_count_reset "$INTERFACE"
+            rm -f "${STATE_DIR}/${INTERFACE}.cr_done"
+            echo "up" > "${STATE_DIR}/${INTERFACE}.pingresult"
         else
             # 先前被切走, 進入冷靜期累計
             up_count_inc "$INTERFACE"
@@ -437,8 +460,22 @@ for SECTION in $SECTIONS; do
                     log_event "[UP] $INTERFACE 冷靜期完成, ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
                     log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
                 else
-                    log_event "[UP] $INTERFACE 冷靜期完成但無 rule cache，等下次 pbr reload"
-                    log "    警告: 無 rule cache，無法還原 ip rule，等下次 pbr reload 自動補上"
+                    # 無 cache (常見: 重開機清掉 /tmp) → 直接 pbr reload 重建,
+                    # 不再乾等一個不會來的 reload (曾造成 wg0 永久 pending 迴圈)。
+                    # reload 是全域動作(會沖掉 dbroute fwmark/CustRule, 由後續輪
+                    # repair 補回) → 每介面每次開機只做一次, 防 uci disabled 或
+                    # config 缺介面時演變成每 2 分鐘 reload。
+                    _rl_flag="${STATE_DIR}/${INTERFACE}.pbr_reloaded"
+                    if [ ! -f "$_rl_flag" ]; then
+                        touch "$_rl_flag"
+                        log_event "[REPAIR] $INTERFACE 冷靜期完成但無 rule cache → pbr reload 重建"
+                        log "    無 rule cache → /etc/init.d/pbr reload 重建 (本次開機僅此一次)"
+                        push_notify "${INTERFACE}_PBR_🟠RuleRebuild"
+                        /etc/init.d/pbr reload
+                    else
+                        log_event "[UP] $INTERFACE 冷靜期完成但無 rule cache (本次開機已 reload 過, 不再重試)"
+                        log "    警告: 無 rule cache 且本次開機已 reload 過, 等外部修復"
+                    fi
                 fi
 
                 # custrule_add 只在曾被標記 DOWN 時才還原
