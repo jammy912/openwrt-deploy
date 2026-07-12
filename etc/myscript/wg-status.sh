@@ -14,14 +14,13 @@
 #   /etc/myscript/wg-status.sh --no-push           # 只印不推播 (debug / 手動查)
 #   /etc/myscript/wg-status.sh wg2 --no-push       # 參數可混用, 順序不拘
 #
-# 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行, 段間空行;
+# 輸出範例 (第一行 title; 每介面一段: 狀態一行 + PBR/DBR 各一縮排行;
 #           圖示: 🟢健康(up/連入/on) / 🔴斷線·off·flap停用 / 🟠過渡態(pending/無peer/部分啟用)):
 #   WG Status
 #   wg2:🟢1/1連入(hs56s)
 #     PBR:🟢on
 #     DBR:🟢on
-#
-#   wg5:🟢up
+#   wg5:🟢up(ping)
 #     PBR:🔴off(flap停用120m)
 #     DBR:🔴off
 
@@ -63,7 +62,7 @@ for IF in $IFACES; do
     # 指定的介面不存在時明講 (只掃到的不會進這裡)
     if ! ip link show "$IF" >/dev/null 2>&1; then
         ITEM="${IF}:🔴介面不存在"
-        [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
+        [ -n "$MSG" ] && MSG="${MSG}${NL}"
         MSG="${MSG}${ITEM}"
         continue
     fi
@@ -185,7 +184,7 @@ EOF
     fi
 
     ITEM="${IF}:${ST}${NL}  PBR:${PBR}${NL}  DBR:${DBR}"
-    [ -n "$MSG" ] && MSG="${MSG}${NL}${NL}"
+    [ -n "$MSG" ] && MSG="${MSG}${NL}"
     MSG="${MSG}${ITEM}"
 done
 
