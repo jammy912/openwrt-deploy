@@ -106,11 +106,12 @@ EOF
         fi
     fi
     # 介面狀態圖示: 健康🟢 / 斷線・不通🔴 / 過渡態🟠
+    # ping 判定的標 (ping), 與 handshake 判定的 (hsXXs) 對稱, 標明判定來源
     case "$ST" in
-        up)        ST="🟢up" ;;
-        down)      ST="🔴down" ;;
-        down-hold) ST="🔴down-hold" ;;
-        pending)   ST="🟠pending" ;;
+        up)        ST="🟢up(ping)" ;;
+        down)      ST="🔴down(ping)" ;;
+        down-hold) ST="🔴down-hold(ping)" ;;
+        pending)   ST="🟠pending(ping確認中)" ;;
         無peer)    ST="🟠無peer" ;;
         *連入*)    ST="🟢${ST}" ;;
         *斷線*)    ST="🔴${ST}" ;;
