@@ -460,13 +460,21 @@ for SECTION in $SECTIONS; do
                     log_event "[UP] $INTERFACE 冷靜期完成, ip rule 已還原 (prio=$_prio fwmark=$_fm) → 流量切回 wg"
                     log "    動作: ip rule add prio=$_prio fwmark=$_fm lookup=$_tbl (從 cache 還原)"
                 else
-                    # 無 cache (常見: 重開機清掉 /tmp) → 直接 pbr reload 重建,
-                    # 不再乾等一個不會來的 reload (曾造成 wg0 永久 pending 迴圈)。
-                    # reload 是全域動作(會沖掉 dbroute fwmark/CustRule, 由後續輪
-                    # repair 補回) → 每介面每次開機只做一次, 防 uci disabled 或
-                    # config 缺介面時演變成每 2 分鐘 reload。
+                    # 無 cache → 分兩型自救 (都每介面每開機一次, 防設定壞掉時無限重試):
+                    # 1) 介面有 CustRule 設定但 .custrules cache 缺 → pbr-cust start
+                    #    重建 (diff 模式無感)。常見: auto-role 升主gw 後, 新主gw 從未
+                    #    跑過 pbr-cust (服務未 enable 或無變更觸發), CustRule 全缺。
+                    # 2) 其他 (client-wg 型) → pbr reload 重建 fwmark 主 rule。
+                    _cust_flag="${STATE_DIR}/${INTERFACE}.pbrcust_started"
                     _rl_flag="${STATE_DIR}/${INTERFACE}.pbr_reloaded"
-                    if [ ! -f "$_rl_flag" ]; then
+                    if [ ! -s "${STATE_DIR}/${INTERFACE}.custrules" ] && [ ! -f "$_cust_flag" ] \
+                        && [ -x /etc/init.d/pbr-cust ] \
+                        && uci show pbr 2>/dev/null | grep -q "\.dest_addr='${INTERFACE}'"; then
+                        touch "$_cust_flag"
+                        log_event "[REPAIR] $INTERFACE 有 CustRule 設定但 cache/rules 缺 → pbr-cust start 重建"
+                        push_notify "${INTERFACE}_PBR_🟠CustRebuild"
+                        /etc/init.d/pbr-cust start
+                    elif [ ! -f "$_rl_flag" ]; then
                         touch "$_rl_flag"
                         log_event "[REPAIR] $INTERFACE 冷靜期完成但無 rule cache → pbr reload 重建"
                         log "    無 rule cache → /etc/init.d/pbr reload 重建 (本次開機僅此一次)"
