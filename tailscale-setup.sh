@@ -151,15 +151,18 @@ if ! zone_exists ts; then
     uci set firewall.@zone[-1].mtu_fix='1'     # MSS clamp,避免大封包卡住
     uci add_list firewall.@zone[-1].network='tailscale'
 fi
-# 三條 forwarding,涵蓋兩種需求(node 互通 + 當出口):
+# 四條 forwarding,涵蓋三種需求(node 互通 + 當出口 + wg 撥入管理):
 #   lan→ts : LAN 連得到其他 node;LAN 走「別台」exit node 出去
 #   ts→lan : 其他 node 連得進這台 LAN(node 互通回程)
 #   ts→wan : 別人透過「這台」當 exit node 出公網(需另 tailscale set --advertise-exit-node + headscale 核准路由)
+#   VPN→ts : wg 撥入(roadwarrior)客戶端連得到 100.64.x 節點
+#            (手機 TS 離線時經 wg 回家仍可管理 tailnet;VPN zone 是 deploy.sh 建的,沒有就跳過)
 fwd_exists lan ts || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='lan'; uci set firewall.@forwarding[-1].dest='ts'; }
 fwd_exists ts lan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='ts';  uci set firewall.@forwarding[-1].dest='lan'; }
 fwd_exists ts wan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='ts';  uci set firewall.@forwarding[-1].dest='wan'; }
+zone_exists VPN && { fwd_exists VPN ts || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='VPN'; uci set firewall.@forwarding[-1].dest='ts'; }; }
 uci commit firewall
-echo "  ✅ firewall zone 'ts' + lan↔ts↔wan forwarding(node 互通 + 可當出口)"
+echo "  ✅ firewall zone 'ts' + lan↔ts↔wan + VPN→ts forwarding(node 互通 + 可當出口 + wg 撥入管理)"
 
 # ---- ⑦ 寫 custom_login_url(watchdog/schedule 反查 exit node 對外 IP 的真相來源)----
 uci set tailscale=tailscale 2>/dev/null
