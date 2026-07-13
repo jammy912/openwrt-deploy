@@ -120,7 +120,31 @@ if ! /etc/init.d/tailscale enabled 2>/dev/null; then
   exit 0
 fi
 if ! ip link show tailscale0 >/dev/null 2>&1; then
-  exit 0
+  # 介面不存在但服務 enabled(上面剛確認)≠ 刻意停用——tailscaled 掛掉(OOM/crash)
+  # 介面一樣會消失。舊版此處默默 exit 0 = 掛掉永遠不救、零 log
+  # (實案 2026-07-12 MX4200: tailscaled 死掉整晚, watchdog 每輪安靜路過)。
+  # 用 pidof 不用 pgrep -x: busybox pgrep -x 對帶參數的 daemon 比對失敗(實測)
+  if pidof tailscaled >/dev/null 2>&1; then
+    log "INFO: tailscale0 不存在但 tailscaled 執行中(啟動中?), 本輪跳過"
+    exit 0
+  fi
+  log "FAIL: tailscaled 未執行且 tailscale0 消失(服務 enabled=非刻意停用) -> 重啟 tailscaled"
+  /etc/init.d/tailscale restart >/dev/null 2>&1
+  sleep 12
+  if ip link show tailscale0 >/dev/null 2>&1; then
+    log "RECOVERED: tailscaled 重啟成功, tailscale0 已恢復"
+    notify "✅ Tailscale 自癒成功(tailscaled 掛掉→重啟), 介面已恢復"
+    rm -f /tmp/.ts-dead-notified
+    # 介面剛起來, 讓後續健檢照常往下跑(table52/exit node 會一併驗)
+  else
+    log "ERROR: 重啟後 tailscale0 仍不存在, 需人工介入"
+    # 失敗通知只推一次, 恢復後旗標清除; 避免每 30 分洗一則
+    if [ ! -f /tmp/.ts-dead-notified ]; then
+      touch /tmp/.ts-dead-notified
+      notify_fail "🛑 Tailscale 自癒失敗: tailscaled 重啟後介面仍不存在, 需人工介入"
+    fi
+    exit 0
+  fi
 fi
 WANT=$(tailscale debug prefs 2>/dev/null | grep -oE '"WantRunning": (true|false)' | grep -oE '(true|false)$')
 if [ "$WANT" = "false" ]; then
