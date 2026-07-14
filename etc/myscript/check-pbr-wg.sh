@@ -681,14 +681,22 @@ if [ -f "$DBR_CONF" ]; then
         # Why: 介面抖動時 DBR 若照常 flip, 同戶裝置 IP 會在 VPN 出口/真實 IP
         #   之間反覆跳動, 對同戶判定(如 Netflix)是最糟訊號; 鎖定期間穩定停在
         #   wan 直到鎖自然到期, 刻意不做「ping 通就早解鎖」。
-        # 寫入者單一化: 介面若在第一階段跑過(CHECKED_IFACES), downlog/鎖的
-        #   建立與到期都由第一階段負責, 這裡只讀鎖狀態; DBR-only 介面(無
-        #   CustRule, 例如 wg_900)才由本階段 check_flap_disable 管理鎖生命週期。
-        _dbr_covered=0
-        echo "$CHECKED_IFACES" | grep -qw "$DR_IFACE" && _dbr_covered=1
+        # 寫入者單一化: 只有「第一階段真的有 ping 到」的介面(有 endpoint 的
+        #   client 型), downlog/鎖的建立與到期由第一階段負責, 這裡只讀鎖狀態。
+        #   其餘兩類由本階段 check_flap_disable 管理鎖生命週期:
+        #   - DBR-only 介面(無 CustRule, 例如 wg_900)
+        #   - passive server wg(有 CustRule 但無 endpoint, 例如 wg2/Netflix):
+        #     第一階段在 ping 前就 skip 它, 沒有 downlog 來源, 若不在這裡管,
+        #     鎖對它永遠不會觸發 → Netflix 主場景反而沒被保護到。
+        _dbr_stage1_managed=0
+        if echo "$CHECKED_IFACES" | grep -qw "$DR_IFACE"; then
+            _dbr_has_ep=$(uci show network 2>/dev/null | grep "@wireguard_${DR_IFACE}\[" \
+                | grep "endpoint_host" | grep -v "=''$" | wc -l)
+            [ "$_dbr_has_ep" != "0" ] && _dbr_stage1_managed=1
+        fi
         _dbr_locked=0
         if [ "$DR_IFACE" != "wan" ]; then
-            if [ "$_dbr_covered" = "1" ]; then
+            if [ "$_dbr_stage1_managed" = "1" ]; then
                 _dbr_du="${STATE_DIR}/${DR_IFACE}.disabled_until"
                 if [ -f "$_dbr_du" ] && [ "$DBR_NOW" -lt "$(cat "$_dbr_du")" ]; then
                     _dbr_locked=1
@@ -795,9 +803,10 @@ if [ -f "$DBR_CONF" ]; then
                 _dbf=$(db_fail_get "$DR_IFACE")
             fi
 
-            # DBR-only 介面的 confirmed down 記入 flap 視窗（第一階段跑過的
-            # 介面由第一階段記, 這裡不重複記, 否則同輪雙寫門檻靈敏度翻倍）
-            if [ "$_dbf" -ge "$DOWN_CONFIRM" ] && [ "$_dbr_covered" != "1" ] \
+            # 鎖歸 DBR 管的介面(DBR-only 與 passive server wg), confirmed down
+            # 記入 flap 視窗; 第一階段有 ping 的介面由第一階段記, 這裡不重複記,
+            # 否則同輪雙寫門檻靈敏度翻倍
+            if [ "$_dbf" -ge "$DOWN_CONFIRM" ] && [ "$_dbr_stage1_managed" != "1" ] \
                 && [ "$DR_IFACE" != "wan" ]; then
                 record_down_event "$DR_IFACE"
             fi
