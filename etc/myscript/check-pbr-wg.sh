@@ -178,11 +178,13 @@ check_flap_disable() {
             log "    [$iface] 高頻停用中，剩餘約 $(fmt_duration $remain)，跳過"
             return 1
         else
-            # 停用到期，自動恢復 (downlog 清掉重新計數, lockhistory 保留供升級判斷)
+            # 停用到期，恢復監測 (downlog 清掉重新計數, lockhistory 保留供升級判斷)
+            # 注意: 這只代表鎖到期重新開始 ping, 不代表介面恢復;
+            # 真正恢復是冷靜期完成後的 ${iface}_PBR_🟢UP
             rm -f "$disabled_until_file" "$downlog"
-            log_event "[FLAP] $iface 停用期滿，自動恢復"
-            log "    [$iface] 停用期滿，已自動恢復"
-            push_notify "${iface}_FLAP_🟢Unlock"
+            log_event "[FLAP] $iface 停用期滿，恢復監測"
+            log "    [$iface] 停用期滿，恢復監測"
+            push_notify "${iface}_FLAP_🟡RetryWindow"
         fi
     fi
 
