@@ -14,6 +14,9 @@
 #     由本腳本下一輪 ping 成功時自動進入冷靜期，再加回 ip rule。
 #   - 1小時內 DOWN 超過 DOWN_THRESHOLD 次: 短鎖 5 分鐘;24 小時內
 #     累計達 LOCK_ESCALATE_THRESHOLD 次自動升級為長鎖 24 小時。
+#     FLAP 鎖為介面級共用: 第三階段(DBR)同受鎖管, 鎖定中域名路由切回
+#     wan 並暫停健檢(wan 介面免鎖); 刻意無早解鎖, 避免抖動期間同戶
+#     裝置 IP 在 VPN/真實 IP 間反覆跳動。
 #   - 全程不呼叫 pbr reload / pbr-cust start，避免中斷其他介面。
 #================================================================
 
@@ -674,6 +677,43 @@ if [ -f "$DBR_CONF" ]; then
         [ -z "$DR_TABLE" ] && continue
         DR_FWMARK=$(printf "0x%x" "$DR_TABLE")
 
+        # --- FLAP 鎖共用（與第一階段同一把 .disabled_until 鎖, wan 免鎖） ---
+        # Why: 介面抖動時 DBR 若照常 flip, 同戶裝置 IP 會在 VPN 出口/真實 IP
+        #   之間反覆跳動, 對同戶判定(如 Netflix)是最糟訊號; 鎖定期間穩定停在
+        #   wan 直到鎖自然到期, 刻意不做「ping 通就早解鎖」。
+        # 寫入者單一化: 介面若在第一階段跑過(CHECKED_IFACES), downlog/鎖的
+        #   建立與到期都由第一階段負責, 這裡只讀鎖狀態; DBR-only 介面(無
+        #   CustRule, 例如 wg_900)才由本階段 check_flap_disable 管理鎖生命週期。
+        _dbr_covered=0
+        echo "$CHECKED_IFACES" | grep -qw "$DR_IFACE" && _dbr_covered=1
+        _dbr_locked=0
+        if [ "$DR_IFACE" != "wan" ]; then
+            if [ "$_dbr_covered" = "1" ]; then
+                _dbr_du="${STATE_DIR}/${DR_IFACE}.disabled_until"
+                if [ -f "$_dbr_du" ] && [ "$DBR_NOW" -lt "$(cat "$_dbr_du")" ]; then
+                    _dbr_locked=1
+                fi
+            else
+                check_flap_disable "$DR_IFACE" || _dbr_locked=1
+            fi
+        fi
+        if [ "$_dbr_locked" = "1" ]; then
+            # 鎖定中視同 confirmed down: 移除 fwmark 切 wan(NO_FALLBACK 維持
+            # black-hole 不動), 不 ping、不進冷靜期, 等鎖到期才恢復健檢
+            db_up_reset "$DR_IFACE"
+            if ! is_no_fallback "$DR_IFACE" \
+                && ip rule show | grep -q "fwmark $DR_FWMARK"; then
+                ip rule del fwmark "$DR_FWMARK" lookup "$DR_TABLE" 2>/dev/null
+                log_event "[FLAP] $DR_IFACE 鎖定中, dbroute fwmark $DR_FWMARK 已移除 → 域名路由切回 wan"
+                if [ "$(db_prev_get "$DR_IFACE")" != "down" ]; then
+                    push_notify "${DR_IFACE}_DBR_🔴Down"
+                    db_prev_set "$DR_IFACE" "down"
+                fi
+            fi
+            log "  [DBR] ${DR_IFACE}: flap 鎖定中，跳過健檢（域名路由停在 wan 至鎖到期）"
+            continue
+        fi
+
         # --- 判定 up/down ---
         # 介面消失 (ifdown) / 對端離線 (handshake 過期) / ping 失敗 → 都視為 down
         # DBR_HS_DESC / DBR_PING_DESC 供摘要 log 顯示「為什麼 up/down」
@@ -753,6 +793,13 @@ if [ -f "$DBR_CONF" ]; then
             if [ "$_dbf" -lt "$DOWN_CONFIRM" ]; then
                 db_fail_inc "$DR_IFACE"
                 _dbf=$(db_fail_get "$DR_IFACE")
+            fi
+
+            # DBR-only 介面的 confirmed down 記入 flap 視窗（第一階段跑過的
+            # 介面由第一階段記, 這裡不重複記, 否則同輪雙寫門檻靈敏度翻倍）
+            if [ "$_dbf" -ge "$DOWN_CONFIRM" ] && [ "$_dbr_covered" != "1" ] \
+                && [ "$DR_IFACE" != "wan" ]; then
+                record_down_event "$DR_IFACE"
             fi
 
             if [ "$_dbf" -lt "$DOWN_CONFIRM" ]; then
