@@ -150,6 +150,18 @@ db_up_reset()      { rm -f "${STATE_DIR}/${1}.dbupcount"; }
 db_prev_get()      { cat "${STATE_DIR}/${1}.dbprevresult" 2>/dev/null; }
 db_prev_set()      { echo "$2" > "${STATE_DIR}/${1}.dbprevresult"; }
 
+# black-hole 推播提示: 介面屬 passive(無 endpoint)且有 CustRule 設定時,
+# down/鎖定期間掛 CustRule 的裝置是完全斷網(black-hole, 非切 wan)。
+# 推播 tag 後綴 🕳️ 符號提示; 其他介面回空字串。
+bh_hint() {
+    local iface="$1"
+    uci show pbr 2>/dev/null | grep -q "\.dest_addr='${iface}'" || return 0
+    local _ep=$(uci show network 2>/dev/null | grep "@wireguard_${iface}\[" \
+        | grep "endpoint_host" | grep -v "=''$" | wc -l)
+    [ "$_ep" = "0" ] && printf '%s' "🕳️"
+    return 0
+}
+
 # 將秒數轉成「N 小時」/「N 分鐘」/「N 秒」可讀字串
 fmt_duration() {
     local s="$1"
@@ -218,7 +230,7 @@ check_flap_disable() {
             echo "$until" > "$disabled_until_file"
             log_event "[FLAP] $iface 1小時內 DOWN ${count} 次，${lock_label}"
             log "    [$iface] 高頻異常（${count} 次/小時），${lock_label}"
-            push_notify "$notify_tag"
+            push_notify "${notify_tag}$(bh_hint "$iface")"
             return 1
         fi
     fi
@@ -714,7 +726,7 @@ if [ -f "$DBR_CONF" ]; then
                 ip rule del fwmark "$DR_FWMARK" lookup "$DR_TABLE" 2>/dev/null
                 log_event "[FLAP] $DR_IFACE 鎖定中, dbroute fwmark $DR_FWMARK 已移除 → 域名路由切回 wan"
                 if [ "$(db_prev_get "$DR_IFACE")" != "down" ]; then
-                    push_notify "${DR_IFACE}_DBR_🔴Down"
+                    push_notify "${DR_IFACE}_DBR_🔴Down$(bh_hint "$DR_IFACE")"
                     db_prev_set "$DR_IFACE" "down"
                 fi
             fi
@@ -823,7 +835,7 @@ if [ -f "$DBR_CONF" ]; then
                     log "${DR_IFACE} DOWN → 移除 domain routing"
                     log_event "[DOWN] $DR_IFACE dbroute 連 ${DOWN_CONFIRM} 輪確認失敗, fwmark $DR_FWMARK 已移除"
                     if [ "$DBR_PREV" != "down" ]; then
-                        push_notify "${DR_IFACE}_DBR_🔴Down"
+                        push_notify "${DR_IFACE}_DBR_🔴Down$(bh_hint "$DR_IFACE")"
                         db_prev_set "$DR_IFACE" "down"
                     fi
                 fi
