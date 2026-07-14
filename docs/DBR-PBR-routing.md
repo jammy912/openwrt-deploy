@@ -346,6 +346,36 @@ ip route add default dev wg0 table 1001
 > 正常走 prio 200 rules**，純誤報。同 commit 也讓 wg-status 的 `(rule缺)` 判定認得這型。
 > 驗證這型路由健在：`ip rule show | grep '^200:'` + `ip route show table 1001`。
 
+### passive server wg 的特別規則（無 endpoint，如 wg2/wg_900；2026-07-14 定案）
+
+**判定**：介面所有 peer 都沒有 `endpoint_host` = passive（本機是 server，等遠端連入）。
+check-pbr-wg 第一階段用這個條件在 **ping 之前就 skip**，所以 client 型的整套
+「confirmed down → custrule_del 切 wan → uci enabled=0」對 passive 完全不會發生。
+
+| down/up 行為 | client 型（wg0/wg3…） | passive 型（wg2/wg_900） |
+|---|---|---|
+| CustRule（per-IP 裝置） | confirmed down → `custrule_del` **切 wan**；UP 冷靜期後補回 | **從不切換**：第一階段不健檢、第四階段每輪無條件補 rule/route → peer 離線時裝置 **black-hole 卡死**（等回連即通，真實 IP 永不曝光） |
+| uci enabled 同步 | down=0 / up=清除（wg-status 的 PBR:on/off） | **不動**（wg-status 恆 PBR:on，即使 peer 離線） |
+| DBR（域名路由） | 健檢 + FLAP 鎖，鎖由第一階段管 | 健檢照跑（handshake 年齡 + ping），**FLAP 鎖由 DBR 階段管**（見下） |
+| 整點 tunnel 重啟自救 | 有（0400 ifdown/ifup） | 無——passive 沒有可自救的動作，恢復全看遠端 peer |
+
+**FLAP 鎖與 passive（commit 8f8394f + 580216e）**：
+
+- 鎖是**介面級共用**的（`/tmp/check-pbr-wg/<if>.disabled_until`），第一階段（CustRule）與
+  第三階段（DBR）都受鎖管；`wan` 免鎖。
+- **寫入者單一**：「第一階段真的有 ping」的 client 型由第一階段記 downlog、管鎖到期；
+  **passive 型與 DBR-only 型由 DBR 階段管**（confirmed down 記 downlog、觸發短鎖/長鎖、
+  到期推 `_FLAP_🟡RetryWindow`）。初版（8f8394f）用「第一階段跑過」判定，漏掉 passive
+  ——而 **Netflix 走的正是 wg2**，580216e 修正。
+- **鎖定中的 passive 介面**：DBR 移除 fwmark → 功能域名**穩定停在 wan** 直到鎖自然到期；
+  CustRule 側不受影響（本來就 black-hole）。**刻意無早解鎖**：抖動期間同戶裝置 IP 在
+  VPN 出口/真實 IP 間反覆跳動，對同戶判定（Netflix）比停 wan 24h 更糟。
+- 推播語意：`_FLAP_🟡RetryWindow` 只代表「鎖到期、恢復健檢」，**不代表介面恢復**
+  （純時間判定，推播前不 ping）；真恢復是 `_DBR_🟢UP`（DBR 冷靜期完成）。
+
+> ⚠️ 副作用要知道：wg2 進入 FLAP 鎖期間，掛 CustRule 的裝置是**完全斷網**（black-hole），
+> 不是走 wan；同時 wg-status 顯示「PBR:on、DBR:off」看似矛盾，實為上表的正常狀態。
+
 ---
 
 ## 實際範例

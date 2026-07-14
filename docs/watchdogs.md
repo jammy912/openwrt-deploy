@@ -27,11 +27,16 @@
 四個階段(詳見 [DBR-PBR-routing.md] §健檢):
 1. **wg 介面 ping 健檢**:連敗 `DOWN_CONFIRM=2` 輪才切回 wan(抗抖動),連勝 `UP_CONFIRM=4`
    輪才切回 wg(冷靜期)。1 小時 DOWN 超 10 次→短鎖 5 分;24h 累 3 次→長鎖 24h。
+   **passive server wg(無 endpoint,如 wg2)在 ping 前就 skip**,不進這套(black-hole 語意,
+   詳見 [DBR-PBR-routing.md] §passive 特別規則)。
 2. **uci enabled 同步**。
 3. **DBR 健檢**(第三階段):handshake 年齡>180s 或介面不存在→判 down,移除 fwmark。
+   **FLAP 鎖與第一階段共用**(鎖定中 fwmark 移除、域名路由停 wan、暫停健檢至鎖到期;
+   wan 免鎖、無早解鎖——防同戶 IP 跳動)。passive 與 DBR-only 介面的鎖生命週期由本階段管。
    **不帶 `-q` 手動跑會列每介面摘要**(handshake/ping/判定/rule)。
-4. **server wg 多 peer 的 0.0.0.0/0 出口 failover**。
+4. **server wg 多 peer 的 0.0.0.0/0 出口 failover** + passive 介面 CustRule rule/route 每輪自修。
 - **NO_FALLBACK**(`-n wg4,wg5`):這些介面 DOWN 時不切 wan,保持 black-hole(避免洩真實 IP)。
+- 推播語意:`_FLAP_🟡RetryWindow`=鎖到期恢復健檢(非恢復);真恢復=`_PBR_🟢UP`/`_DBR_🟢UP`。
 - 全程不呼叫 pbr reload(避免中斷其他介面)。
 
 ## ts-watchdog.sh（tailscale 自癒）
