@@ -372,6 +372,8 @@ check-pbr-wg 第一階段用這個條件在 **ping 之前就 skip**，所以 cli
   VPN 出口/真實 IP 間反覆跳動，對同戶判定（Netflix）比停 wan 24h 更糟。
 - 推播語意：`_FLAP_🟡RetryWindow` 只代表「鎖到期、恢復健檢」，**不代表介面恢復**
   （純時間判定，推播前不 ping）；真恢復是 `_DBR_🟢UP`（DBR 冷靜期完成）。
+  passive+CustRule 介面（wg2）的 `_DBR_🔴Down` 與 FLAP Lock 推播會後綴 **🕳️**，
+  提示「掛 CustRule 的裝置正 black-hole 完全斷網」（bh_hint()，client 型無此後綴）。
 
 > ⚠️ 副作用要知道：wg2 進入 FLAP 鎖期間，掛 CustRule 的裝置是**完全斷網**（black-hole），
 > 不是走 wan；同時 wg-status 顯示「PBR:on、DBR:off」看似矛盾，實為上表的正常狀態。

@@ -36,7 +36,8 @@
    **不帶 `-q` 手動跑會列每介面摘要**(handshake/ping/判定/rule)。
 4. **server wg 多 peer 的 0.0.0.0/0 出口 failover** + passive 介面 CustRule rule/route 每輪自修。
 - **NO_FALLBACK**(`-n wg4,wg5`):這些介面 DOWN 時不切 wan,保持 black-hole(避免洩真實 IP)。
-- 推播語意:`_FLAP_🟡RetryWindow`=鎖到期恢復健檢(非恢復);真恢復=`_PBR_🟢UP`/`_DBR_🟢UP`。
+- 推播語意:`_FLAP_🟡RetryWindow`=鎖到期恢復健檢(非恢復);真恢復=`_PBR_🟢UP`/`_DBR_🟢UP`;
+  後綴 `🕳️`=passive+CustRule 介面(wg2),掛 CustRule 的裝置正 black-hole 完全斷網。
 - 全程不呼叫 pbr reload(避免中斷其他介面)。
 
 ## ts-watchdog.sh（tailscale 自癒）
