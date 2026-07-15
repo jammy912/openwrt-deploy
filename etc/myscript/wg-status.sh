@@ -188,7 +188,11 @@ EOF
     MSG="${MSG}${ITEM}"
 done
 
-[ -z "$MSG" ] && MSG="無任何 wg 介面"
+# 無任何 wg 介面: 只印/寫 syslog, 不推播 (沒有 wg 的機器不需要每次都被通知)
+if [ -z "$MSG" ]; then
+    MSG="無任何 wg 介面"
+    NO_PUSH=1
+fi
 
 # 第一行 title (push 時與 hostname 前綴同行, 介面各自成行)
 MSG="WG Status${NL}${MSG}"
