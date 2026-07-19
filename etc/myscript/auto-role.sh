@@ -624,6 +624,9 @@ if [ "$DHCP_ACTION" = "server" ]; then
     DNSMASQ_OK=1
     [ "$CUR_DHCP_IGNORE" = "1" ] && DNSMASQ_OK=0
     pgrep -x dnsmasq >/dev/null 2>&1 || DNSMASQ_OK=0
+    # 活著但沒綁 :67 = conf 缺 dhcp-range (dnsmasq 在 lan 未 ready 時重啟的 race,
+    # init 會默默省略 dhcp-range; 重啟一次即重生正確 conf)
+    netstat -uln 2>/dev/null | grep -q ':67 ' || DNSMASQ_OK=0
     if [ "$DNSMASQ_OK" = "0" ]; then
         uci delete dhcp.lan.ignore 2>/dev/null
         uci set dhcp.lan.dhcpv4='server'
