@@ -114,7 +114,7 @@ DNS 解析 → 填 nft set → 打 fwmark → ip rule → 出對的介面
 - **watchdog.sh / wg-*/wifi-monitor**：各類守護。→ watchdog doc（待補）
 
 ### 無線
-- **auto-role 頻道政策**：5G 依角色錯頻、2.4G 限 1-5 避 Zigbee。→ wifi doc（待補）
+- **auto-role 頻道政策**：5G 依角色錯頻、2.4G 限 9-11 避 Zigbee。→ wifi doc（待補）
 - **wifi-signal / wifi-usteer**：功率調整、漫遊引導。→ wifi doc（待補）
 
 ### 推播 / 遠端維運

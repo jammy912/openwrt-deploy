@@ -66,7 +66,7 @@ alfred 仲裁不通時,兩台可能都判自己 primary → 都搶 `.1` → IP �
 | DHCP dhcp_option(gw/DNS) | 清除 | — | 指向 `192.168.1.1` |
 | **IPv6 RA/DHCPv6** | `server`(主 gw 才發) | `disabled` | `disabled` |
 | 5G 頻道政策 | 低頻 36/40/44/48 | 高頻 149/153/157/161/165 | 低頻 |
-| 2.4G 頻道 | `1 2 3 4 5` + HT20(避 Zigbee,所有角色同) | 同 | 同 |
+| 2.4G 頻道 | `9 10 11` + HT20(避 Zigbee,所有角色同) | 同 | 同 |
 
 ## ⚠️ 會被 auto-role 打回的手動改動（重要）
 

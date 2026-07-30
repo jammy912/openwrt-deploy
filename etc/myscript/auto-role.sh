@@ -970,14 +970,14 @@ apply_5g_channel_policy() {
 }
 
 # =====================
-# 2.4G 頻道政策：限 channel 1-5 + HT20，避開 Zigbee
-# Why: Aqara/Zigbee 走 2.4G，WiFi 佔滿 1/6/11 會蓋掉 Zigbee 常用頻道。把 WiFi
-#   集中在低頻 1-5(佔 2401-2435)，讓出高頻 2450-2480(Zigbee 20-26)給 Zigbee。
-#   Aqara 官方網關自動選頻會避開被 WiFi 佔的低頻,自然落到高頻乾淨區。
-#   HT20 佔用最窄(非 40MHz),不侵蝕高頻。與角色無關,所有機型一致。
+# 2.4G 頻道政策：限 channel 9-11 + HT20，避開 Zigbee
+# Why: Aqara/Zigbee 走 2.4G。Zigbee 預設頻道多為 11(2405MHz),而 WiFi channel 1
+#   (HT20 佔 2401-2423)正好蓋掉它。把 WiFi 集中在高頻 9-11(佔 2442-2472)，
+#   讓出低頻 2401-2440(Zigbee 11-18,含預設 11/15)給 Zigbee。
+#   HT20 佔用最窄(非 40MHz),不侵蝕低頻。與角色無關,所有機型一致。
 # =====================
 apply_2g_channel_policy() {
-    local ap_channels="1 2 3 4 5"
+    local ap_channels="9 10 11"
     local radio band tgt_chs cur_chs cur_ht _phy _avail _ch
     for radio in radio0 radio1 radio2 radio3; do
         band=$(uci get wireless.$radio.band 2>/dev/null)
@@ -991,7 +991,7 @@ apply_2g_channel_policy() {
             echo "$_avail" | grep -qw "$_ch" && tgt_chs="$tgt_chs $_ch"
         done
         tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
-        # 硬體連 1-5 都不支援(異常)則不動,避免清空 channels 讓它亂選
+        # 硬體連 9-11 都不支援(異常)則不動,避免清空 channels 讓它亂選
         [ -z "$tgt_chs" ] && continue
 
         cur_chs=$(uci get wireless.$radio.channels 2>/dev/null)
@@ -1001,7 +1001,7 @@ apply_2g_channel_policy() {
             uci set wireless.$radio.channels="$tgt_chs"
             uci set wireless.$radio.channel='auto'
             NEED_WIFI_RELOAD=1
-            log "[channel-policy] $radio (2g) channels: [$cur_chs] -> [$tgt_chs] (避 Zigbee)"
+            log "[channel-policy] $radio (2g) channels: [$cur_chs] -> [$tgt_chs] (避 Zigbee 11-18)"
         fi
         if [ "$cur_ht" != "HT20" ]; then
             uci set wireless.$radio.htmode='HT20'

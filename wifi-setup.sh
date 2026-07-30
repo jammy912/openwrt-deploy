@@ -62,11 +62,11 @@ for radio in $RADIO_LIST; do
     case "$band" in
         5g) uci set wireless.$radio.channel='149' ;;
         2g)
-            # 2.4G 限 channel 1-5 + HT20，避開 Zigbee(Aqara 網關會自動選到高頻
-            # 乾淨區 2450-2480/Zigbee 20-26)。ACS 在 1-5 內挑最乾淨者。
-            # HT20(非 40MHz)佔用最窄,不侵蝕高頻 Zigbee 空間。
+            # 2.4G 限 channel 9-11 + HT20，避開 Zigbee(Zigbee 預設頻道 11=2405MHz
+            # 會被 WiFi ch1 蓋掉,故 WiFi 移到高頻,讓出低頻 2401-2440/Zigbee 11-18)。
+            # ACS 在 9-11 內挑最乾淨者。HT20(非 40MHz)佔用最窄,不侵蝕低頻。
             uci set wireless.$radio.channel='auto'
-            uci set wireless.$radio.channels='1 2 3 4 5'
+            uci set wireless.$radio.channels='9 10 11'
             uci set wireless.$radio.htmode='HT20'
             ;;
         *)  uci set wireless.$radio.channel='auto' ;;

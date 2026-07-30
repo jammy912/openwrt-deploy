@@ -17,10 +17,13 @@
 - **排除 DFS**(52-144,需雷達偵測不穩)+ **排除硬體不支援的**(`iw phy channels` 過濾)。
 - 三頻機每個 phy 頻段不同,自動過濾到該 radio 支援的。
 
-### 2.4G：限 channel 1-5 + HT20（避 Zigbee）
-- `channels='1 2 3 4 5'` + `htmode='HT20'`,所有角色同。
-- **原理**:WiFi 集中低頻(2401-2435),讓出高頻(2450-2480/Zigbee 20-26)給 Aqara/Zigbee。
-  Aqara 官方網關自動選頻會避開被佔低頻→落到高頻乾淨區。HT20 佔用最窄不侵蝕高頻。
+### 2.4G：限 channel 9-11 + HT20（避 Zigbee）
+- `channels='9 10 11'` + `htmode='HT20'`,所有角色同。
+- **原理**:Zigbee 預設頻道多為 11(2405MHz),而 WiFi channel 1(HT20 佔 2401-2423)
+  正好蓋掉它。把 WiFi 集中高頻 9-11(佔 2442-2472),讓出低頻 2401-2440
+  (Zigbee 11-18,含常見預設 11/15)給 Aqara/Zigbee。HT20 佔用最窄不侵蝕低頻。
+- **代價**:Zigbee 19-24(2445-2470)落在 WiFi 涵蓋內,Zigbee 網關若自動選到該區會受干擾;
+  乾淨區為 11-18 與 25/26。(2026-07-30 由原 1-5 政策改為 9-11)
 - 在 `wifi-setup.sh`(初始)+ `auto-role.sh` `apply_2g_channel_policy`(維護)。
 
 ---
