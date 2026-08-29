@@ -527,6 +527,17 @@ get_weakest_signal() {
         fi
         log "[HearingMap] 查無資料,fallback 改用 iwinfo assoclist 取訊號"
 
+        # ★ 區分 -1 的兩種成因,只有第一種才是異常:
+        #   (a) usteer 壞掉 → 有該監控的裝置在線,卻查不到訊號 = 真異常,要推播
+        #   (b) MONITORED_MACS 本身為空 → 根本沒有符合關鍵字的裝置在線(手機拿走/走遠/
+        #       離開關聯清單) = 正常現象,不該推播
+        #   實測 2026-08-30 00:17 x60pro: SSID 兩邊都是 Portkey1、usteer local_info
+        #   正常有節點,只是 iPhone RSSI 從 -78 掉出清單 → 擇強過濾「原=[] -> 過濾後=[]」
+        #   → hearing map 回 -1 → 誤發推播。半夜手機拿走就會每 6h 吵一次,故加此判斷。
+        if [ -z "$(echo "$MONITORED_MACS" | tr -d ' ')" ]; then
+            log "[HearingMap] 監控清單為空(無符合關鍵字的裝置在線),屬正常,不推播"
+        else
+
         # ---- 推播告警:hearing map 空 = usteer 失效,漫遊引導已不運作 ----
         # 最常見原因:usteer ssid_list 與實際 AP SSID 不匹配(實測 2026-08-29 x60pro
         # 'Portkey' vs 'Portkey1'),usteer 反覆 Disconnecting 導致 map 恆空。
@@ -549,8 +560,9 @@ get_weakest_signal() {
             _hm_list=$(uci -q get usteer.@usteer[0].ssid_list 2>/dev/null)
             . /etc/myscript/push-notify.inc 2>/dev/null
             PUSH_NAMES="${PUSH_NAMES:-admin}"
-            push_notify "WiFi異常: usteer hearing map 為空(漫遊引導失效), 功率改用 iwinfo 訊號。實際SSID=${_hm_ssid:-未知} usteer_ssid_list=${_hm_list:-未設} 請確認兩者是否一致" 2>/dev/null
+            push_notify "WiFi異常: 有監控裝置在線但 usteer hearing map 查不到訊號(漫遊引導可能失效), 功率改用 iwinfo。監控裝置=${MONITORED_MACS} 實際SSID=${_hm_ssid:-未知} usteer_ssid_list=${_hm_list:-未設}" 2>/dev/null
             log "[HearingMap] 已推播告警 (實際SSID=${_hm_ssid:-未知}, ssid_list=${_hm_list:-未設})"
+        fi
         fi
     fi
 
