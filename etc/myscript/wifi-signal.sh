@@ -932,18 +932,67 @@ main() {
             log "[系統] 首次執行（開機後），僅儲存狀態，跳過 wifi reload"
             uci revert wireless
         else
-            log "[系統] 偵測到變更，即時套用功率（不 reload WiFi）"
+            log "[系統] 偵測到變更，即時套用功率（優先不 reload WiFi）"
             # 用 iw 即時套用 txpower，避免 wifi reload 導致 mesh+AP channel 歸 0
+            _need_reload_fallback=0
             for _radio in $UCI_RADIO_2G $UCI_RADIO_5G; do
                 _pwr=$(uci get wireless.$_radio.txpower 2>/dev/null)
                 [ -z "$_pwr" ] && continue
                 _phy=$(uci get wireless.$_radio.path 2>/dev/null)
                 for _dev in $(iwinfo | awk '/'$(echo $_radio | sed 's/radio/phy/')'-/{print $1}' | head -1); do
-                    iw dev "$_dev" set txpower fixed $((_pwr * 100)) 2>/dev/null && \
-                        log "[系統] $_dev txpower -> ${_pwr} dBm (iw)"
+                    # ⚠️ iw 的 exit code 不可信：驅動(尤其 MT76)會回報成功卻默默忽略設定值。
+                    #   實測 2026-08-29 x60pro: uci=10 且 iw set 回 0,硬體仍停在 4.00 dBm
+                    #   (5G 在 ch36/HE80,該頻段功率控制較嚴)。只看 exit code 會讓整套
+                    #   RSSI 動態調功率空轉卻毫無徵兆。故設定後回讀 iw info 比對實際值。
+                    if iw dev "$_dev" set txpower fixed $((_pwr * 100)) 2>/dev/null; then
+                        # 回讀硬體實際值(dBm,取整數部分)比對
+                        _actual=$(iw dev "$_dev" info 2>/dev/null | awk '/txpower/{print int($2)}')
+                        if [ -z "$_actual" ]; then
+                            log "[系統] $_dev txpower -> ${_pwr} dBm (iw;無法回讀驗證)"
+                        elif [ "$_actual" -eq "$_pwr" ]; then
+                            log "[系統] $_dev txpower -> ${_pwr} dBm (iw;已驗證)"
+                        else
+                            log "[警告] $_dev txpower 設定未生效：要求 ${_pwr} dBm,硬體實際 ${_actual} dBm(iw 路徑對此驅動無效),改用 wifi reload"
+                            _need_reload_fallback=1
+                        fi
+                    else
+                        log "[警告] $_dev txpower 設定失敗(iw 指令回傳非 0),改用 wifi reload"
+                        _need_reload_fallback=1
+                    fi
                 done
             done
             uci commit wireless
+
+            # ---- fallback: iw 推不動硬體時改用 wifi reload ----
+            # ★ 實測 2026-08-29 x60pro(MT76): `iw dev set txpower` 回 exit 0 但硬體不動
+            #   (uci=10 硬體停在 4 dBm);`wifi reload` 走 hostapd 重新初始化才真正生效。
+            #   單靠 iw 會讓整套 RSSI 動態調功率默默空轉,故驗證失敗時 fallback。
+            # ⚠️ reload 有 mesh+AP channel 歸 0 的前科(見本檔 Channel 0 自動修復段、
+            #   auto-role.sh 的 ACS 惡性循環註解)。因此:
+            #     1) 有 mesh 介面在線時不 fallback(維持原本保守行為,只留警告)
+            #     2) fallback 後緊接著的 Channel 0 自動修復會接住萬一的 channel 歸 0
+            if [ "$_need_reload_fallback" -eq 1 ]; then
+                _mesh_up=$(iwinfo 2>/dev/null | grep -c "Mode: Mesh Point")
+                if [ "${_mesh_up:-0}" -gt 0 ]; then
+                    log "[系統] 偵測到 mesh 介面在線,跳過 wifi reload fallback(避免 channel 歸 0);功率維持硬體現值"
+                else
+                    log "[系統] 執行 wifi reload 套用 txpower(無 mesh 介面,風險可控)..."
+                    wifi reload
+                    sleep 8
+                    for _radio in $UCI_RADIO_2G $UCI_RADIO_5G; do
+                        _pwr=$(uci get wireless.$_radio.txpower 2>/dev/null)
+                        [ -z "$_pwr" ] && continue
+                        for _dev in $(iwinfo | awk '/'$(echo $_radio | sed 's/radio/phy/')'-/{print $1}' | head -1); do
+                            _after=$(iw dev "$_dev" info 2>/dev/null | awk '/txpower/{print int($2)}')
+                            if [ -n "$_after" ] && [ "$_after" -eq "$_pwr" ]; then
+                                log "[系統] $_dev txpower -> ${_pwr} dBm (wifi reload;已驗證)"
+                            else
+                                log "[警告] $_dev reload 後仍未達設定值：要求 ${_pwr} dBm,硬體實際 ${_after:-未知} dBm(可能受法規/頻寬上限限制)"
+                            fi
+                        done
+                    done
+                fi
+            fi
         fi
     else
         log "[系統] 設定無需調整"
