@@ -1828,9 +1828,33 @@ NFTEOF
         if [ $CHANGED_PBR -eq 1 ]; then
             if [ $CHANGED_NETWORK -eq 1 ]; then
                 # wg 介面本身有變更，需要完整 pbr reload
+                # ⚠️ 逾時保護：pbr reload 會等它管理的介面就緒，wg 介面若因故沒建起來
+                #   (logread 可見 Cannot find device "wg0")，reload 會卡住不返回，
+                #   整支同步就停在這裡(實測 2026-08-29 卡在「Forwarding is disabled」後
+                #   無下一行)。背景跑 + 輪詢等待，逾時就砍掉繼續走完後面的步驟。
+                #   pbr 沒套用完不致命：pbr-cust start 仍會補 CustRule，下輪同步會再試。
                 if [ -x /etc/init.d/pbr ]; then
                     log "🔄 重啟 PBR 服務（wg 介面變更）..."
-                    /etc/init.d/pbr reload
+                    PBR_TIMEOUT="${PBR_RELOAD_TIMEOUT:-60}"
+                    /etc/init.d/pbr reload &
+                    PBR_PID=$!
+                    _pbr_waited=0
+                    while kill -0 "$PBR_PID" 2>/dev/null; do
+                        [ "$_pbr_waited" -ge "$PBR_TIMEOUT" ] && break
+                        sleep 2
+                        _pbr_waited=$((_pbr_waited + 2))
+                    done
+                    if kill -0 "$PBR_PID" 2>/dev/null; then
+                        # 先 TERM 再 KILL；pbr reload 底下可能還有子程序，一併清掉
+                        kill -TERM "$PBR_PID" 2>/dev/null
+                        sleep 2
+                        kill -KILL "$PBR_PID" 2>/dev/null
+                        wait "$PBR_PID" 2>/dev/null
+                        log "  ⚠️ pbr reload 逾時 ${PBR_TIMEOUT}s 已中止（wg 介面可能未就緒），繼續後續步驟"
+                    else
+                        wait "$PBR_PID" 2>/dev/null
+                        log "  ✅ pbr reload 完成（耗時約 ${_pbr_waited}s）"
+                    fi
                 else
                     log "⚠️  pbr 未安裝，跳過重啟"
                 fi
