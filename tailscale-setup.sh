@@ -10,9 +10,13 @@
 # ★ 這台的定位:「加入主 node 就好」— 只當網路裡的一個 node,LAN 與其他 node 互通,
 #   但「不設 exit node」(不整個 LAN 走遠端出口)。
 #
-# 需要你輸入 2 樣東西(其餘全自動):
+# 需要你輸入 2 樣東西(其餘全自動),★兩者皆可留空:
 #   ① Headscale URL    例: https://mxc5569.duckdns.org
 #   ② pre-auth key     例: hskey-auth-xxxxxxxx (headscale 後台產的)
+#
+# ★ 留空 = 只安裝並接線(套件/interface/firewall/GOMEMLIMIT/cron 全備妥),不自動登入,
+#   認證資訊事後自己進 LuCI「服務 → Tailscale」填。auto 模式沒帶 --ts-url/--ts-authkey
+#   時走的就是這條路(舊版是整段不裝,--auto 出來的機器連 tailscale 都沒有)。
 #
 # 腳本自動完成(= LuCI「AUTO CONFIGURE FIREWALL」+ 上次踩坑的所有修正):
 #   ③ 套件: tailscale + luci-app-tailscale-community + jq(watchdog 反查需要)
@@ -80,22 +84,27 @@ if [ "$AUTO_MODE" != "1" ]; then
         *) echo "  ⏭️  跳過 Tailscale"; return 0 2>/dev/null || exit 0 ;;
     esac
 
-    while [ -z "$TS_URL" ]; do
-        printf "${C_PROMPT}  ① Headscale URL (https://...): ${C_RESET}"
+    # 認證資訊可留空:直接按 Enter 就只裝不登入,事後自己進 LuCI 填。
+    printf "${C_PROMPT}  ① Headscale URL (https://... ,留空=稍後自己進 UI 填): ${C_RESET}"
+    read -r TS_URL < /dev/tty
+    while [ -n "$TS_URL" ] && ! echo "$TS_URL" | grep -q '^https\?://'; do
+        echo "  ⚠️ 需以 http(s):// 開頭(或留空跳過登入)"
+        printf "${C_PROMPT}  ① Headscale URL: ${C_RESET}"
         read -r TS_URL < /dev/tty
-        echo "$TS_URL" | grep -q '^https\?://' || { echo "  ⚠️ 需以 http(s):// 開頭"; TS_URL=""; }
     done
-    while [ -z "$TS_AUTHKEY" ]; do
-        printf "${C_PROMPT}  ② pre-auth key (hskey-auth-...): ${C_RESET}"
+    if [ -n "$TS_URL" ]; then
+        printf "${C_PROMPT}  ② pre-auth key (hskey-auth-... ,留空=稍後自己進 UI 填): ${C_RESET}"
         read -r TS_AUTHKEY < /dev/tty
-        [ -z "$TS_AUTHKEY" ] && echo "  ⚠️ 必填"
-    done
-else
-    # auto 模式:沒帶 --ts-url 就視為不裝
-    if [ -z "$TS_URL" ] || [ -z "$TS_AUTHKEY" ]; then
-        echo "  ⏭️  auto 模式未提供 --ts-url/--ts-authkey,跳過 Tailscale"
-        return 0 2>/dev/null || exit 0
     fi
+fi
+
+# 認證資訊不齊 → 只安裝+接線,不登入(使用者自己進 LuCI 填)。
+# ★ 舊版行為是「auto 模式沒帶 --ts-url/--ts-authkey 就整段不裝」,導致 --auto 部署
+#   出來的機器根本沒有 tailscale 可填。現改為一律安裝,登入與否才看有沒有帶認證。
+TS_LOGIN=1
+if [ -z "$TS_URL" ] || [ -z "$TS_AUTHKEY" ]; then
+    TS_LOGIN=0
+    echo "  ℹ️ 未提供 URL/authkey → 只安裝並接線(interface/firewall/cron),不自動登入"
 fi
 
 # ---- ③ 安裝套件 ----
@@ -167,9 +176,14 @@ echo "  ✅ firewall zone 'ts' + lan↔ts↔wan + VPN→ts forwarding(node 互�
 # ---- ⑦ 寫 custom_login_url(watchdog/schedule 反查 exit node 對外 IP 的真相來源)----
 uci set tailscale=tailscale 2>/dev/null
 uci set tailscale.settings=settings 2>/dev/null
-uci set tailscale.settings.custom_login_url="$TS_URL"
+# 沒帶 URL 時不寫,避免用空值蓋掉機器上既有的設定(重跑本腳本補裝的情境)。
+if [ -n "$TS_URL" ]; then
+    uci set tailscale.settings.custom_login_url="$TS_URL"
+    echo "  ✅ uci tailscale.settings.custom_login_url=$TS_URL"
+else
+    echo "  ℹ️ 未提供 URL,custom_login_url 保留原值(請於 LuCI 填寫)"
+fi
 uci commit tailscale
-echo "  ✅ uci tailscale.settings.custom_login_url=$TS_URL"
 
 # ---- 限制 tailscaled 記憶體上限(小 RAM OpenWrt 必備)----
 # tailscaled 是 Go 程式,預設不主動還記憶體給 OS;當 exit-node client 轉發整個 LAN
@@ -197,27 +211,42 @@ fi
 ps w | grep -q "[t]ailscaled" || { /etc/init.d/tailscale start >/dev/null 2>&1; sleep 6; }
 
 # ---- ⑧ 登入 + 設 exit node ----
-echo ""
-echo "🔑 tailscale up(登入 headscale)..."
-# up 可能卡互動,背景跑 + 給時間 + 收尾
-( tailscale up --login-server="$TS_URL" --authkey="$TS_AUTHKEY" \
-    --accept-routes=false --accept-dns=false >/dev/null 2>&1 ) &
-UP_PID=$!
-sleep 12
-kill "$UP_PID" 2>/dev/null
+# 沒帶認證資訊就整段跳過:硬跑 tailscale up 帶空參數只會失敗,還會印出誤導的錯誤訊息。
+if [ "$TS_LOGIN" = "1" ]; then
+    echo ""
+    echo "🔑 tailscale up(登入 headscale)..."
+    # up 可能卡互動,背景跑 + 給時間 + 收尾
+    ( tailscale up --login-server="$TS_URL" --authkey="$TS_AUTHKEY" \
+        --accept-routes=false --accept-dns=false >/dev/null 2>&1 ) &
+    UP_PID=$!
+    sleep 12
+    kill "$UP_PID" 2>/dev/null
 
-# 補 tailscale0 IPv4(★上次頭號真兇:介面掉 IP → LAN 全斷)
-TSIP=$(tailscale ip -4 2>/dev/null | head -1)
-if [ -n "$TSIP" ]; then
-    ip addr show tailscale0 2>/dev/null | grep -q "inet $TSIP" || ip addr add "$TSIP/32" dev tailscale0 2>/dev/null
-    echo "  ✅ 已登入,本機 tailscale IP=$TSIP"
+    # 補 tailscale0 IPv4(★上次頭號真兇:介面掉 IP → LAN 全斷)
+    TSIP=$(tailscale ip -4 2>/dev/null | head -1)
+    if [ -n "$TSIP" ]; then
+        ip addr show tailscale0 2>/dev/null | grep -q "inet $TSIP" || ip addr add "$TSIP/32" dev tailscale0 2>/dev/null
+        echo "  ✅ 已登入,本機 tailscale IP=$TSIP"
+    else
+        echo "  ⚠️ 尚未取得 tailscale IP,請確認 URL/authkey 後手動 tailscale up"
+    fi
 else
-    echo "  ⚠️ 尚未取得 tailscale IP,請確認 URL/authkey 後手動 tailscale up"
+    echo ""
+    echo "🔑 未提供認證資訊,略過自動登入。tailscaled 已啟動並設為開機啟用。"
+    echo "     ── 請擇一完成登入 ──"
+    echo "     【LuCI】服務 → Tailscale:填 custom_login_url 與 authkey 後儲存套用"
+    echo "     【CLI 】tailscale up --login-server=<URL> --authkey=<KEY> \\"
+    echo "               --accept-routes=false --accept-dns=false"
+    echo "     登入後若 LAN 不通,補: ip addr add \$(tailscale ip -4)/32 dev tailscale0"
 fi
 
 # 預設:已加入 mesh 當 node、LAN 與其他 node 互通(firewall 三條已就緒)。
 # 不自動設 exit node(那綁 headscale 端狀態,每台不同,手動設較好維護)。
-echo "  ℹ️ 已加入 mesh,LAN 與其他 node 互通。未設 exit node(LAN 走自家 WAN)。"
+if [ "$TS_LOGIN" = "1" ]; then
+    echo "  ℹ️ 已加入 mesh,LAN 與其他 node 互通。未設 exit node(LAN 走自家 WAN)。"
+else
+    echo "  ℹ️ firewall/interface 已備妥,登入後即可與其他 node 互通。"
+fi
 echo "     ── 日後要當出口,firewall 已備妥,只差以下指令: ──"
 echo "     【這台 LAN 走別台 exit node 出去】"
 echo "       tailscale set --exit-node=<IP> --exit-node-allow-lan-access=true --accept-dns=false"
@@ -241,7 +270,11 @@ else
 fi
 
 echo ""
-printf "${C_GREEN}  ✅ Tailscale 安裝完成(已加入 mesh,當一個 node)${C_RESET}\n"
+if [ "$TS_LOGIN" = "1" ]; then
+    printf "${C_GREEN}  ✅ Tailscale 安裝完成(已加入 mesh,當一個 node)${C_RESET}\n"
+else
+    printf "${C_GREEN}  ✅ Tailscale 安裝完成(尚未登入,請進 LuCI 填 URL/authkey)${C_RESET}\n"
+fi
 echo "     node 狀態:tailscale status"
 echo "     本機 IP  :tailscale ip -4"
 echo "     自癒日誌 :logread | grep ts-watchdog"
