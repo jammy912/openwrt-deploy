@@ -534,8 +534,21 @@ get_weakest_signal() {
         #   實測 2026-08-30 00:17 x60pro: SSID 兩邊都是 Portkey1、usteer local_info
         #   正常有節點,只是 iPhone RSSI 從 -78 掉出清單 → 擇強過濾「原=[] -> 過濾後=[]」
         #   → hearing map 回 -1 → 誤發推播。半夜手機拿走就會每 6h 吵一次,故加此判斷。
+        #   (c) 本 radio 的 SSID 不在 usteer ssid_list 內 → usteer 本來就不管這個 SSID,
+        #       查不到訊號是設計如此(實測 2026-08-30 RAX3000Z: IOT WiFi 的 SSID='IOT',
+        #       ssid_list='Portkey',誤報「漫遊引導失效」)。不在清單的 SSID 直接跳過。
+        _hm_ssid=$(iwinfo "$(echo "$radio_name" | sed 's/radio/phy/')-ap0" info 2>/dev/null \
+                   | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
+        _hm_list=$(uci -q get usteer.@usteer[0].ssid_list 2>/dev/null)
+        _hm_in_list=0
+        for _s in $_hm_list; do
+            [ "$_s" = "$_hm_ssid" ] && { _hm_in_list=1; break; }
+        done
+
         if [ -z "$(echo "$MONITORED_MACS" | tr -d ' ')" ]; then
             log "[HearingMap] 監控清單為空(無符合關鍵字的裝置在線),屬正常,不推播"
+        elif [ "$_hm_in_list" -eq 0 ]; then
+            log "[HearingMap] SSID '${_hm_ssid:-未知}' 不在 usteer ssid_list [${_hm_list:-未設}],usteer 本就不管此 SSID,不推播"
         else
 
         # ---- 推播告警:hearing map 空 = usteer 失效,漫遊引導已不運作 ----
@@ -555,9 +568,6 @@ get_weakest_signal() {
         fi
         if [ "$_hm_send" -eq 1 ]; then
             echo "$_hm_now" > "$_hm_ts"
-            _hm_ssid=$(iwinfo "$(echo "$radio_name" | sed 's/radio/phy/')-ap0" info 2>/dev/null \
-                       | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
-            _hm_list=$(uci -q get usteer.@usteer[0].ssid_list 2>/dev/null)
             . /etc/myscript/push-notify.inc 2>/dev/null
             PUSH_NAMES="${PUSH_NAMES:-admin}"
             push_notify "WiFi異常: 有監控裝置在線但 usteer hearing map 查不到訊號(漫遊引導可能失效), 功率改用 iwinfo。監控裝置=${MONITORED_MACS} 實際SSID=${_hm_ssid:-未知} usteer_ssid_list=${_hm_list:-未設}" 2>/dev/null
