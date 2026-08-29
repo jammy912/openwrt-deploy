@@ -520,10 +520,38 @@ get_weakest_signal() {
         #   每輪都誤判無 client,而同時 iwinfo assoclist 明明讀得到 -57 dBm。
         #   故查無資料時往下 fallback 到 iwinfo assoclist,不 return。
         if [ "$weakest_hm" != "-1" ]; then
+            # 有正常資料 → 清掉告警狀態(下次再壞才會重新推播)
+            rm -f "$STATE_DIR/wifi_hm_empty.ts" 2>/dev/null
             echo "$weakest_hm"
             return
         fi
         log "[HearingMap] 查無資料,fallback 改用 iwinfo assoclist 取訊號"
+
+        # ---- 推播告警:hearing map 空 = usteer 失效,漫遊引導已不運作 ----
+        # 最常見原因:usteer ssid_list 與實際 AP SSID 不匹配(實測 2026-08-29 x60pro
+        # 'Portkey' vs 'Portkey1'),usteer 反覆 Disconnecting 導致 map 恆空。
+        # 本腳本每分鐘跑一次,故設冷卻(預設 6h)避免洗版;狀態檔在資料恢復時清除。
+        _hm_ts="$STATE_DIR/wifi_hm_empty.ts"
+        _hm_cd="${HM_ALERT_COOLDOWN:-21600}"
+        _hm_now=$(date +%s)
+        _hm_send=0
+        if [ ! -f "$_hm_ts" ]; then
+            _hm_send=1
+        else
+            _hm_last=$(cat "$_hm_ts" 2>/dev/null)
+            [ -z "$_hm_last" ] && _hm_last=0
+            [ $((_hm_now - _hm_last)) -ge "$_hm_cd" ] && _hm_send=1
+        fi
+        if [ "$_hm_send" -eq 1 ]; then
+            echo "$_hm_now" > "$_hm_ts"
+            _hm_ssid=$(iwinfo "$(echo "$radio_name" | sed 's/radio/phy/')-ap0" info 2>/dev/null \
+                       | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
+            _hm_list=$(uci -q get usteer.@usteer[0].ssid_list 2>/dev/null)
+            . /etc/myscript/push-notify.inc 2>/dev/null
+            PUSH_NAMES="${PUSH_NAMES:-admin}"
+            push_notify "WiFi異常: usteer hearing map 為空(漫遊引導失效), 功率改用 iwinfo 訊號。實際SSID=${_hm_ssid:-未知} usteer_ssid_list=${_hm_list:-未設} 請確認兩者是否一致" 2>/dev/null
+            log "[HearingMap] 已推播告警 (實際SSID=${_hm_ssid:-未知}, ssid_list=${_hm_list:-未設})"
+        fi
     fi
 
     local interface_prefix=$(echo "$radio_name" | sed 's/radio/phy/')
