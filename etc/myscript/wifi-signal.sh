@@ -513,8 +513,17 @@ get_weakest_signal() {
             END { if (found) print weakest; else print -1 }
         ')
         log "[HearingMap] ${radio_name} 最弱訊號 (來自 hearing map) = ${weakest_hm}"
-        echo "$weakest_hm"
-        return
+        # ★ -1 = hearing map 查無資料。此時不可直接回傳,否則呼叫端會誤判成「沒有找到
+        #   監控中的客戶端」→ 降到最低功率,但 client 其實好端端連著。
+        #   實測 2026-08-29 x60pro: usteer 因 ssid_list('Portkey') 與實際 SSID
+        #   ('Portkey1') 不符而反覆 Disconnecting → hearing map 恆為空 {} →
+        #   每輪都誤判無 client,而同時 iwinfo assoclist 明明讀得到 -57 dBm。
+        #   故查無資料時往下 fallback 到 iwinfo assoclist,不 return。
+        if [ "$weakest_hm" != "-1" ]; then
+            echo "$weakest_hm"
+            return
+        fi
+        log "[HearingMap] 查無資料,fallback 改用 iwinfo assoclist 取訊號"
     fi
 
     local interface_prefix=$(echo "$radio_name" | sed 's/radio/phy/')
