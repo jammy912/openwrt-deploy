@@ -521,7 +521,7 @@ get_weakest_signal() {
         #   故查無資料時往下 fallback 到 iwinfo assoclist,不 return。
         if [ "$weakest_hm" != "-1" ]; then
             # 有正常資料 → 清掉告警狀態(下次再壞才會重新推播)
-            rm -f "$STATE_DIR/wifi_hm_empty.ts" 2>/dev/null
+            rm -f "$STATE_DIR/wifi_hm_empty_${radio_name}.ts" 2>/dev/null
             echo "$weakest_hm"
             return
         fi
@@ -555,7 +555,7 @@ get_weakest_signal() {
         # 最常見原因:usteer ssid_list 與實際 AP SSID 不匹配(實測 2026-08-29 x60pro
         # 'Portkey' vs 'Portkey1'),usteer 反覆 Disconnecting 導致 map 恆空。
         # 本腳本每分鐘跑一次,故設冷卻(預設 6h)避免洗版;狀態檔在資料恢復時清除。
-        _hm_ts="$STATE_DIR/wifi_hm_empty.ts"
+        _hm_ts="$STATE_DIR/wifi_hm_empty_${radio_name}.ts"
         _hm_cd="${HM_ALERT_COOLDOWN:-21600}"
         _hm_now=$(date +%s)
         _hm_send=0
