@@ -77,16 +77,20 @@ fi
 
 BAND=$(uci -q get wireless.$RADIO.band 2>/dev/null)
 
-# --- 找出該 radio 底下所有啟用中的 wifi-iface ---
+# --- 找出該 radio 底下的 AP 介面 ---
+# ★ 只取 mode=ap:dtim_period 是給「省電模式的 client」用的,mesh(802.11s)/sta
+#   介面沒有這個概念,設了無意義還會讓 mesh 設定多出無用欄位。
+#   實測 2026-08-30 x60pro: 未過濾時會連 mesh0 一起設。
 IFACES=$(uci show wireless 2>/dev/null | awk -F'[.=]' -v r="$RADIO" '
     /=wifi-iface/ { sec[$2]=1 }
     /\.device=/   { gsub(/'"'"'/, "", $4); dev[$2]=$4 }
-    END { for (s in sec) if (dev[s]==r) print s }
+    /\.mode=/     { gsub(/'"'"'/, "", $4); mode[$2]=$4 }
+    END { for (s in sec) if (dev[s]==r && mode[s]=="ap") print s }
 ')
 
 if [ -z "$IFACES" ]; then
-    echo "❌ $RADIO ($BAND) 底下找不到 wifi-iface"
-    log "❌ $RADIO ($BAND) 底下找不到 wifi-iface"
+    echo "❌ $RADIO ($BAND) 底下找不到 mode=ap 的 wifi-iface"
+    log "❌ $RADIO ($BAND) 底下找不到 mode=ap 的 wifi-iface"
     exit 1
 fi
 
