@@ -136,8 +136,20 @@ else
 fi
 
 # --- Channel 0 檢查(wifi reload 的已知風險) ---
-if iwinfo "${_phy}-ap0" info 2>/dev/null | grep -q "Channel: 0"; then
-    echo "❌ [嚴重] ${_phy}-ap0 出現 Channel 0,嘗試 wifi down/up 修復"
-    log "❌ [嚴重] ${_phy}-ap0 出現 Channel 0,嘗試修復"
-    wifi down; sleep 5; wifi up
+# ★ 不可寫死 "${_phy}-ap0": AP 介面不保證叫 -ap0(可能 ap1，或該 radio 只有 mesh)。
+#   名字不符時 iwinfo 查無介面 → grep 恆為 false → Channel 0 修復永遠不觸發,
+#   而且完全沒有告警(靜默失效)。改列舉該 phy 底下實際介面逐一檢查。
+_ap_ifs=$(iwinfo 2>/dev/null | awk -v p="$_phy" '$1 ~ "^"p"-" {print $1}')
+if [ -z "$_ap_ifs" ]; then
+    echo "⚠️ 找不到 ${_phy} 底下任何介面,略過 Channel 0 檢查"
+    log "⚠️ 找不到 ${_phy} 底下任何介面,略過 Channel 0 檢查"
+else
+    for _ap in $_ap_ifs; do
+        if iwinfo "$_ap" info 2>/dev/null | grep -q "Channel: 0"; then
+            echo "❌ [嚴重] ${_ap} 出現 Channel 0,嘗試 wifi down/up 修復"
+            log "❌ [嚴重] ${_ap} 出現 Channel 0,嘗試修復"
+            wifi down; sleep 5; wifi up
+            break
+        fi
+    done
 fi

@@ -111,7 +111,25 @@ HEARING_MAP=$USE_HEARING_MAP, 監控模式=$MONITOR_MODE, 裝置關鍵字=$DEVIC
 IGNORE_BELOW_DBM=$IGNORE_BELOW_DBM, DEBUG_PUSH=$DEBUG_PUSH"
 
 # =====================
-# RSSI 踢除弱信號客戶端
+# 取得某 radio 底下實際存在的 AP 介面名 (取第一個)
+# $1=radio 名(如 radio1) → 印出如 phy1-ap0；查不到印空字串
+# ★ 不可寫死 "${phy}-ap0": AP 介面不保證叫 -ap0(可能 ap1，或該 radio 只有 mesh/sta)。
+#   寫死時 iw dev / ubus call hostapd.<iface> 會靜默失敗(查無介面不報錯)，
+#   功能形同關閉卻無任何告警。實測 2026-08-31 x60pro 雖確為 phyN-ap0，
+#   但這是驅動註冊順序的巧合，非保證。
+resolve_ap_iface() {
+    local _r="$1"
+    local _p=$(echo "$_r" | sed 's/radio/phy/')
+    local _i
+    # 優先用 iwinfo 列出的實際介面(只認有 ESSID 的 AP)
+    for _i in $(iwinfo 2>/dev/null | awk -v p="$_p" '$1 ~ "^"p"-" {print $1}'); do
+        if iwinfo "$_i" info 2>/dev/null | grep -q 'ESSID:'; then
+            echo "$_i"; return
+        fi
+    done
+    echo ""
+}
+
 # =====================
 # 掃描指定介面的客戶端，信號低於門檻的用 ubus del_client 踢掉
 # $1=hostapd介面名(如 phy1-ap0)  $2=RSSI門檻(如 -75)
@@ -170,11 +188,23 @@ log "設定 2.4GHz: $UCI_RADIO_2G, 介面: $UCI_IFACE_2G"
 log "設定 5GHz  : $UCI_RADIO_5G, 介面: $UCI_IFACE_5G"
 
 # 踢除弱信號客戶端 (僅在有設定門檻時)
-# 動態取得 phy 名稱: radioN → phyN
-_PHY_5G=$(echo "$UCI_RADIO_5G" | sed 's/radio/phy/')
-_PHY_2G=$(echo "$UCI_RADIO_2G" | sed 's/radio/phy/')
-[ "$ENABLE_5G" -eq 1 ] && [ -n "$RSSI_KICK_5G" ] && kick_weak_clients "${_PHY_5G}-ap0" "$RSSI_KICK_5G"
-[ "$ENABLE_2G" -eq 1 ] && [ -n "$RSSI_KICK_2G" ] && kick_weak_clients "${_PHY_2G}-ap0" "$RSSI_KICK_2G"
+# 介面名改用 resolve_ap_iface 動態解析，不寫死 -ap0(理由見該函式註解)
+_AP_5G=$(resolve_ap_iface "$UCI_RADIO_5G")
+_AP_2G=$(resolve_ap_iface "$UCI_RADIO_2G")
+if [ "$ENABLE_5G" -eq 1 ] && [ -n "$RSSI_KICK_5G" ]; then
+    if [ -n "$_AP_5G" ]; then
+        kick_weak_clients "$_AP_5G" "$RSSI_KICK_5G"
+    else
+        log "[警告] 找不到 ${UCI_RADIO_5G} 的 AP 介面，略過 5G RSSI-KICK"
+    fi
+fi
+if [ "$ENABLE_2G" -eq 1 ] && [ -n "$RSSI_KICK_2G" ]; then
+    if [ -n "$_AP_2G" ]; then
+        kick_weak_clients "$_AP_2G" "$RSSI_KICK_2G"
+    else
+        log "[警告] 找不到 ${UCI_RADIO_2G} 的 AP 介面，略過 2G RSSI-KICK"
+    fi
+fi
 
 change_occured=0
 
@@ -537,16 +567,50 @@ get_weakest_signal() {
         #   (c) 本 radio 的 SSID 不在 usteer ssid_list 內 → usteer 本來就不管這個 SSID,
         #       查不到訊號是設計如此(實測 2026-08-30 RAX3000Z: IOT WiFi 的 SSID='IOT',
         #       ssid_list='Portkey',誤報「漫遊引導失效」)。不在清單的 SSID 直接跳過。
-        _hm_ssid=$(iwinfo "$(echo "$radio_name" | sed 's/radio/phy/')-ap0" info 2>/dev/null \
-                   | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
+        # ★ 不可寫死 "-ap0": 該 radio 的 AP 介面不一定叫 phyN-ap0(可能 ap1/mesh),
+        #   且 phyN 編號與 radioN 不保證對應。實測 2026-08-31 x60pro:
+        #   phy0-ap0='IOT'、phy1-ap0='Portkey', 手機掛在 IOT 卻在 radio1 這輪被判,
+        #   SSID 對照抓到 'Portkey' → 誤判「在 ssid_list 內」→ 守門失效而誤報。
+        #   改由 uci 找該 radio 底下 mode=ap 的 iface 取 SSID(與 wifi-dtim.sh 同法)。
+        _hm_ssid=$(uci show wireless 2>/dev/null | awk -F'[.=]' -v r="$radio_name" '
+            /=wifi-iface/ { sec[$2]=1 }
+            /\.device=/   { gsub(/'"'"'/, "", $4); dev[$2]=$4 }
+            /\.mode=/     { gsub(/'"'"'/, "", $4); mode[$2]=$4 }
+            /\.ssid=/     { gsub(/'"'"'/, "", $4); ssid[$2]=$4 }
+            END { for (s in sec) if (dev[s]==r && mode[s]=="ap") { print ssid[s]; exit } }
+        ')
+        # uci 查不到才退回 iwinfo 實際值(同樣不寫死 -ap0，用 resolve_ap_iface 解析)
+        if [ -z "$_hm_ssid" ]; then
+            _hm_if=$(resolve_ap_iface "$radio_name")
+            [ -n "$_hm_if" ] && _hm_ssid=$(iwinfo "$_hm_if" info 2>/dev/null \
+                | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
+        fi
         _hm_list=$(uci -q get usteer.@usteer[0].ssid_list 2>/dev/null)
         _hm_in_list=0
         for _s in $_hm_list; do
             [ "$_s" = "$_hm_ssid" ] && { _hm_in_list=1; break; }
         done
 
+        # ★ 真兇(實測 2026-08-31 x60pro): MONITORED_MACS 是「全機」清單(DHCP 租約+ARP,
+        #   見 get_monitored_macs),不分 radio。radio1(Portkey) 這輪拿到的清單裡混進了
+        #   實際掛在 phy0-ap0(IOT) 的手機 40:4E:36:B3:52:32 → hearing map 只涵蓋
+        #   ssid_list 內的 Portkey, 當然查不到它 → 誤判 usteer 失效而推播。
+        #   usteer 其實健康(get_clients 有 c8:ff:77:b0:ba:52 訊號 -59)。
+        #   故推播前先確認「真的有被監控的裝置關聯在本 radio 上」, 否則屬正常不推播。
+        _hm_on_radio=""
+        _hm_radio_clients=$(get_clients_on_radio "$radio_name")
+        for _m in $MONITORED_MACS; do
+            _mu=$(echo "$_m" | tr 'a-z' 'A-Z')
+            case " $(echo "$_hm_radio_clients" | tr 'a-z' 'A-Z') " in
+                *" $_mu "*) _hm_on_radio="$_hm_on_radio $_mu" ;;
+            esac
+        done
+        _hm_on_radio=$(echo "$_hm_on_radio" | sed 's/^ //')
+
         if [ -z "$(echo "$MONITORED_MACS" | tr -d ' ')" ]; then
             log "[HearingMap] 監控清單為空(無符合關鍵字的裝置在線),屬正常,不推播"
+        elif [ -z "$(echo "$_hm_on_radio" | tr -d ' ')" ]; then
+            log "[HearingMap] 監控裝置[${MONITORED_MACS}]無一關聯在 ${radio_name} 上(可能在另一頻段/另一SSID),不推播"
         elif [ "$_hm_in_list" -eq 0 ]; then
             log "[HearingMap] SSID '${_hm_ssid:-未知}' 不在 usteer ssid_list [${_hm_list:-未設}],usteer 本就不管此 SSID,不推播"
         else
@@ -570,8 +634,10 @@ get_weakest_signal() {
             echo "$_hm_now" > "$_hm_ts"
             . /etc/myscript/push-notify.inc 2>/dev/null
             PUSH_NAMES="${PUSH_NAMES:-admin}"
-            push_notify "WiFi異常: 有監控裝置在線但 usteer hearing map 查不到訊號(漫遊引導可能失效), 功率改用 iwinfo。監控裝置=${MONITORED_MACS} 實際SSID=${_hm_ssid:-未知} usteer_ssid_list=${_hm_list:-未設}" 2>/dev/null
-            log "[HearingMap] 已推播告警 (實際SSID=${_hm_ssid:-未知}, ssid_list=${_hm_list:-未設})"
+            # 裝置只列「確實關聯在本 radio 上」的, 不列全機清單(舊版列全機造成誤導:
+            # 訊息裡的 MAC 可能根本不在這個 radio/SSID 上)
+            push_notify "WiFi異常: ${radio_name}(${_hm_ssid:-未知}) 有監控裝置在線但 usteer hearing map 查不到訊號(漫遊引導可能失效), 功率改用 iwinfo。本radio監控裝置=${_hm_on_radio} usteer_ssid_list=${_hm_list:-未設}" 2>/dev/null
+            log "[HearingMap] 已推播告警 (radio=${radio_name}, 實際SSID=${_hm_ssid:-未知}, 本radio監控裝置=${_hm_on_radio}, ssid_list=${_hm_list:-未設})"
         fi
         fi
     fi
