@@ -68,14 +68,17 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
         seen_5g=$((seen_5g + 1))
         [ "$seen_5g" -gt 1 ] && label="5G${seen_5g}"
     fi
-    # 格式: 5G(CH149-80MHZ):11dBm。頻道/頻寬任一查不到就省略該段,
-    # 避免出現 "5G(CH-MHZ)" 這種殘缺字串
+    # 格式: 5G(CH149/80M)11dBm。頻道/頻寬任一查不到就省略該段,
+    # 避免出現 "5G(CH/M)" 這種殘缺字串
     if [ -n "$ch" ] && [ -n "$width" ]; then
-        label="${label}(CH${ch}-${width}MHZ)"
+        label="${label}(CH${ch}/${width}M)"
     elif [ -n "$ch" ]; then
         label="${label}(CH${ch})"
+    else
+        # 連頻道都查不到時補冒號,否則會黏成 "5G11dBm" 看不懂
+        label="${label}:"
     fi
-    msg_radio="${msg_radio} ${label}:${pwr}dBm"
+    msg_radio="${msg_radio} ${label}${pwr}dBm"
 done
 [ -z "$msg_radio" ] && msg_radio=" (no radio)"
 
