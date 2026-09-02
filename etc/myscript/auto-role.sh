@@ -896,20 +896,33 @@ fi
 # 7.5 5G 頻道政策
 #   - mesh radio (同 radio 下有 mode=mesh 介面) 且 mesh_wireless=Y → 固定 149
 #   - 其他 5G radio (client AP):
-#       主gw / client → channel=auto, channels='36 40 48'       (低頻段)
+#       主gw / client → channel=auto, channels='36 40 44 48'       (低頻段)
 #       副gw          → channel=auto, channels='149 153 157 161 165' (高頻段)
+#   以上三個值可由 Google Sheet 的 config batmanmesh 逐台覆寫:
+#       ch5g_main(主gw/client) / ch5g_sub(副gw) / ch5g_mesh(mesh backhaul)
+#   Sheet 留空 = 用上列預設值。硬體不支援的頻道仍會被 _avail 過濾掉。
+#   另有 ht5g 可指定頻寬(HE80/HE160/VHT80...),留空 = 完全不碰 htmode(保留手動值)。
 # =====================
 apply_5g_channel_policy() {
     local gw_type="$1"          # 主gw / 副gw / client
     local mesh_wireless="$2"    # Y / N
-    local ap_channel="auto" ap_channels
+    local ap_channel="auto" ap_channels mesh_ch
     # 非 DFS 頻段 (台灣): 低頻 36/40/44/48、高頻 149/153/157/161/165
+    # 可由 Google Sheet 的 config batmanmesh 覆寫(每台獨立,見 sync-googleconfig.sh)。
+    # 旗標檔不存在或為空 = 沿用下列預設值,行為與加此功能前完全一致。
+    local _c5m=$(cat /etc/myscript/.ch5g_main 2>/dev/null)
+    local _c5s=$(cat /etc/myscript/.ch5g_sub 2>/dev/null)
+    local _c5x=$(cat /etc/myscript/.ch5g_mesh 2>/dev/null)
+    # htmode(LuCI 的「模式」+「寬度」合成一個值: N→HT, AC→VHT, AX→HE)。
+    # ★ 沒設就完全不碰 htmode,保留手動設定值 —— 不可給預設值,否則會覆寫使用者手動設的寬度。
+    local _h5g=$(cat /etc/myscript/.ht5g 2>/dev/null)
     case "$gw_type" in
-        副gw) ap_channels="149 153 157 161 165" ;;
-        *)    ap_channels="36 40 44 48" ;;
+        副gw) ap_channels="${_c5s:-149 153 157 161 165}" ;;
+        *)    ap_channels="${_c5m:-36 40 44 48}" ;;
     esac
+    mesh_ch="${_c5x:-149}"
 
-    local radio band has_mesh mesh_disabled tgt_ch tgt_chs cur_ch cur_chs
+    local radio band has_mesh mesh_disabled tgt_ch tgt_chs cur_ch cur_chs tgt_ht cur_ht
     for radio in radio0 radio1 radio2 radio3; do
         band=$(uci get wireless.$radio.band 2>/dev/null)
         [ "$band" != "5g" ] && continue
@@ -925,7 +938,7 @@ apply_5g_channel_policy() {
         done
 
         if [ "$has_mesh" = "1" ] && [ "$mesh_wireless" = "Y" ] && [ "$mesh_disabled" = "0" ]; then
-            tgt_ch="149"; tgt_chs=""
+            tgt_ch="$mesh_ch"; tgt_chs=""
         else
             tgt_ch="$ap_channel"
             # 過濾掉該 radio 硬體不支援的頻道 (三頻機 phy 各有不同頻段)
@@ -944,6 +957,23 @@ apply_5g_channel_policy() {
                 tgt_chs=$(echo "$tgt_chs" | sed 's/^ //')
                 # 此 fallback 在 radio 不支援指定頻段時會每分鐘觸發 (例如主gw 想要低頻
                 # 但 radio2 只支援高頻),訊息無變化不再 log,只在實際 uci 會變時 (L871/880) log
+            fi
+        fi
+
+        # htmode: 僅在 Sheet 有指定時才套用 (.ht5g 不存在 = 不碰,保留手動值)
+        if [ -n "$_h5g" ]; then
+            tgt_ht="$_h5g"
+            # mesh radio 不支援 160/320MHz (同 batman-setup.sh 的降頻邏輯),自動壓到 80
+            if [ "$has_mesh" = "1" ] && [ "$mesh_wireless" = "Y" ] && [ "$mesh_disabled" = "0" ]; then
+                case "$tgt_ht" in
+                    *160|*320) tgt_ht=$(echo "$tgt_ht" | sed 's/160/80/;s/320/80/') ;;
+                esac
+            fi
+            cur_ht=$(uci get wireless.$radio.htmode 2>/dev/null)
+            if [ "$cur_ht" != "$tgt_ht" ]; then
+                uci set wireless.$radio.htmode="$tgt_ht"
+                NEED_WIFI_RELOAD=1
+                log "[channel-policy] $radio (5g) htmode: $cur_ht -> $tgt_ht"
             fi
         fi
 
@@ -977,7 +1007,14 @@ apply_5g_channel_policy() {
 #   HT20 佔用最窄(非 40MHz),不侵蝕低頻。與角色無關,所有機型一致。
 # =====================
 apply_2g_channel_policy() {
-    local ap_channels="9 10 11"
+    # 可由 Google Sheet 的 config batmanmesh 覆寫(每台獨立,見 sync-googleconfig.sh)。
+    # 旗標檔不存在或為空 = 沿用預設 9 10 11 / HT20,行為與加此功能前完全一致。
+    # ⚠️ 改這兩個值前先讀上面的 Why 註解: 9-11 + HT20 是為了避開 Zigbee 的整體設計,
+    #    改頻道或放寬到 HT40 都會往低頻侵蝕,壓到 Zigbee 15-18。
+    local ap_channels=$(cat /etc/myscript/.ch2g 2>/dev/null)
+    ap_channels="${ap_channels:-9 10 11}"
+    local tgt_ht=$(cat /etc/myscript/.ht2g 2>/dev/null)
+    tgt_ht="${tgt_ht:-HT20}"
     local radio band tgt_chs cur_chs cur_ht _phy _avail _ch
     for radio in radio0 radio1 radio2 radio3; do
         band=$(uci get wireless.$radio.band 2>/dev/null)
@@ -1003,10 +1040,10 @@ apply_2g_channel_policy() {
             NEED_WIFI_RELOAD=1
             log "[channel-policy] $radio (2g) channels: [$cur_chs] -> [$tgt_chs] (避 Zigbee 11-18)"
         fi
-        if [ "$cur_ht" != "HT20" ]; then
-            uci set wireless.$radio.htmode='HT20'
+        if [ "$cur_ht" != "$tgt_ht" ]; then
+            uci set wireless.$radio.htmode="$tgt_ht"
             NEED_WIFI_RELOAD=1
-            log "[channel-policy] $radio (2g) htmode: $cur_ht -> HT20"
+            log "[channel-policy] $radio (2g) htmode: $cur_ht -> $tgt_ht"
         fi
     done
 

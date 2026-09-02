@@ -693,6 +693,7 @@ main() {
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""; gw=""; ra=""; rio=""; d1=""; d2=""; d3=""; d4=""
+                c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -701,6 +702,14 @@ main() {
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                     if ($i ~ /option runagh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ra=a[n] }
                     if ($i ~ /option runiotwifi/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); rio=a[n] }
+                    # 頻道清單欄位含多個頻道(空白分隔),不可用 a[n] 只取最後一個 token,
+                    # 需比照 upstream_dns* 取第 3 欄以後整段
+                    if ($i ~ /option ch5g_main/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch5g_main[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c5m=v }
+                    if ($i ~ /option ch5g_sub/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch5g_sub[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c5s=v }
+                    if ($i ~ /option ch5g_mesh/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch5g_mesh[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c5x=v }
+                    if ($i ~ /option ch2g/)      { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch2g[[:space:]]+/, "", v);      gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c2g=v }
+                    if ($i ~ /option ht2g/)      { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h2g=a[n] }
+                    if ($i ~ /option ht5g/)      { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h5g=a[n] }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -710,7 +719,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_RUNIOTWIFI=" rio " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_RUNIOTWIFI=" rio " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -790,6 +799,20 @@ main() {
             printf '%s' "$NEW_DNS" > /etc/myscript/.mesh_upstream_dns
             log "🔧 mesh_upstream_dns 已更新 (hostname=$MY_HOSTNAME)"
         fi
+        # 更新 WiFi 頻道政策旗標檔 (.ch5g_main/.ch5g_sub/.ch5g_mesh/.ch2g/.ht2g)
+        # 空白 = 不寫檔,讓 auto-role.sh 用它自己的預設值(見 apply_5g/2g_channel_policy)。
+        # ★ 本腳本每分鐘跑一次,務必「值有變才寫」,否則每分鐘寫一次 flash(磨損)。
+        #   awk 已把多餘空白壓成單一空白,故此處字串比對即可判定有無變更。
+        for _pair in "ch5g_main:$NEW_CH5G_MAIN" "ch5g_sub:$NEW_CH5G_SUB" "ch5g_mesh:$NEW_CH5G_MESH" "ch2g:$NEW_CH2G" "ht2g:$NEW_HT2G" "ht5g:$NEW_HT5G"; do
+            _name="${_pair%%:*}"
+            _val="${_pair#*:}"
+            [ -z "$_val" ] && continue
+            _cur=$(cat "/etc/myscript/.${_name}" 2>/dev/null)
+            if [ "$_val" != "$_cur" ]; then
+                echo "$_val" > "/etc/myscript/.${_name}"
+                log "🔧 ${_name}: $_cur → $_val (hostname=$MY_HOSTNAME)"
+            fi
+        done
     fi
 
     # =====================================================
