@@ -354,7 +354,7 @@ apply_upstream() {
             uci commit dhcp
             _need_reload=1
             log "⚠️ 無任何 upstream 可用,退回 WAN resolv"
-            push_notify "dns-switch: $_cur → WAN resolv (NONE)"
+            push_notify "⚠️ DNS 全掛[NONE]: $_cur → WAN resolv。擋 AAAA 失效→IPv6 繞過分流(Netflix 恐判同戶)"
         fi
     else
         # 正規化 target (把 , ; 也當空白) 以便比對
@@ -368,7 +368,18 @@ apply_upstream() {
             uci commit dhcp
             _need_reload=1
             log "🔀 dnsmasq upstream → $_target ($_kind)"
-            push_notify "dns-switch: ${_cur:-<none>} → $_target ($_kind)"
+            # ★ 離開 SELF = 本機 AGH 沒接手,AGH user_rules 的擋 AAAA 規則全部失效。
+            #   後果: Netflix 等網域的 AAAA 會回來, 而 ip -6 rule 沒有 DBR/CustRule
+            #   (prio 100/200 只有 IPv4), IPv6 流量會直接走 WAN 出去 → 分流失效、
+            #   Netflix 判定同戶。故降級推播要講後果, 不能只印 target 切換。
+            case "$_kind" in
+                SELF)
+                    push_notify "✅ DNS 已恢復本機 AGH: ${_cur:-<none>} → $_target"
+                    ;;
+                *)
+                    push_notify "⚠️ AGH 未接手[${_kind}]: ${_cur:-<none>} → $_target。擋 AAAA 失效→IPv6 繞過分流(Netflix 恐判同戶)"
+                    ;;
+            esac
         fi
     fi
 
@@ -434,6 +445,14 @@ esac
 
 log "pick: $DECISION"
 apply_upstream "$TARGET" "$KIND"
+
+# ★ 持續降級提醒: apply_upstream 只在 target 「有變」時推播,
+#   若 AGH 掛掉後長期停在 PEER/DNS,只會在切換那一刻推一次,
+#   之後就靜默 —— 而這段期間擋 AAAA 一直是失效的。
+#   故非 SELF 時每小時整點再提醒一次。
+if [ "$KIND" != "SELF" ] && [ "$(date '+%M')" = "00" ]; then
+    push_notify "⚠️ AGH 仍未接手[${KIND}] upstream=${TARGET:-WAN resolv}。擋 AAAA 持續失效→IPv6 繞過分流"
+fi
 
 # 端到端 sanity: NONE 已經是 fallback 不檢查;其他都驗 dnsmasq 真的能解
 # 失敗 → restart dnsmasq (reload 不會清 server-dead 標記,要 restart 才行)
