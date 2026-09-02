@@ -1,5 +1,5 @@
 #!/bin/sh
-# 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G 頻道+Tx-Power
+# 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G 頻道+頻寬+Tx-Power
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -41,6 +41,12 @@ get_ch() {
     iwinfo "$1" info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\) .*/\1/p' | head -1
 }
 
+# 取頻寬 MHz: HT Mode 值(HT20/HE80/VHT160/HT40+...) 去掉非數字即為寬度
+get_width() {
+    iwinfo "$1" info 2>/dev/null | sed -n 's/.*HT Mode: \([A-Za-z0-9+-]*\).*/\1/p' \
+        | head -1 | sed 's/[^0-9]//g'
+}
+
 # 每個 phy 只取一個 AP iface (避免重複)
 msg_radio=""
 seen_5g=0
@@ -54,6 +60,7 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
     band=$(get_band "$iface")
     pwr=$(get_pwr "$iface")
     ch=$(get_ch "$iface")
+    width=$(get_width "$iface")
     [ -z "$band" ] && continue
     [ -z "$pwr" ] && continue
     label="$band"
@@ -61,8 +68,13 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
         seen_5g=$((seen_5g + 1))
         [ "$seen_5g" -gt 1 ] && label="5G${seen_5g}"
     fi
-    # 頻道查不到時不顯示括號,避免出現 "5G():11dBm"
-    [ -n "$ch" ] && label="${label}(${ch})"
+    # 格式: 5G(CH149-80MHZ):11dBm。頻道/頻寬任一查不到就省略該段,
+    # 避免出現 "5G(CH-MHZ)" 這種殘缺字串
+    if [ -n "$ch" ] && [ -n "$width" ]; then
+        label="${label}(CH${ch}-${width}MHZ)"
+    elif [ -n "$ch" ]; then
+        label="${label}(CH${ch})"
+    fi
     msg_radio="${msg_radio} ${label}:${pwr}dBm"
 done
 [ -z "$msg_radio" ] && msg_radio=" (no radio)"
