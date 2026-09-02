@@ -1,5 +1,5 @@
 #!/bin/sh
-# 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G Tx-Power
+# 推播目前系統狀態: CPU 溫度 / AdGuardHome 記憶體 / 可用記憶體 / 2.4G & 5G 頻道+Tx-Power
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -36,6 +36,11 @@ get_pwr() {
     iwinfo "$1" info 2>/dev/null | awk '/Tx-Power/{print $2; exit}'
 }
 
+# 取頻道號 (同 get_band 的 Channel: 行, 取括號前的數字)
+get_ch() {
+    iwinfo "$1" info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\) .*/\1/p' | head -1
+}
+
 # 每個 phy 只取一個 AP iface (避免重複)
 msg_radio=""
 seen_5g=0
@@ -48,6 +53,7 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
     seen_phy="$seen_phy $phy"
     band=$(get_band "$iface")
     pwr=$(get_pwr "$iface")
+    ch=$(get_ch "$iface")
     [ -z "$band" ] && continue
     [ -z "$pwr" ] && continue
     label="$band"
@@ -55,6 +61,8 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
         seen_5g=$((seen_5g + 1))
         [ "$seen_5g" -gt 1 ] && label="5G${seen_5g}"
     fi
+    # 頻道查不到時不顯示括號,避免出現 "5G():11dBm"
+    [ -n "$ch" ] && label="${label}(${ch})"
     msg_radio="${msg_radio} ${label}:${pwr}dBm"
 done
 [ -z "$msg_radio" ] && msg_radio=" (no radio)"
