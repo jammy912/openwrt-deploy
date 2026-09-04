@@ -103,7 +103,7 @@ band_report() {
     {
         awk '/Channel:/ { print "AP", $NF }' "$_scan"
         awk '{ print "SV", $0 }' "$TMPD/acc.$_b"
-    } | awk -v scanok="$_naps" '
+    } | awk -v scanok="$_naps" -v band="$_b" '
         function f2ch(f) { return (f < 3000) ? (f-2407)/5 : (f-5000)/5 }
         $1 == "AP" { ap[$2]++ ; next }
         $1 == "SV" {
@@ -148,6 +148,38 @@ band_report() {
 
                 napp = (scanok > 0) ? sprintf("%2d支", ap[ch]+0) : " - "
                 printf "ch%-3d %4d %s %s%s\n", ch, f, napp, pct, (inuse[f]==1 ? "*" : "")
+                # 存起來給後面的 group 統計用
+                gpct[ch] = (da > 0) ? db * 100 / da : -1
+                gap[ch]  = ap[ch] + 0
+            }
+
+            # ---- 2.4G 候選頻道的「實際佔用區間」統計 ----
+            # ★ 為什麼要這段: 逐行的單一中心頻率忙碌率會誤導 ——
+            #   例如 ch13 中心點看起來只有 13%, 但 HE20 實際佔 ch11-13,
+            #   跟 ch11 那群重疊超過一半, 換過去並沒有真的躲開。
+            #   故對 1/6/11 這三個互不重疊的主頻道, 額外印出
+            #   「中心 ±2 共 20MHz」範圍內的 AP 總數與平均忙碌率。
+            if (band == "2") {
+                printf "─ 20MHz 實際佔用 ─\n"
+                split("1 6 11", cand, " ")
+                for (k = 1; k <= 3; k++) {
+                    c = cand[k] + 0
+                    # 中心 ±2 = 20MHz。ch1/ch11 靠邊界會被截掉一半,
+                    # 若直接截斷, 各組涵蓋的頻道數不同(3 vs 5),
+                    # AP 總數就不能互相比較 —— 故往內平移補滿 5 個。
+                    lo = c - 2; hi = c + 2
+                    if (lo < 1)  { lo = 1;  hi = 5  }
+                    if (hi > 13) { hi = 13; lo = 9  }
+                    tot = 0; cnt = 0; aps = 0
+                    for (cc = lo; cc <= hi; cc++) {
+                        aps += gap[cc]
+                        if (gpct[cc] >= 0) { tot += gpct[cc]; cnt++ }
+                    }
+                    if (cnt > 0)
+                        printf "ch%-2d (%2d-%-2d) %3d支 平均%3.0f%%\n", c, lo, hi, aps, tot/cnt
+                    else
+                        printf "ch%-2d (%2d-%-2d) %3d支 平均  - \n", c, lo, hi, aps
+                }
             }
         }
     '
