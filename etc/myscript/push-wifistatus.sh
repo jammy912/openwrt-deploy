@@ -106,6 +106,31 @@ band_report() {
     } | awk -v scanok="$_naps" -v band="$_b" '
         function f2ch(f) { return (f < 3000) ? (f-2407)/5 : (f-5000)/5 }
 
+        # 5G 專用: 統計一個標準頻道區塊(以空白分隔的頻道清單)。
+        # 5G 頻道間隔 20MHz 且互不重疊, 區塊位置由 802.11 標準規定死
+        # (80MHz = 固定 4 個一組, 160MHz = 固定 8 個一組), 不能像 2.4G
+        # 那樣用「中心 ±n」滑動, 故獨立一個函式吃明確清單。
+        # dfsmark: 該區塊是否含 DFS 頻道(呼叫端判定後傳入)
+        function blk(name, list, dfsmark,   a, i, cc, tot, cnt, aps, miss) {
+            n2 = split(list, a, " ")
+            tot = 0; cnt = 0; aps = 0; miss = 0
+            for (i = 1; i <= n2; i++) {
+                cc = a[i] + 0
+                aps += gap[cc]
+                if (gpct[cc] >= 0) { tot += gpct[cc]; cnt++ }
+                else miss++
+            }
+            # 完全沒資料就不印(例如 radio 從沒切過去的 ch100 以上)
+            if (cnt == 0) return
+            printf "%-9s", name
+            if (scanok > 0) printf " %3d支", aps
+            else            printf "  - "
+            printf " 平均%3.0f%%", tot/cnt
+            if (miss > 0) printf " (%d/%d無值)", miss, n2
+            if (dfsmark != "") printf " %s", dfsmark
+            printf "\n"
+        }
+
         # 印出「以 c 為控制頻道、半寬 w 個頻道」的區間統計。
         # tag: "" =20MHz, "+"/"-" =40MHz 的副頻方向(僅供標示)
         # 靠邊界時往內平移補滿 (2*w+1) 個, 否則各組涵蓋數不同,
@@ -195,6 +220,26 @@ band_report() {
                 printf "─ 40MHz 實際佔用 ─\n"
                 span(1,  4, "+")     # 控制 ch1, 副頻在上 -> 佔 1-9
                 span(11, 4, "-")     # 控制 ch11, 副頻在下 -> 佔 7-13(截)
+            }
+
+            # ---- 5G: 80MHz / 160MHz 區塊 ----
+            # 台灣可用: UNII-1 36-48(非DFS) / UNII-2A 52-64(DFS)
+            #           UNII-2C 100-144(全DFS) / UNII-3 149-165(非DFS)
+            # ⚠️ 160MHz 只有兩個合法區塊(36-64 與 100-128), 兩者都含 DFS。
+            #    149-165 只有 5 個頻道, 湊不出 8 個 -> 永遠上不了 160MHz。
+            #    這也是為什麼想要 160MHz 就一定得吃 DFS(CAC 60s + 雷達風險)。
+            if (band == "5") {
+                printf "─ 80MHz 區塊 ─\n"
+                blk("36-48",   "36 40 44 48",     "")
+                blk("52-64",   "52 56 60 64",     "DFS")
+                blk("100-112", "100 104 108 112", "DFS")
+                blk("116-128", "116 120 124 128", "DFS")
+                blk("132-144", "132 136 140 144", "DFS")
+                blk("149-161", "149 153 157 161", "")
+
+                printf "─ 160MHz 區塊 ─\n"
+                blk("36-64",   "36 40 44 48 52 56 60 64",         "含DFS")
+                blk("100-128", "100 104 108 112 116 120 124 128", "含DFS")
             }
         }
     '
