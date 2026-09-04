@@ -211,12 +211,42 @@ for _b in 2 5; do
     _cur=$(iwinfo "$_iface" info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\) .*/\1/p' | head -1)
     _ht=$(iwinfo "$_iface" info 2>/dev/null | sed -n 's/.*HT Mode: \([A-Za-z0-9+-]*\).*/\1/p' | head -1)
 
+    # 目前「佔用範圍」內有沒有 DFS 頻道?
+    # ★ 不能只看控制頻道: ch36 本身非 DFS, 但 HE160 從 36 起算佔 36-64,
+    #   把 DFS 的 52-64 一起吃進來, 整段就受 DFS 管制(實測 hostapd 確實
+    #   對 chan=36 發出 DFS-CAC-START)。故要用 center1 + 寬度推算涵蓋範圍。
+    _phy=$(iw dev "$_iface" info 2>/dev/null | awk '/wiphy /{print "phy"$2; exit}')
+    _isdfs=0
+    if [ -n "$_phy" ]; then
+        # 取實際佔用: center1 頻率與頻寬(MHz)
+        _cf=$(iw dev "$_iface" info 2>/dev/null | sed -n 's/.*center1: \([0-9]*\) MHz.*/\1/p' | head -1)
+        _bw=$(iw dev "$_iface" info 2>/dev/null | sed -n 's/.*width: \([0-9]*\) MHz.*/\1/p' | head -1)
+        if [ -n "$_cf" ] && [ -n "$_bw" ]; then
+            _lo=$(( _cf - _bw / 2 ))
+            _hi=$(( _cf + _bw / 2 ))
+            # 列出所有 DFS 頻率, 有任一支落在佔用範圍內就算 DFS
+            for _df in $(iw phy "$_phy" info 2>/dev/null \
+                    | grep "radar detection" \
+                    | sed -n 's/.*\* \([0-9]*\)\.0 MHz.*/\1/p'); do
+                [ "$_df" -gt "$_lo" ] && [ "$_df" -lt "$_hi" ] && { _isdfs=1; break; }
+            done
+        fi
+    fi
+
     if [ "$_b" = "2" ]; then
         _title="📶 2.4G ch${_cur}/${_ht}"
     else
         _title="📡 5G ch${_cur}/${_ht}"
-        # scan 失敗時要講原因, 否則會被誤讀成「附近沒有 AP」
-        [ "$OK5" = "0" ] && _title="${_title} (${_ht} 無法掃描)"
+        # scan 失敗時要講原因, 否則會被誤讀成「附近沒有 AP」。
+        # ★ 真兇是 DFS 不是頻寬: 離開 DFS 頻道等於作廢已完成的 CAC,
+        #   驅動直接拒絕 scan。同一顆 phy 在非 DFS 頻道就掃得動。
+        if [ "$OK5" = "0" ]; then
+            if [ "$_isdfs" = "1" ]; then
+                _title="${_title} (DFS 佔用中,無法掃描)"
+            else
+                _title="${_title} (無法掃描)"
+            fi
+        fi
     fi
 
     msg="${msg}
@@ -227,6 +257,50 @@ done
 if [ -z "$msg" ]; then
     push_notify "⚠️ WiFi 狀態: 找不到任何 AP 介面"
     exit 0
+fi
+
+# ---- DFS / 雷達狀況 ----
+# 只在 5G 目前待在 DFS 頻道時才印(非 DFS 頻道講這些沒意義)。
+# 資料來自 logread 的 hostapd DFS 事件:
+#   DFS-CAC-START      開始 60s 通道可用性檢查, 這段期間不能發射
+#   DFS-CAC-COMPLETED  success=1 表示通過; radar_detected=1 表示偵測到雷達
+#   DFS-RADAR-DETECTED 運作中偵測到雷達 -> 強制換頻道, 客戶端會斷線
+# ⚠️ logread 是 RAM ring buffer, 重開機或訊息量大就會被沖掉,
+#    所以「查無紀錄」不等於「沒發生過」。
+if [ "$_isdfs" = "1" ]; then
+    _dfs=""
+    # 最近一次 CAC 結果
+    _cac=$(logread 2>/dev/null | grep "DFS-CAC-COMPLETED" | tail -1)
+    if [ -n "$_cac" ]; then
+        _ok=$(echo "$_cac" | sed -n 's/.*success=\([0-9]*\).*/\1/p')
+        _rd=$(echo "$_cac" | sed -n 's/.*radar_detected=\([0-9]*\).*/\1/p')
+        _tm=$(echo "$_cac" | awk '{print $4}')
+        if [ "$_ok" = "1" ]; then
+            _dfs="${_dfs}CAC ${_tm} 通過"
+        else
+            _dfs="${_dfs}CAC ${_tm} 失敗"
+        fi
+        [ "$_rd" = "1" ] && _dfs="${_dfs} ⚠️偵測到雷達"
+    else
+        # 還在跑 CAC(有 START 沒 COMPLETED) 或紀錄已被沖掉
+        if logread 2>/dev/null | grep -q "DFS-CAC-START"; then
+            _dfs="CAC 進行中或紀錄不全"
+        else
+            _dfs="無 CAC 紀錄"
+        fi
+    fi
+
+    # 歷史雷達事件次數(CAC 中偵測到 + 運作中偵測到)
+    _radar=$(logread 2>/dev/null | grep -cE "DFS-RADAR-DETECTED|radar_detected=1")
+    [ -z "$_radar" ] && _radar=0
+    if [ "$_radar" -gt 0 ]; then
+        _dfs="${_dfs}, 雷達事件 ${_radar} 次"
+    else
+        _dfs="${_dfs}, 無雷達事件"
+    fi
+
+    msg="${msg}
+📡 DFS: ${_dfs}"
 fi
 
 push_notify "WiFi 環境 (${ROUNDS}輪取樣)${msg}
