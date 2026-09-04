@@ -105,6 +105,27 @@ band_report() {
         awk '{ print "SV", $0 }' "$TMPD/acc.$_b"
     } | awk -v scanok="$_naps" -v band="$_b" '
         function f2ch(f) { return (f < 3000) ? (f-2407)/5 : (f-5000)/5 }
+
+        # 印出「以 c 為控制頻道、半寬 w 個頻道」的區間統計。
+        # tag: "" =20MHz, "+"/"-" =40MHz 的副頻方向(僅供標示)
+        # 靠邊界時往內平移補滿 (2*w+1) 個, 否則各組涵蓋數不同,
+        # AP 總數無法互相比較。
+        function span(c, w, tag,   lo, hi, cc, tot, cnt, aps, need) {
+            need = 2 * w + 1
+            lo = c - w; hi = c + w
+            if (lo < 1)  { lo = 1;  hi = need }
+            if (hi > 13) { hi = 13; lo = 13 - need + 1 }
+            if (lo < 1) lo = 1
+            tot = 0; cnt = 0; aps = 0
+            for (cc = lo; cc <= hi; cc++) {
+                aps += gap[cc]
+                if (gpct[cc] >= 0) { tot += gpct[cc]; cnt++ }
+            }
+            if (cnt > 0)
+                printf "ch%-2d%s (%2d-%-2d) %3d支 平均%3.0f%%\n", c, tag, lo, hi, aps, tot/cnt
+            else
+                printf "ch%-2d%s (%2d-%-2d) %3d支 平均  - \n", c, tag, lo, hi, aps
+        }
         $1 == "AP" { ap[$2]++ ; next }
         $1 == "SV" {
             f = $2
@@ -162,24 +183,18 @@ band_report() {
             if (band == "2") {
                 printf "─ 20MHz 實際佔用 ─\n"
                 split("1 6 11", cand, " ")
-                for (k = 1; k <= 3; k++) {
-                    c = cand[k] + 0
-                    # 中心 ±2 = 20MHz。ch1/ch11 靠邊界會被截掉一半,
-                    # 若直接截斷, 各組涵蓋的頻道數不同(3 vs 5),
-                    # AP 總數就不能互相比較 —— 故往內平移補滿 5 個。
-                    lo = c - 2; hi = c + 2
-                    if (lo < 1)  { lo = 1;  hi = 5  }
-                    if (hi > 13) { hi = 13; lo = 9  }
-                    tot = 0; cnt = 0; aps = 0
-                    for (cc = lo; cc <= hi; cc++) {
-                        aps += gap[cc]
-                        if (gpct[cc] >= 0) { tot += gpct[cc]; cnt++ }
-                    }
-                    if (cnt > 0)
-                        printf "ch%-2d (%2d-%-2d) %3d支 平均%3.0f%%\n", c, lo, hi, aps, tot/cnt
-                    else
-                        printf "ch%-2d (%2d-%-2d) %3d支 平均  - \n", c, lo, hi, aps
-                }
+                for (k = 1; k <= 3; k++) span(cand[k]+0, 2, "")
+
+                # ---- 40MHz ----
+                # 控制頻道 ±4 = 40MHz, 共 9 個頻道。2.4G 只有 1-13,
+                # 放得下的位置極少: 控制 ch1(佔1-9) 或 ch9/11(佔5-13)。
+                # 兩者一定重疊(9 個 x2 = 18 > 13), 亦即 2.4G 開 40MHz
+                # 必然吃掉整個頻段的大半, 沒有「互不干擾的兩組」可言。
+                # ⚠️ 且 ch1 起跳的 40MHz 會蓋住 2401-2445, 正好壓到
+                #    Zigbee ch11-15 —— 這是本機刻意用 HT20 的原因。
+                printf "─ 40MHz 實際佔用 ─\n"
+                span(1,  4, "+")     # 控制 ch1, 副頻在上 -> 佔 1-9
+                span(11, 4, "-")     # 控制 ch11, 副頻在下 -> 佔 7-13(截)
             }
         }
     '
