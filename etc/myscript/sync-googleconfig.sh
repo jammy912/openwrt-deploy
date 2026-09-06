@@ -1610,15 +1610,33 @@ NFTEOF
                 log "  ✅ payload 解密成功 (${RC_LINES} 行)"
 
                 if [ $DRY_RUN -eq 0 ]; then
-                    # --- 還原 WG 介面 (wg0, wg1... 不含 wg_) ---
-                    # 先刪除現有 wg0-9 介面和 peer
+                    # --- 還原 WG 介面 (純 wg + 數字, 如 wg0/wg1; 不含 wg_ 與 wg8ts) ---
+                    #
+                    # ★ 本段只管「純數字」介面 wgN。刪除與寫入的條件必須嚴格一致,
+                    #   否則會無限累積 —— 實測 x60pro 2026-09-06 的真兇:
+                    #   舊寫入端用 /^wg[0-9]/ (未錨定結尾), 連 wg8ts 一起寫入;
+                    #   舊刪除端用 -oE 'network\.wg[0-9]+', 對 network.wg8ts 只擷取出
+                    #   "network.wg8" —— 不存在的 section, uci delete 成為 no-op。
+                    #   結果 wg8ts 每次同步被 append 一次, 區塊 1→2→3...,
+                    #   list addresses 跟著翻倍到 1024 行, 上傳 MD5 每次都變,
+                    #   造成 下載→套用→上傳 無限循環推播。
+                    #   ⚠️ 舊刪除式還會誤傷: 若真有 wg8, 會被 wg8ts 的截斷值刪掉。
+                    #
+                    # wg8ts 這類「wg+數字+後綴」的介面是手動維護的, 不歸本段管:
+                    # 刪除端不碰它, 寫入端(下方 awk)也必須用 ^wg[0-9]+$ 排除它。
                     log "  清理舊有 wg0-9 介面..."
-                    for sec in $(uci show network 2>/dev/null | grep -oE 'network\.wg[0-9]+' | sort -u); do
+                    for sec in $(uci show network 2>/dev/null \
+                            | sed -n 's/^\(network\.wg[0-9]*\)=interface$/\1/p' \
+                            | sort -u); do
                         uci delete "$sec" 2>/dev/null
                         log "    🗑️ 已刪除 $sec"
                     done
-                    # 刪除 wireguard_wg0-9 peer（反向刪除避免 index 偏移）
-                    for peer_type in $(uci show network 2>/dev/null | grep -oE 'wireguard_wg[0-9]+' | sort -u); do
+                    # 刪除 wgN peer（反向刪除避免 index 偏移）
+                    # 同樣只取純數字型別: @wireguard_wg8ts 與 @wireguard_wg_900
+                    # 都不在此列, 由各自的段落維護。
+                    for peer_type in $(uci show network 2>/dev/null \
+                            | sed -n 's/^network\.@\(wireguard_wg[0-9]*\)\[[0-9]*\]=.*$/\1/p' \
+                            | sort -u); do
                         while uci delete "network.@${peer_type}[0]" 2>/dev/null; do
                             log "    🗑️ 已刪除 peer @${peer_type}"
                         done
@@ -1630,7 +1648,10 @@ NFTEOF
                     awk '
                     /^config interface/ {
                         name = $3; gsub(/'\''/, "", name)
-                        if (name ~ /^wg[0-9]/) { printing=1; print; next } else { printing=0 }
+                        # ★ 必須錨定結尾 ^wg[0-9]+$ —— 與上方刪除端條件一致。
+                        #   舊寫法 /^wg[0-9]/ 會連 wg8ts 一起收進來, 但刪除端不刪它,
+                        #   於是每次同步 append 一份 → 無限累積(見上方註解)。
+                        if (name ~ /^wg[0-9]+$/) { printing=1; print; next } else { printing=0 }
                     }
                     /^config wireguard_wg[0-9]/ {
                         type = $2
