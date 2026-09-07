@@ -52,19 +52,56 @@ command -v smartctl >/dev/null 2>&1 || exit 0
 #     狀態, 對這個 USB 外接盒仍可能觸發喚醒(眉角七已證實其電源狀態回報
 #     不可信)。唯一零風險的做法是「完全不碰碟」——
 #     改讀 /proc/diskstats 的累計 I/O, 純 kernel 計數器, 不產生任何裝置存取。
-#   邏輯: 取樣 IDLE_PROBE 秒, 期間 I/O 完全沒動 = 碟閒置(很可能已 spin down
-#         或即將 spin down) -> 靜默退出, 讓 hd-idle 的計時器繼續累積。
+#   ⚠️ 眉角九: 不能只看「這 10 秒有沒有 I/O」—— 那只證明取樣窗內是靜的,
+#     不代表碟真的已經 spin down。SMB 傳檔、minidlna 增量索引都是一陣一陣
+#     的存取, 探測窗剛好落在兩批之間的空檔就會誤判成閒置而漏推(碟其實醒著)。
+#     ★ 正確判準是「距離上次 I/O 過了多久」, 要比 hd-idle 的門檻久才算真閒置。
+#       diskstats 沒有 last-I/O 時間欄位(實測 20 欄都沒有), 只能自己記:
+#       用狀態檔存下「上次看到 I/O 變動時的計數器值 + 當時的 uptime」,
+#       每輪比對計數器有沒有變, 沒變才累積閒置時間。
+#     ⚠️ 狀態檔放 /tmp(tmpfs) —— 絕不能放碟上, 否則每輪寫檔自己就把碟叫醒了。
+#     ⚠️ 用 /proc/uptime 而非 date +%s 當時鐘: 免受 NTP 校時跳動影響。
 #   ⚠️ 注意 diskstats 要抓「整顆碟」的列(sda)而非分割(sda1), 且欄位是
 #     第6欄=讀磁區 第10欄=寫磁區 —— 不是第3/7欄(那是完成次數, 曾誤用過)。
 IDLE_PROBE=10
+# 需要連續安靜多久才算真閒置。取 hd-idle 門檻(-i 1200)再加緩衝,
+# 確保「腳本認定閒置」永遠發生在「碟已 spin down」之後。
+IDLE_THRESHOLD=$(uci -q get hd-idle.@hd-idle[0].idle_time_interval 2>/dev/null)
+case "$IDLE_THRESHOLD" in
+    ''|*[!0-9]*) IDLE_THRESHOLD=1320 ;;                 # 查不到就用 22 分鐘
+    *) IDLE_THRESHOLD=$(( IDLE_THRESHOLD * 60 + 120 )) ;;  # 分鐘 -> 秒, +2分緩衝
+esac
+STATE_FILE="/tmp/.push-hddsmart.iostate"
+
 _dname=$(echo "$DISK" | sed 's|^/dev/||')
 # 存三欄位快照(讀磁區/寫磁區/io_ms), 後面算忙碌率時直接沿用這個起點
 _iostat1=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
 _i1=$(echo "$_iostat1" | awk '{print $1+$2}')
 sleep "$IDLE_PROBE"
 _i2=$(awk -v d="$_dname" '$3==d {print $6+$10; exit}' /proc/diskstats 2>/dev/null)
-if [ -n "$_i1" ] && [ -n "$_i2" ] && [ "$_i1" = "$_i2" ]; then
-    exit 0
+_now=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+
+# 讀上輪狀態: "<計數器值> <當時 uptime>"
+_prev_io=""; _prev_t=""
+if [ -f "$STATE_FILE" ]; then
+    read -r _prev_io _prev_t < "$STATE_FILE" 2>/dev/null
+fi
+
+if [ -z "$_i2" ] || [ -z "$_now" ]; then
+    :                                    # 讀不到 diskstats, 不做閒置判斷
+elif [ "$_i1" != "$_i2" ] || [ "$_i2" != "$_prev_io" ]; then
+    # 探測窗內有 I/O, 或與上輪相比計數器有變 -> 碟是活的, 重設閒置起點
+    echo "$_i2 $_now" > "$STATE_FILE"
+else
+    # 計數器與上輪完全相同 -> 從 _prev_t 起一直是靜的
+    case "$_prev_t" in
+        ''|*[!0-9]*) echo "$_i2 $_now" > "$STATE_FILE" ;;   # 狀態檔壞了, 重來
+        *)
+            if [ "$(( _now - _prev_t ))" -ge "$IDLE_THRESHOLD" ]; then
+                exit 0                   # 靜夠久了, 碟應已 spin down -> 別碰它
+            fi
+            ;;
+    esac
 fi
 
 # --- 讀 SMART (-n standby: 碟在休眠就跳過, 不吵醒它) ---
