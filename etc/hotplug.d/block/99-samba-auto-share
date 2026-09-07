@@ -134,23 +134,71 @@ if [ "$ACTION" = "add" ]; then
     cleanup_all_stale_shares
 
     # 防止重複新增
+    # ⚠️ 這裡原本是 exit 0, 已改為 if/else 不提早離開 —— samba share 設定是
+    #    持久化的(在 flash), 每次重開機掛載都會走進「已存在」這條路。原本
+    #    exit 0 會讓後面所有邏輯(hd-idle 代號同步、minidlna 重載)完全不執行,
+    #    偏偏重開機正是最需要它們的時機。改成 if/else 讓流程一定走到底。
     if uci show $SAMBA_CONFIG | grep -q "path='$SHARE_PATH'"; then
-        logger "Samba Hotplug (ADD): Share already exists. Skipping add."
-        exit 0
+        logger "Samba Hotplug (ADD): Share already exists. Skipping share creation."
+    else
+        # 新增 Samba share
+        uci add $SAMBA_CONFIG sambashare
+        uci set $SAMBA_CONFIG.@sambashare[-1].name="$SHARE_NAME_SAFE"
+        uci set $SAMBA_CONFIG.@sambashare[-1].path="$SHARE_PATH"
+        uci set $SAMBA_CONFIG.@sambashare[-1].read_only='no'
+        uci set $SAMBA_CONFIG.@sambashare[-1].guest_ok='yes'
+        uci set $SAMBA_CONFIG.@sambashare[-1].create_mask='0777'
+        uci set $SAMBA_CONFIG.@sambashare[-1].dir_mask='0777'
+        uci commit $SAMBA_CONFIG
+
+        /etc/init.d/$SAMBA_SERVICE restart
+        logger "Samba Hotplug (ADD): Created share and service restarted."
     fi
 
-    # 新增 Samba share
-    uci add $SAMBA_CONFIG sambashare
-    uci set $SAMBA_CONFIG.@sambashare[-1].name="$SHARE_NAME_SAFE"
-    uci set $SAMBA_CONFIG.@sambashare[-1].path="$SHARE_PATH"
-    uci set $SAMBA_CONFIG.@sambashare[-1].read_only='no'
-    uci set $SAMBA_CONFIG.@sambashare[-1].guest_ok='yes'
-    uci set $SAMBA_CONFIG.@sambashare[-1].create_mask='0777'
-    uci set $SAMBA_CONFIG.@sambashare[-1].dir_mask='0777'
-    uci commit $SAMBA_CONFIG
+    # =====================================================================
+    # 掛載後的周邊服務同步 (hd-idle / minidlna)
+    #
+    # ⚠️ 兩者都是選配, 沒安裝的機器要整段跳過 —— 本腳本是多台路由器共用,
+    #    只有接 USB 碟的那台(.8 RAX3000Z)裝了 hd-idle 與 minidlna。
+    #    判斷方式一律「先驗 init script 存在」再動作, 不能直接呼叫。
+    # =====================================================================
 
-    /etc/init.d/$SAMBA_SERVICE restart
-    logger "Samba Hotplug (ADD): Created share and service restarted."
+    # --- hd-idle: 同步硬碟代號 ---
+    # ⚠️ 真兇紀錄 2026-09-07: 路由器重開後碟從 sdb 變成 sda, 但 hd-idle 的
+    #    uci disk 仍寫死 'sdb' -> 盯著不存在的裝置, 碟永遠不會被 spin down。
+    #    /dev/disk/by-id 在此韌體是空的, 且 hd-idle 只吃裝置名不吃 UUID,
+    #    ★ 故只能在每次掛載時從 /proc/mounts 反推當下代號並回寫 uci。
+    if [ -x /etc/init.d/hd-idle ]; then
+        HDI_DISK=$(echo "$DEVICENAME" | sed 's/[0-9]*$//')   # sda1 -> sda
+        HDI_CUR=$(uci -q get hd-idle.@hd-idle[0].disk)
+        if [ -n "$HDI_DISK" ] && [ "$HDI_CUR" != "$HDI_DISK" ]; then
+            uci set hd-idle.@hd-idle[0].disk="$HDI_DISK"
+            uci commit hd-idle
+            /etc/init.d/hd-idle restart >/dev/null 2>&1
+            logger "Samba Hotplug (ADD): hd-idle disk ${HDI_CUR:-unset} -> $HDI_DISK, restarted."
+        else
+            logger "Samba Hotplug (ADD): hd-idle disk already $HDI_DISK, no change."
+        fi
+    fi
+
+    # --- minidlna: 重啟以載入既有 db ---
+    # ⚠️ 真兇紀錄 2026-09-07: 重開機後 minidlna 狀態頁顯示 0/0, 但 files.db
+    #    (350MB / 20 萬筆) 完好無損 —— 它開機時比碟先啟動, media_dir 還沒
+    #    掛上所以載不到, 之後也不會自己重試。手動 restart 就讀回全部索引。
+    #    ★ 故在碟掛好之後重啟一次; 這是「重讀」不是「重掃」, 不會重建 db。
+    if [ -x /etc/init.d/minidlna ] && [ "$(uci -q get minidlna.config.enabled)" = "1" ]; then
+        MDL_DIR=$(uci -q get minidlna.config.media_dir)
+        # 只在 media_dir 確實落在這次掛載的路徑底下才重啟, 免得插別的碟也重啟
+        case "$MDL_DIR" in
+            "$SHARE_PATH"|"$SHARE_PATH"/*)
+                /etc/init.d/minidlna restart >/dev/null 2>&1
+                logger "Samba Hotplug (ADD): minidlna restarted to reload db for $SHARE_PATH."
+                ;;
+            *)
+                logger "Samba Hotplug (ADD): minidlna media_dir ($MDL_DIR) not under $SHARE_PATH, skip restart."
+                ;;
+        esac
+    fi
 fi
 
 # =========================================================
