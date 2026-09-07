@@ -10,6 +10,13 @@
 #    不加的話 smartctl 認不出是 ATA 裝置, 所有屬性都讀不到。
 # ⚠️ 眉角四: Reallocated_Sector_Ct 這類屬性要抓 RAW_VALUE(第10欄)而非 VALUE(第4欄)。
 #    VALUE 是正規化後的分數(100=好), RAW_VALUE 才是實際壞軌數量。
+# ⚠️ 眉角五: 碟「該休眠卻一直 active/idle」時, 元兇幾乎都是有程序開著碟上的檔案。
+#    2026-09-07 實測踩過兩次: (1) Windows 檔案總管開著資料夾 -> smbd 持有 fd
+#    並持續輪詢目錄變更 (2) minidlnad 初次索引 20 萬檔, 計數停了但仍在 D state
+#    寫 files.db (60 秒寫 20MB)。兩次都得上機 for /proc/*/fd 才追得出來。
+#    ★ 故推播直接帶上「誰開著碟上的檔案」, 省掉每次登入追查。
+#    ⚠️ busybox 無 lsof, 只能掃 /proc/[0-9]*/fd/ 的 symlink。同程序常有多個 fd
+#      指向同一目錄, 用 sort -u 收斂; 已刪除檔案的 symlink 會帶 " (deleted)" 尾綴。
 
 # 全域 cron 排隊鎖
 . /etc/myscript/lock-handler.sh
@@ -50,7 +57,6 @@ health=$(echo "$OUT" | sed -n 's/^SMART overall-health self-assessment test resu
 
 # 194 溫度: RAW 可能是 "50 (Min/Max 17/59)", 只取第一個數字
 temp=$(echo "$OUT" | awk '$1==194 {print $10; exit}')
-tmin_max=$(echo "$OUT" | sed -n 's/.*Min\/Max \([0-9]*\/[0-9]*\).*/\1/p' | head -1)
 
 poh=$(smart_raw 9)      # Power_On_Hours
 realloc=$(smart_raw 5)  # Reallocated_Sector_Ct
@@ -65,6 +71,47 @@ poh_y=""
 
 # 容量使用率
 usage=$(df -h "$MNT" 2>/dev/null | awk 'NR==2{print $5" ("$4" free)"}')
+
+# --- I/O 忙碌率 + 讀寫速率 (取樣 10 秒) ---
+# /proc/diskstats 第 13 欄(io_ms)是「花在 I/O 上的毫秒數」, 兩次相減 / 取樣毫秒
+# = 忙碌率, 等同 iostat 的 %util。第 6/10 欄是累計讀/寫磁區 (512 bytes/磁區)。
+# ⚠️ busybox 無 iostat, 只能自己算; 碟休眠時本段不會執行(前面已 exit)。
+_dname=$(echo "$DISK" | sed 's|^/dev/||')
+_s1=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
+_iowait=10
+sleep "$_iowait"
+_s2=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
+io_stat=""
+if [ -n "$_s1" ] && [ -n "$_s2" ]; then
+    io_stat=$(echo "$_s1|$_s2" | awk -v secs="$_iowait" -F'|' '{
+        split($1, a, " "); split($2, b, " ")
+        util = (b[3] - a[3]) / (secs * 1000) * 100
+        if (util > 100) util = 100
+        rd = (b[1] - a[1]) * 512 / 1024 / secs
+        wr = (b[2] - a[2]) * 512 / 1024 / secs
+        printf "%.0f%%", util
+        if (rd >= 1024 || wr >= 1024)
+            printf "(R%.1f/W%.1f MB/s)", rd/1024, wr/1024
+        else if (rd >= 1 || wr >= 1)
+            printf "(R%.0f/W%.0f KB/s)", rd, wr
+    }')
+fi
+
+# --- 誰開著碟上的檔案 (碟不休眠時的元兇, 見眉角五) ---
+holders=""
+for _p in /proc/[0-9]*; do
+    _pid=${_p#/proc/}
+    case "$_pid" in *[!0-9]*) continue ;; esac
+    _hit=$(ls -l "$_p/fd/" 2>/dev/null | grep -c "$MNT")
+    [ "${_hit:-0}" -gt 0 ] 2>/dev/null || continue
+    _cmd=$(cat "$_p/comm" 2>/dev/null)
+    # 去掉掛載點前綴讓訊息短一點; 同程序多個 fd 指同目錄時去重, 最多列 3 個
+    _files=$(ls -l "$_p/fd/" 2>/dev/null | sed -n "s|.*-> ${MNT}/*||p" \
+             | sed 's/ (deleted)$//' | grep -v '^$' | sort -u | head -3 \
+             | tr '\n' ',' | sed 's/,$//')
+    [ -z "$_files" ] && _files="${_hit}個fd"
+    holders="${holders} ${_cmd}[${_files}]"
+done
 
 # --- 組警示標記 ---
 # 溫度 >=50 提醒, >=55 警告 (MG05ACA800E 規格上限 55)
@@ -82,12 +129,17 @@ warn=""
 
 # --- 推播 ---
 msg="HDD ${health} | ${tflag}${temp}°C"
-[ -n "$tmin_max" ] && msg="${msg}(${tmin_max})"
 msg="${msg} | 通電:${poh}h"
 [ -n "$poh_y" ] && msg="${msg}(${poh_y}年)"
 msg="${msg} | 壞軌:${realloc} 待處理:${pending} 無法修復:${uncorr}"
 msg="${msg} | CRC:${crc} 啟停:${ss}"
 [ -n "$usage" ] && msg="${msg} | 用量:${usage}"
+[ -n "$io_stat" ] && msg="${msg} | 忙碌:${io_stat}"
+if [ -n "$holders" ]; then
+    msg="${msg} | 開檔:${holders}"
+else
+    msg="${msg} | 開檔:無"
+fi
 [ -n "$warn" ] && msg="${msg} |${warn}"
 
 push_notify "$msg"
