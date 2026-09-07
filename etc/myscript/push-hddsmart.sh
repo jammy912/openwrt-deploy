@@ -47,6 +47,18 @@ OUT=$(smartctl -A -H -n standby -d sat "$DISK" 2>/dev/null)
 echo "$OUT" | grep -qi "Device is in STANDBY" && exit 0
 [ -z "$OUT" ] && exit 0
 
+# ⚠️ 眉角六: 開機/重新插拔的空窗期會推出一整排空值。2026-09-07 實際收到:
+#   「HDD PASSED | °C | 通電:h | 壞軌: 待處理: ...」— 溫度/時數/壞軌全空,
+#   只有 df 和開檔清單有值。真兇: 路由器重開後碟從 sdb 變 sda, 舊的 /dev/sdb
+#   裝置節點還沒被清掉([ -b ] 過得了), 但 USB 已斷 -> smartctl 回
+#   "Smartctl open device: /dev/sdX [SAT] failed: No such device", 沒有任何屬性行。
+#   ★ 故要驗「真的讀到屬性了」而非只驗指令有輸出 — 用溫度是否為數字當哨兵,
+#     溫度讀不到就代表整批屬性都沒讀到, 推出去只會是一排冒號。
+_probe=$(echo "$OUT" | awk '$1==194 {print $10; exit}')
+case "$_probe" in
+    ''|*[!0-9]*) exit 0 ;;
+esac
+
 # --- 取值: RAW_VALUE 是第 10 欄 ---
 smart_raw() {
     echo "$OUT" | awk -v id="$1" '$1==id {print $10; exit}'
