@@ -1317,6 +1317,14 @@ dbg "完成: role=$NEW_ROLE $GW_TYPE IP=$FINAL_IP DHCP=$DHCP_ACTION changed=$CHA
 # 9. 最終狀態一致性檢查
 # =====================
 FIXUP=0
+# ⚠️ 推播要寫「這次修了什麼」, 不能只說「服務狀態已修正」——六種成因(default
+#    route/殘留 host route/WG/dnsmasq/WG 該停/pbr symlink)原本共用同一句樣板,
+#    收到推播完全看不出是哪一項, 還要 ssh 進來翻 logread 才知道。偏偏 tailscaled
+#    每分鐘洗掉整個 log buffer(實測 92 秒 856 行), 事後根本翻不到。
+#    ★ 故每個修正點都往 FIXUP_WHY 追加自己的原因, 最後一次帶進推播。
+# ⚠️ 用換行當分隔會被 push_notify 截斷, 這裡用「, 」串接。
+FIXUP_WHY=""
+add_fixup() { FIXUP=1; FIXUP_WHY="${FIXUP_WHY:+$FIXUP_WHY, }$1"; }
 if [ "$GW_TYPE" = "主gw" ]; then
     # 主 gw: default route 必須有 via 且 dev 為 WAN 的 l3_device，否則修正
     CUR_DEF_LINE=$(ip route show default 2>/dev/null | head -1)
@@ -1328,18 +1336,28 @@ if [ "$GW_TYPE" = "主gw" ]; then
        { [ "$CUR_DEF_DEV" != "$WAN_DEV" ] || [ "$CUR_DEF_VIA" != "$WAN_GW" ]; }; then
         ip route replace default via "$WAN_GW" dev "$WAN_DEV"
         log "fixup: default route ($CUR_DEF_LINE) → via $WAN_GW dev $WAN_DEV"
-        FIXUP=1
+        add_fixup "default route 原走 ${CUR_DEF_DEV:-無} 已改 via $WAN_GW dev $WAN_DEV"
     fi
     # 主 gw: 清除副gw 期間 wg ifup 把 endpoint host route 釘到 br-lan 的殘留
     # Why: 副gw default 走 192.168.1.1 dev br-lan,wg ifup resolve endpoint 時
     # 會跟著 default 釘 host route。即使 default 後來修回 wan,host route 仍指
     # br-lan 自迴圈 → 連外 wg handshake 永久失敗、network restart 無效、要 reboot 才修。
     # 這裡每輪主gw 都掃一次 (不依賴角色切換),確保 wg ifup 之後也能清。
+    # ⚠️ 這個 while 在 pipe 右側 = 子 shell, 裡面設 FIXUP/FIXUP_WHY 不會傳回父層
+    #    (原本寫 FIXUP=1 其實一直是無效的)。★ 故把清掉的路由寫進暫存檔再讀回。
+    _stale_f="/tmp/.auto-role.stale.$$"
+    : > "$_stale_f"
     ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
         | while read _stale; do
             ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
-                && { log "fixup: 清除殘留 endpoint host route: $_stale"; FIXUP=1; }
+                && { log "fixup: 清除殘留 endpoint host route: $_stale"; echo "$_stale" >> "$_stale_f"; }
         done
+    if [ -s "$_stale_f" ]; then
+        _stale_n=$(wc -l < "$_stale_f" | tr -d ' ')
+        _stale_list=$(head -3 "$_stale_f" | tr '\n' ' ' | sed 's/ $//')
+        add_fixup "清除殘留 host route ${_stale_n}筆 ($_stale_list)"
+    fi
+    rm -f "$_stale_f"
     # 主 gw: WG/dnsmasq/adguardhome 必須在跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -eq 0 ]; then
@@ -1348,29 +1366,32 @@ if [ "$GW_TYPE" = "主gw" ]; then
             [ -n "$WAN_OK" ] && break
             sleep 2
         done
-        wg_start; log "fixup: WG 未運行，已啟動 (WAN=$WAN_OK)"; FIXUP=1
+        wg_start; log "fixup: WG 未運行，已啟動 (WAN=$WAN_OK)"
+        add_fixup "WG 未運行已啟動 (WAN=${WAN_OK:-取不到})"
     fi
     if ! pgrep -x dnsmasq >/dev/null 2>&1; then
-        /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"; FIXUP=1
+        /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"
+        add_fixup "dnsmasq 未運行已重啟"
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
 else
     # 副 gw / client: WG/pbr/qosify/IOT 不該跑
     WG_UP=$(wg show 2>/dev/null | grep -c 'interface:')
     if [ "$WG_UP" -gt 0 ]; then
-        wg_stop; log "fixup: WG 不應運行，已停止"; FIXUP=1
+        wg_stop; log "fixup: WG 不應運行，已停止"
+        add_fixup "WG 不該在${GW_TYPE}跑, 已停止"
     fi
     # 確保 /var/run/pbr.dnsmasq 存在 (防 dangling symlink → dnsmasq crash)
     if [ -L /etc/dnsmasq.d/pbr ] && [ ! -f /var/run/pbr.dnsmasq ]; then
         touch /var/run/pbr.dnsmasq 2>/dev/null
         log "fixup: touch /var/run/pbr.dnsmasq (防 dnsmasq crash)"
-        FIXUP=1
+        add_fixup "補建 /var/run/pbr.dnsmasq (防 dnsmasq crash)"
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
     # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定, 函式自行 log)
     apply_iot_wifi
 fi
-[ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP 服務狀態已修正"
+[ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP | ${FIXUP_WHY:-未記錄原因}"
 
 # =====================
 # 10. usteer 確保正確註冊 hostapd
