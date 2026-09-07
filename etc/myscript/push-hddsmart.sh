@@ -6,8 +6,11 @@
 # ⚠️ 眉角二: smartctl 讀取會喚醒休眠中的硬碟。本機碟由韌體 APM=128 管休眠,
 #    每次讀 SMART 都吵醒它會讓 Start_Stop_Count 一直累加(機械磨損)。
 #    ★ 故一律加 -n standby: 碟在睡就跳過本輪, 不打擾。
-# ⚠️ 眉角三: 這顆 USB 外接盒(Ugreen RTL9210)必須用 -d sat 指定 SCSI-ATA 轉譯,
-#    不加的話 smartctl 認不出是 ATA 裝置, 所有屬性都讀不到。
+# ⚠️ 眉角三: USB 外接盒必須指定 -d 才讀得到 SMART。實測 Ugreen RTL9210
+#    (0x0bda:0x9201) 用 -d auto 會回 "Unknown USB bridge ... Please specify
+#    device type with the -d option", 一行屬性都拿不到; -d sat 才正常。
+#    ★ 換不同外接盒可能要 sat,12 / usbjmicron / usbsunplus, 故改成候選清單
+#      依序試, 第一個讀得到溫度(194)的就採用, 免得換盒子就得改 code。
 # ⚠️ 眉角四: Reallocated_Sector_Ct 這類屬性要抓 RAW_VALUE(第10欄)而非 VALUE(第4欄)。
 #    VALUE 是正規化後的分數(100=好), RAW_VALUE 才是實際壞軌數量。
 # ⚠️ 眉角五: 碟「該休眠卻一直 active/idle」時, 元兇幾乎都是有程序開著碟上的檔案。
@@ -41,23 +44,45 @@ DISK=$(echo "$DEV" | sed 's/[0-9]*$//')               # /dev/sdb
 command -v smartctl >/dev/null 2>&1 || exit 0
 
 # --- 讀 SMART (-n standby: 碟在休眠就跳過, 不吵醒它) ---
-OUT=$(smartctl -A -H -n standby -d sat "$DISK" 2>/dev/null)
-
-# 碟在休眠 -> 靜默退出 (exit code 2 且輸出含 STANDBY)
-echo "$OUT" | grep -qi "Device is in STANDBY" && exit 0
-[ -z "$OUT" ] && exit 0
-
+#
 # ⚠️ 眉角六: 開機/重新插拔的空窗期會推出一整排空值。2026-09-07 實際收到:
 #   「HDD PASSED | °C | 通電:h | 壞軌: 待處理: ...」— 溫度/時數/壞軌全空,
 #   只有 df 和開檔清單有值。真兇: 路由器重開後碟從 sdb 變 sda, 舊的 /dev/sdb
 #   裝置節點還沒被清掉([ -b ] 過得了), 但 USB 已斷 -> smartctl 回
 #   "Smartctl open device: /dev/sdX [SAT] failed: No such device", 沒有任何屬性行。
-#   ★ 故要驗「真的讀到屬性了」而非只驗指令有輸出 — 用溫度是否為數字當哨兵,
-#     溫度讀不到就代表整批屬性都沒讀到, 推出去只會是一排冒號。
-_probe=$(echo "$OUT" | awk '$1==194 {print $10; exit}')
-case "$_probe" in
-    ''|*[!0-9]*) exit 0 ;;
-esac
+#   ★ 故要驗「真的讀到屬性了」而非只驗指令有輸出 — 用溫度(194)是否為純數字
+#     當哨兵; 讀不到就代表整批屬性都沒讀到, 推出去只會是一排冒號。
+#   ★ 這個哨兵同時兼任「試出正確 -d 值」的判準(見眉角三)。
+# ⚠️ 眉角七: 判斷休眠不能靠輸出字串, 也不能靠 hdparm -C。兩條死路都實測過:
+#   (1) grep "Device is in STANDBY": 同一顆碟在 standby 下 smartctl 有時回
+#       "Device is in STANDBY mode, exit(2)", 有時回 exit 4 +
+#       "overall-health: UNKNOWN!" 完全沒提 STANDBY -> 會漏判。
+#   (2) hdparm -C: 對這個 USB 外接盒(RTL9210)回報不準 —— 實測用
+#       iflag=direct 確實讀了 20MB(diskstats 佐證 40960 磁區), hdparm -C
+#       仍固執回報 standby。橋接晶片沒正確轉譯 ATA 電源狀態查詢。
+#       若拿它當判準, 碟醒著也會被誤判成休眠而永遠不推播。
+#   ★ 唯一可靠的是 smartctl 自己: -n standby 命中休眠時 exit code 為 2 或 4
+#     且不會有任何屬性行; 讀得到溫度(194)就代表碟是醒的、-d 也對。
+#     這個判準同時兼任「試出正確 -d 值」(見眉角三)與「擋開機空窗期空值」。
+OUT=""
+_sawstandby=0
+for _dt in sat sat,12 usbjmicron usbsunplus auto; do
+    _try=$(smartctl -A -H -n standby -d "$_dt" "$DISK" 2>/dev/null)
+    _rc=$?
+    _probe=$(echo "$_try" | awk '$1==194 {print $10; exit}')
+    case "$_probe" in
+        [0-9]*)
+            OUT="$_try"
+            break
+            ;;
+    esac
+    # 讀不到屬性 + exit 2/4 = 碟在休眠(不是 -d 選錯), 記下來別再試其他 -d,
+    # 每多試一次都是一次喚醒風險
+    { [ "$_rc" = "2" ] || [ "$_rc" = "4" ]; } && { _sawstandby=1; break; }
+done
+[ "$_sawstandby" = "1" ] && exit 0
+# 全部候選都讀不到 -> 靜默退出(裝置消失、或這個外接盒不支援任何已知轉譯)
+[ -z "$OUT" ] && exit 0
 
 # --- 取值: RAW_VALUE 是第 10 欄 ---
 smart_raw() {
