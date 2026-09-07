@@ -623,7 +623,16 @@ if [ "$DHCP_ACTION" = "server" ]; then
     # 確保 dnsmasq 在跑
     DNSMASQ_OK=1
     [ "$CUR_DHCP_IGNORE" = "1" ] && DNSMASQ_OK=0
-    pgrep -x dnsmasq >/dev/null 2>&1 || DNSMASQ_OK=0
+    # ⚠️ 真兇紀錄 2026-09-07 (.12): 這裡原本用 `pgrep -x dnsmasq`, 但 busybox 的
+    #    pgrep -x 對「任何」行程都回空 (實測 netifd/rpcd/dnsmasq 全部找不到,
+    #    而不帶 -x 的 pgrep 與 pidof 都找得到) → DNSMASQ_OK 永遠 0 →
+    #    每分鐘 uci commit dhcp + dnsmasq restart + CHANGED=1 → 服務全開 →
+    #    hostapd reload all + 所有 wg ifdown/ifup → pbr 重啟、dbroute 被 ifup
+    #    連鎖觸發 (實測 2.5 分鐘 dbroute 48 次、pbr 9 次), log buffer 被洗光。
+    #    ★ 改用 pidof: 精確比對執行檔名、不會誤中自己的指令列、找不到時正確回非 0。
+    #    同坑本 repo 已踩過兩次 (auto-role.sh 的 usteerd 註解、ts-watchdog.sh:126),
+    #    唯獨這兩處 dnsmasq 漏改。
+    pidof dnsmasq >/dev/null 2>&1 || DNSMASQ_OK=0
     # 活著但沒綁 :67 = conf 缺 dhcp-range (dnsmasq 在 lan 未 ready 時重啟的 race,
     # init 會默默省略 dhcp-range; 重啟一次即重生正確 conf)
     netstat -uln 2>/dev/null | grep -q ':67 ' || DNSMASQ_OK=0
@@ -1369,7 +1378,8 @@ if [ "$GW_TYPE" = "主gw" ]; then
         wg_start; log "fixup: WG 未運行，已啟動 (WAN=$WAN_OK)"
         add_fixup "WG 未運行已啟動 (WAN=${WAN_OK:-取不到})"
     fi
-    if ! pgrep -x dnsmasq >/dev/null 2>&1; then
+    # ⚠️ 同上: busybox pgrep -x 一律回空, 必須用 pidof (詳見第 5 節的真兇紀錄)
+    if ! pidof dnsmasq >/dev/null 2>&1; then
         /etc/init.d/dnsmasq restart; log "fixup: dnsmasq 未運行，已重啟"
         add_fixup "dnsmasq 未運行已重啟"
     fi

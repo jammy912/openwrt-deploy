@@ -47,7 +47,9 @@ sed -i '/^[^#].*reboot/d' /etc/crontabs/root
 # 確保 cron 服務啟動 (pgrep 保護避免 race: 之前看過 rc.local start 觸發
 # 第二個 crond spawn, 兩 instance 搶 procd service slot 變成 "active with no instances")
 /etc/init.d/cron enable 2>/dev/null
-pgrep -x crond >/dev/null || /etc/init.d/cron start 2>/dev/null
+# ⚠️ 用 pidof 不用 pgrep -x: busybox 的 pgrep -x 對任何行程都回空(2026-09-07 實測),
+#    會讓這裡永遠誤判「crond 沒跑」而再 start 一次 —— 正是上面註解要防的雙 instance。
+pidof crond >/dev/null || /etc/init.d/cron start 2>/dev/null
 
 # 清掉 /etc/dnsmasq.d/ 下 dangling symlink (常見: pbr 沒 enable 時 -> /var/run/pbr.dnsmasq)
 # 否則 dnsmasq boot 時 confdir 掃到失效連結會 crash loop
