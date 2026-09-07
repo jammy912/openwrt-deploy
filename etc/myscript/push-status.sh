@@ -82,4 +82,35 @@ for iface in $(iw dev 2>/dev/null | awk '/Interface /{print $2}'); do
 done
 [ -z "$msg_radio" ] && msg_radio=" (no radio)"
 
-push_notify "CPU: ${cpu_temp}°C Load: ${load} | AgH: ${agh_mem}MB Free: ${free_mem}MB |${msg_radio}"
+# =====================================================================
+# WG 介面缺 metric 警示
+#
+# ⚠️ 真兇紀錄 2026-09-07 (.12 x60pro): wg8ts 是全機唯一沒設 metric 的 wg 介面。
+#    沒 metric 的 default route 預設 metric=0, 與 WAN 的 default 同級, 後插入
+#    者勝 —— 每次 pbr reload 重裝路由就把 WAN 擠掉, auto-role 每分鐘得修一次,
+#    推播「default route 原走 wg8ts 已改 via ... dev eth1」轟炸。
+#    對照組 wg2/wg3/wg4 同樣是 allowed_ips=0.0.0.0/0 + route_allowed_ips=1,
+#    但因 metric 102/103/111 永遠排在 WAN 之後, 從沒出過事。
+#    ★ 判定式: route_allowed_ips=1 且 allowed_ips 含 0.0.0.0/0 才會裝 default,
+#      只有這種介面缺 metric 才危險; 純點對點 (如 wg1 各 peer) 不必警示。
+# =====================================================================
+wg_nometric=""
+for _sec in $(uci show network 2>/dev/null \
+              | sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
+    [ "$(uci -q get network.$_sec.proto)" = "wireguard" ] || continue
+    [ -n "$(uci -q get network.$_sec.metric)" ] && continue
+    # 這個介面底下任一 peer 會裝 default 才算數
+    _risky=0
+    for _p in $(uci show network 2>/dev/null \
+                | sed -n "s/^network\.\([^.=]*\)=wireguard_${_sec}$/\1/p"); do
+        [ "$(uci -q get network.$_p.route_allowed_ips)" = "1" ] || continue
+        case " $(uci -q get network.$_p.allowed_ips) " in
+            *" 0.0.0.0/0 "*) _risky=1; break ;;
+        esac
+    done
+    [ "$_risky" = "1" ] && wg_nometric="${wg_nometric} ${_sec}"
+done
+msg_wg=""
+[ -n "$wg_nometric" ] && msg_wg=" | ⚠️WG缺metric:${wg_nometric} (會搶WAN default)"
+
+push_notify "CPU: ${cpu_temp}°C Load: ${load} | AgH: ${agh_mem}MB Free: ${free_mem}MB |${msg_radio}${msg_wg}"
