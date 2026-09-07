@@ -43,6 +43,30 @@ DISK=$(echo "$DEV" | sed 's/[0-9]*$//')               # /dev/sdb
 
 command -v smartctl >/dev/null 2>&1 || exit 0
 
+# --- 前置: 碟閒置就靜默跳過, 連 smartctl 都不要跑 ---
+#
+# ⚠️ 眉角八: 這是為了「高頻排程」而存在的。實測踩過: 本腳本掛 */10 而
+#   hd-idle 門檻是 20 分鐘 -> 每次 SMART 讀取都重置 hd-idle 計時器,
+#   碟永遠等不到 20 分鐘安靜期, 一輩子不休眠。 (真兇是 cron 間隔 < 休眠門檻)
+#   ★ smartctl -n standby 本來就該避免喚醒, 但它必須先「碰」裝置才知道
+#     狀態, 對這個 USB 外接盒仍可能觸發喚醒(眉角七已證實其電源狀態回報
+#     不可信)。唯一零風險的做法是「完全不碰碟」——
+#     改讀 /proc/diskstats 的累計 I/O, 純 kernel 計數器, 不產生任何裝置存取。
+#   邏輯: 取樣 IDLE_PROBE 秒, 期間 I/O 完全沒動 = 碟閒置(很可能已 spin down
+#         或即將 spin down) -> 靜默退出, 讓 hd-idle 的計時器繼續累積。
+#   ⚠️ 注意 diskstats 要抓「整顆碟」的列(sda)而非分割(sda1), 且欄位是
+#     第6欄=讀磁區 第10欄=寫磁區 —— 不是第3/7欄(那是完成次數, 曾誤用過)。
+IDLE_PROBE=10
+_dname=$(echo "$DISK" | sed 's|^/dev/||')
+# 存三欄位快照(讀磁區/寫磁區/io_ms), 後面算忙碌率時直接沿用這個起點
+_iostat1=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
+_i1=$(echo "$_iostat1" | awk '{print $1+$2}')
+sleep "$IDLE_PROBE"
+_i2=$(awk -v d="$_dname" '$3==d {print $6+$10; exit}' /proc/diskstats 2>/dev/null)
+if [ -n "$_i1" ] && [ -n "$_i2" ] && [ "$_i1" = "$_i2" ]; then
+    exit 0
+fi
+
 # --- 讀 SMART (-n standby: 碟在休眠就跳過, 不吵醒它) ---
 #
 # ⚠️ 眉角六: 開機/重新插拔的空窗期會推出一整排空值。2026-09-07 實際收到:
@@ -109,14 +133,14 @@ poh_y=""
 # 容量使用率
 usage=$(df -h "$MNT" 2>/dev/null | awk 'NR==2{print $5" ("$4" free)"}')
 
-# --- I/O 忙碌率 + 讀寫速率 (取樣 10 秒) ---
+# --- I/O 忙碌率 + 讀寫速率 ---
 # /proc/diskstats 第 13 欄(io_ms)是「花在 I/O 上的毫秒數」, 兩次相減 / 取樣毫秒
 # = 忙碌率, 等同 iostat 的 %util。第 6/10 欄是累計讀/寫磁區 (512 bytes/磁區)。
 # ⚠️ busybox 無 iostat, 只能自己算; 碟休眠時本段不會執行(前面已 exit)。
-_dname=$(echo "$DISK" | sed 's|^/dev/||')
-_s1=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
-_iowait=10
-sleep "$_iowait"
+# ★ 起點沿用眉角八那次閒置探測的第一筆($_iostat1), 不再另外 sleep ——
+#   否則腳本要睡 5+10 秒, 白白多佔全域鎖 10 秒。
+_iowait="$IDLE_PROBE"
+_s1="$_iostat1"
 _s2=$(awk -v d="$_dname" '$3==d {print $6, $10, $13; exit}' /proc/diskstats 2>/dev/null)
 io_stat=""
 if [ -n "$_s1" ] && [ -n "$_s2" ]; then
