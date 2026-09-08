@@ -537,13 +537,12 @@ if [ -f "$DEPLOY_DIR/etc/dropbear/authorized_keys" ]; then
 fi
 
 # hotplug.d
+# ⚠️ 2026-09-08: 原本逐檔列舉, 新增 98-label-dupcheck 時漏掉沒加 -> 新機佈署
+#    不會有那支腳本。★ 改成整個目錄複製, 以後加檔案不必再動 deploy.sh。
 mkdir -p /etc/hotplug.d/block /etc/hotplug.d/iface
-cp "$DEPLOY_DIR/etc/hotplug.d/block/99-samba-auto-share" /etc/hotplug.d/block/
-cp "$DEPLOY_DIR/etc/hotplug.d/iface/00-wan-trace" /etc/hotplug.d/iface/
-cp "$DEPLOY_DIR/etc/hotplug.d/iface/99-pbr-cust" /etc/hotplug.d/iface/
-chmod +x /etc/hotplug.d/block/99-samba-auto-share
-chmod +x /etc/hotplug.d/iface/00-wan-trace
-chmod +x /etc/hotplug.d/iface/99-pbr-cust
+cp -a "$DEPLOY_DIR/etc/hotplug.d/block/"* /etc/hotplug.d/block/ 2>/dev/null
+cp -a "$DEPLOY_DIR/etc/hotplug.d/iface/"* /etc/hotplug.d/iface/ 2>/dev/null
+chmod +x /etc/hotplug.d/block/* /etc/hotplug.d/iface/* 2>/dev/null
 echo "  ✅ hotplug.d"
 
 # init.d
