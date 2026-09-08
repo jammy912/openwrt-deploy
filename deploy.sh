@@ -482,6 +482,13 @@ if [ "$install_docker" = "y" ]; then
     docker_root="${docker_root:-/srv/docker}"
     mkdir -p "$docker_root"
     uci set dockerd.globals.data_root="$docker_root"
+    # ⚠️ 真兇紀錄 2026-09-08 (.4): dockerd 預設 blocked_interfaces='wan' 會產生一條
+    #    無條件 REJECT: iifname "eth1" oifname "docker0" -j REJECT —— 它連「容器自己
+    #    發起的連線的回程封包」也一起擋掉, 容器對外 100% 掉包(實測 ping 兩下該規則
+    #    計數器就跳 2 packets, 這是抓到真兇的證明)。
+    #    ★ 補 conntrack 例外: WAN 仍無法主動連進容器(安全性不變), 但回程放行。
+    #    這行在 /etc/config/dockerd 原本就有, 只是被註解掉。
+    uci set dockerd.firewall.extra_iptables_args='--match conntrack ! --ctstate RELATED,ESTABLISHED'
     uci commit dockerd
     echo "  ✅ Docker 根目錄: $docker_root"
 fi
@@ -675,6 +682,12 @@ if ! zone_exists docker; then
     uci set firewall.@zone[-1].forward='ACCEPT'
     uci add_list firewall.@zone[-1].network='docker'
 fi
+# ⚠️ 真兇紀錄 2026-09-08 (.4 RAX3000M): zone 的 forward='ACCEPT' 在 fw4 裡
+#    只管 docker0→docker0「自己人」, 跨 zone 出去要靠 forwarding 規則。
+#    原本只建 zone 沒建 forwarding → 容器封包跳進 forward_docker 後只 jump
+#    accept_to_docker, 接著掉到 forward 鏈的 policy drop → 容器對外 100% 掉包。
+#    ★ 故意放在 if 外面: 已經有 zone 的舊機器(.4 就是)才補得到這條。
+fwd_exists docker wan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='docker'; uci set firewall.@forwarding[-1].dest='wan'; }
 
 # --- WireGuard port redirect + rules ---
 # wg1 (port 51820)
