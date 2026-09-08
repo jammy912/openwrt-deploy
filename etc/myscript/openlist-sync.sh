@@ -4,7 +4,11 @@
 #
 # 用法:
 #   openlist-sync.sh                      # 預設: /夸克網盤/来自：分享 → Video
-#   openlist-sync.sh "<遠端目錄>" "<本地目錄>"
+#   openlist-sync.sh "<遠端目錄>" "<本地目錄>" "<暫存目錄>"
+#   STAGE_DIR="" openlist-sync.sh ...     # 不用暫存, 直接寫本地目錄
+#
+# 流程: 下載寫 SSD 暫存 → 完成搬到 8TB → 記 .ok。8TB 離線時檔案留在 SSD,
+#       下一輪自動補搬; .ok 讓「已抓過」的判定不依賴 8TB 在不在。
 #   openlist-sync.sh --dry-run            # 只列出要抓什麼, 不真的抓
 #   openlist-sync.sh --dry-run "<遠端目錄>"
 #   MAX_DEPTH=3 openlist-sync.sh ...      # 限制遞迴深度(預設 5)
@@ -42,14 +46,99 @@ OL_PASSFILE="/etc/myscript/.secrets/openlist.pass"
 REMOTE_DIR="${1:-/夸克網盤/来自：分享}"
 LOCAL_DIR="${2:-/srv/share/USB/1_42_6-25556/Video}"
 
+# 暫存區(第 3 參數): 下載寫這裡, 完成才搬到 LOCAL_DIR。
+# ⚠️ 為什麼要暫存: (1) 8TB 機械碟已通電 4.1 年 + 72 壞軌, 少讓它做長時間零碎
+#    追加寫入 (2) 未完成的 .part 不會混進正式媒體目錄 (3) 8TB 拔掉時仍能續傳。
+#    設成空字串 STAGE_DIR="" 即退回「直接下載到 LOCAL_DIR」的舊行為。
+STAGE_DIR="${3:-/srv/share/SSD/Video}"
+
+# 完成記錄目錄。★ 關鍵: 8TB 離線時, 光看 LOCAL_DIR 會誤判「這檔還沒下載」而
+# 重抓 29GB。故每個搬移完成的檔案留一個 <相對路徑>.ok(內容是檔案大小),
+# 判定「已完成」時先認 .ok, 認不到才看實際檔案。
+# ★ 放在 SSD 暫存區同一層(路徑對應), 記錄跟著碟走 —— 換台機器接上這顆 SSD
+#   也認得哪些抓過; 沒有暫存區時才退回 flash。
+if [ -n "$STAGE_DIR" ]; then
+    DONEDIR="${DONEDIR:-$STAGE_DIR/.done}"
+else
+    DONEDIR="${DONEDIR:-/etc/myscript/.openlist-sync/done}"
+fi
+
 DRY_RUN=0
-[ "$1" = "--dry-run" ] && { DRY_RUN=1; REMOTE_DIR="${2:-/夸克網盤/来自：分享}"; LOCAL_DIR="${3:-/srv/share/USB/1_42_6-25556/Video}"; }
+[ "$1" = "--dry-run" ] && { DRY_RUN=1; REMOTE_DIR="${2:-/夸克網盤/来自：分享}"; LOCAL_DIR="${3:-/srv/share/USB/1_42_6-25556/Video}"; STAGE_DIR="${4:-/srv/share/SSD/Video}"; }
 
 LOCKFILE="/tmp/openlist-sync.lock"
 STATEDIR="/etc/myscript/.openlist-sync"
 LOGTAG="openlist-sync"
 
 log() { logger -t "$LOGTAG" "$1"; echo "$1"; }
+
+# 目的地(8TB)是否真的掛載可寫。
+# ⚠️ 不能只看目錄在不在: 碟拔掉後掛載點目錄仍存在(空的), 寫進去會寫到根檔案
+#    系統的 overlay 把 flash 塞爆。★ 必須確認它是「掛載點」。
+dest_online() {
+    [ -d "$LOCAL_DIR" ] || return 1
+    # LOCAL_DIR 或其上層要出現在 /proc/mounts
+    _chk="$LOCAL_DIR"
+    while [ -n "$_chk" ] && [ "$_chk" != "/" ]; do
+        grep -q " $_chk " /proc/mounts 2>/dev/null && return 0
+        _chk="${_chk%/*}"
+    done
+    return 1
+}
+
+# 把暫存區的一個完成檔搬到目的地並記 .ok。
+# 回傳 0=已搬(或本來就沒暫存區), 1=目的地離線(留在暫存區)
+stage_move() {
+    _rel="$1"; _sz="$2"
+    _okf="$DONEDIR/$_rel.ok"
+    # 沒有暫存區 = 本來就直接寫目的地, 只要記 .ok
+    if [ -z "$STAGE_DIR" ]; then
+        mkdir -p "$(dirname "$_okf")" 2>/dev/null; echo "$_sz" > "$_okf"; return 0
+    fi
+    _src="$STAGE_DIR/$_rel"
+    [ -f "$_src" ] || return 0
+    if ! dest_online; then
+        log "8TB 未掛載, $_rel 暫留 SSD(下輪自動補搬)"
+        return 1
+    fi
+    mkdir -p "$(dirname "$LOCAL_DIR/$_rel")" 2>/dev/null
+    if [ -e "$LOCAL_DIR/$_rel" ]; then
+        log "目的地已有同名檔, 不覆寫; $_rel 留在 SSD"
+        return 1
+    fi
+    # ⚠️ 跨檔案系統 mv = 複製後刪除, 中途斷電會留半截檔。先搬成 .moving 再改名,
+    #    這樣目的地不會出現看似完整的半截檔。
+    if mv "$_src" "$LOCAL_DIR/$_rel.moving" 2>/dev/null; then
+        _msz=$(wc -c < "$LOCAL_DIR/$_rel.moving" 2>/dev/null | tr -d " " || echo 0)
+        if [ "$_msz" = "$_sz" ]; then
+            mv "$LOCAL_DIR/$_rel.moving" "$LOCAL_DIR/$_rel"
+            mkdir -p "$(dirname "$_okf")" 2>/dev/null; echo "$_sz" > "$_okf"
+            log "已歸檔到 8TB: $_rel"
+            return 0
+        fi
+        log "搬移後大小不符($_msz vs $_sz), 保留 .moving 供檢查"
+        return 1
+    fi
+    # 搬移失敗最常見的原因就是 8TB 滿了, 明講出來免得使用者以為是壞掉
+    _free=$(df -k "$LOCAL_DIR" 2>/dev/null | awk 'NR==2{print $4}')
+    log "搬移失敗: $_rel (8TB 剩餘 $(( ${_free:-0} / 1048576 ))GB)"
+    push_notify "OpenList: $(basename "$_rel") 歸檔失敗, 8TB 剩 $(( ${_free:-0} / 1048576 ))GB, 檔案留在 SSD"
+    return 1
+}
+
+# 開場先把暫存區裡「已完成但還沒搬」的檔補搬(上次 8TB 離線時留下的)
+stage_flush() {
+    [ -n "$STAGE_DIR" ] || return 0
+    [ -d "$STAGE_DIR" ] || return 0
+    dest_online || return 0
+    # ⚠️ 要排除 .done 目錄本身(裡面是 .ok 記錄, 不是待搬的影片)
+    find "$STAGE_DIR" -type f ! -name ".*.part" ! -name "*.moving" ! -name "*.ok" 2>/dev/null | while read -r _f; do
+        _r="${_f#$STAGE_DIR/}"
+        case "$_r" in .done/*) continue ;; esac
+        _s=$(wc -c < "$_f" 2>/dev/null | tr -d " ")
+        [ -n "$_s" ] && [ "$_s" -gt 0 ] && stage_move "$_r" "$_s"
+    done
+}
 
 # ---- 併發鎖 ----
 # ⚠️ 不能只用 [ -f ] 判斷: 上次被 kill 掉會留下死鎖檔。存 PID 並驗證行程還在。
@@ -65,7 +154,14 @@ fi
 echo $$ > "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT INT TERM
 
-mkdir -p "$LOCAL_DIR" "$STATEDIR" 2>/dev/null
+# ⚠️ 不要無條件 mkdir -p "$LOCAL_DIR": 8TB 拔掉時掛載點目錄還在(空的),
+#    建目錄+寫檔會落到根檔案系統的 overlay, 把 flash 塞爆。只在它真的掛著時建。
+dest_online && mkdir -p "$LOCAL_DIR" 2>/dev/null
+mkdir -p "$STATEDIR" 2>/dev/null
+[ -n "$STAGE_DIR" ] && mkdir -p "$STAGE_DIR" "$DONEDIR" 2>/dev/null
+
+# 補搬上次因 8TB 離線而留在 SSD 的完成檔
+stage_flush
 
 # ---- 取得密碼 ----
 if [ ! -f "$OL_PASSFILE" ]; then
@@ -169,11 +265,30 @@ while IFS="$(printf '\t')" read -r rsize rrel rabs; do
     esac
 
     TOTAL=$((TOTAL + 1))
+
+    # ★ 先認 .ok 記錄: 8TB 離線時 $_local 根本不存在, 沒有這關會誤判成「還沒
+    #   下載」而重抓 29GB。.ok 存在 flash, 不受外接碟插拔影響。
+    #   內容存遠端大小, 遠端換了新版(大小不同)時 .ok 自動失效會重抓。
+    _okf="$DONEDIR/$rrel.ok"
+    if [ -f "$_okf" ] && [ "$(cat "$_okf" 2>/dev/null)" = "$rsize" ]; then
+        DONE=$((DONE + 1))
+        continue
+    fi
+
+    # 暫存區已有完整檔(等著搬) 也算完成, 避免重抓
+    if [ -n "$STAGE_DIR" ] && [ -f "$STAGE_DIR/$rrel" ]; then
+        _ssize=$(wc -c < "$STAGE_DIR/$rrel" 2>/dev/null | tr -d " " || echo 0)
+        [ "$_ssize" = "$rsize" ] && { DONE=$((DONE + 1)); continue; }
+    fi
+
     _local="$LOCAL_DIR/$rrel"
     if [ -f "$_local" ]; then
         _lsize=$(wc -c < "$_local" 2>/dev/null | tr -d " " || echo 0)
         if [ "$_lsize" = "$rsize" ]; then
             DONE=$((DONE + 1))
+            # 補記 .ok(舊檔或手動放的檔第一次掃到時建立)
+            mkdir -p "$(dirname "$_okf")" 2>/dev/null
+            echo "$rsize" > "$_okf"
             continue
         fi
         # ⚠️ 同名但大小不符 = 使用者自己放的檔 or 別處來的檔。
@@ -191,17 +306,36 @@ rm -f "$_tmp"
 # ⚠️ 4K 一部就 30GB, 磁碟寫滿會連累 minidlna db 跟其他服務(都在同一顆碟)。
 #    ★ 剩餘空間不足「這個檔 + 5GB 緩衝」就停手並通知, 不要抓到爆碟。
 if [ -n "$PICK" ]; then
-    _availkb=$(df -k "$LOCAL_DIR" 2>/dev/null | awk 'NR==2{print $4}')
+    # ★ 要查「實際寫入的那顆碟」= 暫存區(SSD), 不是最終的 8TB。SSD 只有 440GB,
+    #   放不下 4K 大檔就會寫爆; 查錯碟會以為 6.2T 很夠而一路寫到滿。
+    _spacedir="${STAGE_DIR:-$LOCAL_DIR}"
+    _availkb=$(df -k "$_spacedir" 2>/dev/null | awk 'NR==2{print $4}')
     _needkb=$(( PICK_SIZE / 1024 + 5242880 ))
     if [ -n "$_availkb" ] && [ "$_availkb" -lt "$_needkb" ]; then
-        log "空間不足: 剩 $(( _availkb / 1048576 ))GB, 需要 $(( _needkb / 1048576 ))GB"
+        log "空間不足($_spacedir): 剩 $(( _availkb / 1048576 ))GB, 需要 $(( _needkb / 1048576 ))GB"
         if [ ! -f "$STATEDIR/.diskfull" ]; then
-            push_notify "OpenList同步: 磁碟空間不足, 已暫停下載 (剩 $(( _availkb / 1048576 ))GB)"
+            push_notify "OpenList同步: 暫存區空間不足已暫停 (剩 $(( _availkb / 1048576 ))GB, 需 $(( _needkb / 1048576 ))GB); 8TB 若離線請接回讓檔案歸檔"
             touch "$STATEDIR/.diskfull"
         fi
         exit 1
     fi
     rm -f "$STATEDIR/.diskfull"
+
+    # ★ 最終目的地(8TB)也要檢查: 暫存區夠不代表歸檔得下。8TB 滿了會讓檔案
+    #   全部卡在 440GB 的 SSD, 很快連暫存都寫不下 —— 要提早警告而不是等到卡死。
+    #   ⚠️ 只警告不中斷: 下載到 SSD 仍有意義(8TB 清出空間後會自動補搬)。
+    if [ -n "$STAGE_DIR" ] && dest_online; then
+        _dstkb=$(df -k "$LOCAL_DIR" 2>/dev/null | awk 'NR==2{print $4}')
+        if [ -n "$_dstkb" ] && [ "$_dstkb" -lt "$_needkb" ]; then
+            log "8TB 空間不足: 剩 $(( _dstkb / 1048576 ))GB, 需要 $(( _needkb / 1048576 ))GB"
+            if [ ! -f "$STATEDIR/.destfull" ]; then
+                push_notify "OpenList同步: ⚠️8TB 空間不足 (剩 $(( _dstkb / 1048576 ))GB, 需 $(( _needkb / 1048576 ))GB), 檔案將卡在 SSD 暫存區, 請清理"
+                touch "$STATEDIR/.destfull"
+            fi
+        else
+            rm -f "$STATEDIR/.destfull"
+        fi
+    fi
 fi
 
 if [ -z "$PICK" ]; then
@@ -234,9 +368,15 @@ fi
 
 # ---- 下載(續傳) ----
 # ⚠️ 遞迴模式下要還原目錄結構, 子目錄可能還不存在
+# 有暫存區就寫暫存區, 否則直接寫目的地(舊行為)
+if [ -n "$STAGE_DIR" ]; then
+    _workdir=$(dirname "$STAGE_DIR/$PICK_REL")
+else
+    _workdir=$(dirname "$LOCAL_DIR/$PICK_REL")
+fi
 _destdir=$(dirname "$LOCAL_DIR/$PICK_REL")
-mkdir -p "$_destdir" 2>/dev/null
-PART="$_destdir/.$(basename "$PICK_REL").part"
+mkdir -p "$_workdir" 2>/dev/null
+PART="$_workdir/.$(basename "$PICK_REL").part"
 _have=0
 [ -f "$PART" ] && _have=$(wc -c < "$PART" 2>/dev/null | tr -d " " || echo 0)
 log "開始下載: $PICK_REL ($(( PICK_SIZE / 1048576 ))MB), 已有 $(( _have / 1048576 ))MB, 進度 $DONE/$TOTAL"
@@ -265,9 +405,18 @@ if [ "$_now" = "$PICK_SIZE" ]; then
         push_notify "OpenList: $PICK_REL 已存在未覆寫, 新檔暫存為 .part"
         exit 0
     fi
-    mv "$PART" "$LOCAL_DIR/$PICK_REL"
-    log "完成: $PICK_REL ($(( PICK_SIZE / 1048576 ))MB)"
-    push_notify "OpenList: $(basename "$PICK_REL") 下載完成 ($(( PICK_SIZE / 1048576 ))MB), 進度 $((DONE + 1))/$TOTAL"
+    # .part → 暫存區的正式檔名(先落地, 再談搬不搬)
+    _staged="$_workdir/$(basename "$PICK_REL")"
+    mv "$PART" "$_staged"
+    log "下載完成: $PICK_REL ($(( PICK_SIZE / 1048576 ))MB)"
+
+    # 搬到 8TB。⚠️ 8TB 可能離線(拔碟/沒掛載), 這時「留在 SSD」不要搬、不要
+    #    報錯、更不要重下 —— 下一輪由 stage_flush 補搬。
+    if stage_move "$PICK_REL" "$PICK_SIZE"; then
+        push_notify "OpenList: $(basename "$PICK_REL") 完成並歸檔 ($(( PICK_SIZE / 1048576 ))MB), 進度 $((DONE + 1))/$TOTAL"
+    else
+        push_notify "OpenList: $(basename "$PICK_REL") 下載完成但 8TB 未掛載, 暫留 SSD ($(( PICK_SIZE / 1048576 ))MB)"
+    fi
 elif [ "$_now" -gt "$_have" ]; then
     log "部分完成: $PICK_REL $(( _now / 1048576 ))/$(( PICK_SIZE / 1048576 ))MB (curl rc=$_rc), 下輪續傳"
 else
