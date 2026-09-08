@@ -154,6 +154,20 @@ fi
 echo $$ > "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT INT TERM
 
+# ---- 沒裝 OpenList 的機器安靜跳過(要在建目錄之前!) ----
+# ⚠️ 2026-09-08: 這支 cron 由 Google Sheet 下發給整個機隊, 但只有 .4 跑
+#    OpenList。其他機器(實查 .1)每 10 分鐘寫一筆「找不到密碼檔」到 log,
+#    一天 144 筆純噪音, 而 log buffer 只有 128KB 很快被洗光。
+#    ★ 更糟的是原本判斷寫在下面, 上面的 mkdir 已經先跑過 —— 在沒有那些碟的
+#      機器上會把 /srv/share/USB/... 建在根檔案系統的 overlay 慢慢吃 flash。
+#      故判斷必須提到「所有 mkdir 與 stage_flush 之前」。
+#    ★ 沒有密碼檔 = 這台沒有 OpenList -> 安靜 exit 0, 不 log 不推播。
+#      真正「有裝但設定壞掉」由後面的登入失敗那段負責告警。
+if [ ! -f "$OL_PASSFILE" ]; then
+    [ "$DRY_RUN" = "1" ] && echo "(本機無 $OL_PASSFILE, 判定未安裝 OpenList, 正常執行時會安靜跳過)"
+    exit 0
+fi
+
 # ⚠️ 不要無條件 mkdir -p "$LOCAL_DIR": 8TB 拔掉時掛載點目錄還在(空的),
 #    建目錄+寫檔會落到根檔案系統的 overlay, 把 flash 塞爆。只在它真的掛著時建。
 dest_online && mkdir -p "$LOCAL_DIR" 2>/dev/null
@@ -163,11 +177,6 @@ mkdir -p "$STATEDIR" 2>/dev/null
 # 補搬上次因 8TB 離線而留在 SSD 的完成檔
 stage_flush
 
-# ---- 取得密碼 ----
-if [ ! -f "$OL_PASSFILE" ]; then
-    log "錯誤: 找不到密碼檔 $OL_PASSFILE"
-    exit 1
-fi
 OL_PASS=$(cat "$OL_PASSFILE")
 
 # ---- 登入 ----
