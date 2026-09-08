@@ -121,10 +121,26 @@ for _if in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
         [ -z "$_ip" ] && continue      # 連 IP 都沒有 = 還沒拿到位址, 屬另一種問題
         _name=$(mac2name "$_mac")
 
-        # ⚠️ 只算「真的出得去」的連線: 排除目的地是本網段/多播的
-        #    (DNS 查詢送給 gw 也算 192.168.x, 不能當作通)
-        _out=$(grep "src=$_ip " /proc/net/nf_conntrack 2>/dev/null \
-               | grep -vc "dst=192\.168\.\|dst=224\.\|dst=10\.\|dst=172\.1[6-9]\.\|dst=172\.2[0-9]\.\|dst=172\.3[01]\.")
+        # 只算「真的出得去」的連線。
+        # ⚠️ 2026-09-08 誤報真兇: conntrack 每一行同時含去程與回程, 回程那半段
+        #    的 dst 是本機 WAN IP(例如 dst=192.168.168.153)。原本用
+        #    `grep -v "dst=192.168."` 過濾, 結果把「去程明明連到 17.250.x.x」
+        #    的那整行也剔掉 -> 每台都算 0 條, 5 台同時誤報(連 switch1 都中)。
+        # ★ 正確作法: 只取「src=<client> 之後的第一個 dst=」(去程目的地),
+        #   再判斷它是不是私有位址。
+        _out=$(awk -v ip="src=$_ip" '
+            index($0, ip) {
+                for (i = 1; i <= NF; i++) {
+                    if ($i == ip) {
+                        d = $(i+1)                       # 去程的 dst=x.x.x.x
+                        sub(/^dst=/, "", d)
+                        if (d !~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|224\.|239\.|127\.|255\.)/)
+                            n++
+                        break
+                    }
+                }
+            }
+            END { print n+0 }' /proc/net/nf_conntrack 2>/dev/null)
         [ "${_out:-0}" -gt 0 ] && continue                   # 有對外連線 = 正常
 
         _stuck="${_stuck} ${_name:-$_mac}($_ip)"
