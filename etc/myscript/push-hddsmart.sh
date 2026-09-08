@@ -35,7 +35,10 @@ case "$1" in
 esac
 
 # 全域 cron 排隊鎖 (--show 不搶鎖)
-if [ "$SHOW_ONLY" = "0" ]; then
+# ⚠️ DISK_ONLY 非空 = 這是父行程叫起來的逐碟子行程, 鎖已經由父行程持有。
+#    子行程再搶會失敗而靜默 exit 0(一顆碟都不會報), 而且它的 trap 結束時
+#    會把父行程的鎖刪掉。★ 子行程一律不碰鎖。
+if [ "$SHOW_ONLY" = "0" ] && [ -z "$DISK_ONLY" ]; then
     . /etc/myscript/lock-handler.sh
     cron_global_lock 60 || exit 0
     trap 'rm -f /tmp/cron_global.lock' EXIT
@@ -44,10 +47,45 @@ fi
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 . /etc/myscript/push-notify.inc
 
-SHARE_BASE="/srv/share/USB"
+SHARE_BASE="/srv/share"
+
+# =====================================================================
+# 多碟支援
+#
+# ⚠️ 2026-09-08 (.4): 原本寫死 `grep " /srv/share/USB/" | head -1`, 只報第一顆。
+#    接上第二顆碟(SSD 掛在 /srv/share/SSD)後完全被忽略 —— 兩個原因: head -1
+#    只取一筆, 且 SHARE_BASE 寫死 USB 這層掃不到平行的 SSD 目錄。
+#    ★ 改法: 底下整段單碟流程完全不動(它有 6 個提早 exit 0 的路徑, 拆成函式
+#      會全部要改), 改成「外層挑出所有碟, 用 DISK_ONLY 環境變數逐顆重跑自己」。
+#      單碟邏輯零改動 = 風險最低。
+# ⚠️ 同一顆碟可能有多個分割都掛載, 要用整顆碟裝置名去重(sort -u), 否則會對
+#    同一顆碟重複讀 SMART(每次都是一次喚醒風險)。
+# =====================================================================
+if [ -z "$DISK_ONLY" ]; then
+    _disks=$(awk -v b="$SHARE_BASE/" '$2 ~ "^"b {print $1}' /proc/mounts 2>/dev/null \
+             | sed 's/[0-9]*$//' | sort -u)
+    if [ -z "$_disks" ]; then
+        [ "$SHOW_ONLY" = "1" ] && echo "(沒有掛載在 ${SHARE_BASE}/ 下的碟, 正常執行時會靜默跳過不推播)"
+        exit 0
+    fi
+    _n=0
+    for _d in $_disks; do _n=$((_n + 1)); done
+    # 只有一顆就直接往下跑(省一次 fork, 行為與改版前完全相同)
+    if [ "$_n" -gt 1 ]; then
+        for _d in $_disks; do
+            DISK_ONLY="$_d" "$0" "$@"
+        done
+        exit 0
+    fi
+fi
 
 # --- 前置檢查: 沒掛載就靜默退出 ---
-MOUNT_LINE=$(grep " ${SHARE_BASE}/" /proc/mounts 2>/dev/null | head -1)
+if [ -n "$DISK_ONLY" ]; then
+    # 逐顆模式: 找這顆碟的任一個掛載點
+    MOUNT_LINE=$(awk -v d="$DISK_ONLY" '$1 ~ "^"d {print; exit}' /proc/mounts 2>/dev/null)
+else
+    MOUNT_LINE=$(grep " ${SHARE_BASE}/" /proc/mounts 2>/dev/null | head -1)
+fi
 if [ -z "$MOUNT_LINE" ]; then
     # --show 時要講清楚為什麼沒東西, 否則使用者看到空輸出會以為腳本壞了
     [ "$SHOW_ONLY" = "1" ] && echo "(沒有掛載在 ${SHARE_BASE}/ 下的碟, 正常執行時會靜默跳過不推播)"
@@ -96,7 +134,9 @@ case "$IDLE_THRESHOLD" in
     ''|*[!0-9]*) IDLE_THRESHOLD=1320 ;;                 # 查不到就用 22 分鐘
     *) IDLE_THRESHOLD=$(( IDLE_THRESHOLD * 60 + 120 )) ;;  # 分鐘 -> 秒, +2分緩衝
 esac
-STATE_FILE="/tmp/.push-hddsmart.iostate"
+# ⚠️ 多碟必須各自一份: 共用一個檔會讓兩顆碟互相覆寫 I/O 閒置計時,
+#    結果不是誤判「碟在睡」而跳過健檢, 就是反過來吵醒本該休眠的碟。
+STATE_FILE="/tmp/.push-hddsmart.iostate$(echo "${DISK_ONLY:-single}" | tr '/' '_')"
 
 _dname=$(echo "$DISK" | sed 's|^/dev/||')
 # 存三欄位快照(讀磁區/寫磁區/io_ms), 後面算忙碌率時直接沿用這個起點
@@ -196,6 +236,14 @@ uncorr=$(smart_raw 198) # Offline_Uncorrectable
 crc=$(smart_raw 199)    # UDMA_CRC_Error_Count
 ss=$(smart_raw 4)       # Start_Stop_Count
 
+# ⚠️ SSD 沒有機械碟專屬的屬性(197 待處理/198 無法修復/4 啟停次數), 取不到會
+#    印成 "待處理: 無法修復: 啟停:" 這種空欄位, 看起來像壞掉。★ 補成 "-"。
+[ -z "$pending" ] && pending="-"
+[ -z "$uncorr" ]  && uncorr="-"
+[ -z "$ss" ]      && ss="-"
+[ -z "$crc" ]     && crc="-"
+[ -z "$realloc" ] && realloc="-"
+
 # 通電時數 -> 年 (取一位小數, busybox 無 bc, 用 awk)
 poh_y=""
 [ -n "$poh" ] && poh_y=$(awk -v h="$poh" 'BEGIN{printf "%.1f", h/24/365}')
@@ -259,7 +307,14 @@ warn=""
 [ "$health" != "PASSED" ] && warn="${warn} ❗健康:${health}"
 
 # --- 推播 ---
-msg="HDD ${health} | ${tflag}${temp}°C"
+# ⚠️ 多碟時每顆各推一則, 開頭要標明是哪顆碟否則分不出來。
+#    用掛載點最後一段當名字(8TB→"1_42_6-25556", SSD→"SSD"), 比 /dev/sdX 好認
+#    且不隨列舉順序變動。單碟時維持原本的 "HDD" 開頭不變。
+if [ -n "$DISK_ONLY" ]; then
+    msg="HDD[${MNT##*/}] ${health} | ${tflag}${temp}°C"
+else
+    msg="HDD ${health} | ${tflag}${temp}°C"
+fi
 msg="${msg} | 通電:${poh}h"
 [ -n "$poh_y" ] && msg="${msg}(${poh_y}年)"
 msg="${msg} | 壞軌:${realloc} 待處理:${pending} 無法修復:${uncorr}"
