@@ -22,27 +22,59 @@
 # ⚠️ 連續 N 輪都判定卡住才動作: 剛連上的裝置本來就還沒有連線紀錄,
 #    單輪判定會誤報。
 #
-# 用法:
-#   check-client-stuck.sh            # 正常執行(cron)
-#   check-client-stuck.sh --show     # 只印不推、不重開機
+# 用法(位置參數, 沿用本 repo 其他 cron 腳本的風格):
+#   check-client-stuck.sh [不活躍門檻ms] [連續幾輪] [幾台才算] [自動重開] [冷卻秒]
+#
+#   $1 不活躍門檻(ms)  預設 5000   inactive 超過這個就當作「在睡」不算卡住
+#   $2 連續幾輪        預設 3      配 cron */5 => 連續 15 分鐘才確認
+#   $3 幾台才算        預設 2      至少幾台同時卡住(單台多半是該裝置自己的問題)
+#   $4 自動重開        預設 0      1=達標時重開機, 0=只推播 ★重開會斷全家的網
+#   $5 重開冷卻(秒)    預設 14400  4 小時內不重複重開
+#
+# 範例:
+#   check-client-stuck.sh                              # 全用預設(只推播)
+#   check-client-stuck.sh "5000" "3" "2" "0"           # 同上, 明寫
+#   check-client-stuck.sh "5000" "6" "3" "1" "14400"   # 較保守+開啟自動重開
+#   check-client-stuck.sh --show                       # 只印到 console 不推播
+#   check-client-stuck.sh --show "999999999" "99" "1"  # 放寬門檻用來測判準
 # =====================================================================
 
 . /etc/myscript/push-notify.inc 2>/dev/null
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 
 SHOW_ONLY=0
-[ "$1" = "--show" ] && SHOW_ONLY=1
+if [ "$1" = "--show" ] || [ "$1" = "--dry-run" ]; then
+    SHOW_ONLY=1
+    shift                    # 把 --show 吃掉, 後面照樣是位置參數
+fi
 
 LOGTAG="client-stuck"
 STATEDIR="/etc/myscript/.client-stuck"
 LOCKFILE="/tmp/check-client-stuck.lock"
 
-# 判準門檻
-INACTIVE_MAX_MS="${INACTIVE_MAX_MS:-5000}"   # 超過這個就當作在睡, 不算卡住
-STRIKES_NEEDED="${STRIKES_NEEDED:-3}"        # 連續幾輪才確認(cron */5 => 15 分鐘)
-MIN_STUCK_CLIENTS="${MIN_STUCK_CLIENTS:-2}"  # ★ 至少幾台同時卡住才重開機
-REBOOT_COOLDOWN="${REBOOT_COOLDOWN:-14400}"  # 重開機冷卻 4 小時
-AUTO_REBOOT="${AUTO_REBOOT:-0}"              # ★ 預設只推播不重開, 要明確開啟
+# 判準門檻 (位置參數優先, 未帶則沿用環境變數, 再沒有才用預設)
+INACTIVE_MAX_MS="${1:-${INACTIVE_MAX_MS:-5000}}"
+STRIKES_NEEDED="${2:-${STRIKES_NEEDED:-3}}"
+MIN_STUCK_CLIENTS="${3:-${MIN_STUCK_CLIENTS:-2}}"
+AUTO_REBOOT="${4:-${AUTO_REBOOT:-0}}"
+REBOOT_COOLDOWN="${5:-${REBOOT_COOLDOWN:-14400}}"
+
+# ⚠️ 參數若被打錯成非數字, 用預設值頂替而不是讓 [ -gt ] 整個判斷失效
+for _v in INACTIVE_MAX_MS STRIKES_NEEDED MIN_STUCK_CLIENTS AUTO_REBOOT REBOOT_COOLDOWN; do
+    eval "_x=\$$_v"
+    case "$_x" in
+        ''|*[!0-9]*)
+            case "$_v" in
+                INACTIVE_MAX_MS)   eval "$_v=5000" ;;
+                STRIKES_NEEDED)    eval "$_v=3" ;;
+                MIN_STUCK_CLIENTS) eval "$_v=2" ;;
+                AUTO_REBOOT)       eval "$_v=0" ;;
+                REBOOT_COOLDOWN)   eval "$_v=14400" ;;
+            esac
+            logger -t client-stuck "參數 $_v='$_x' 非數字, 已改用預設值"
+            ;;
+    esac
+done
 
 log() { logger -t "$LOGTAG" "$1"; [ "$SHOW_ONLY" = "1" ] && echo "$1"; }
 
