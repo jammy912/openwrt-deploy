@@ -688,6 +688,16 @@ fi
 #    accept_to_docker, 接著掉到 forward 鏈的 policy drop → 容器對外 100% 掉包。
 #    ★ 故意放在 if 外面: 已經有 zone 的舊機器(.4 就是)才補得到這條。
 fwd_exists docker wan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='docker'; uci set firewall.@forwarding[-1].dest='wan'; }
+# ⚠️ docker→lan 也要: 只補 wan 的話容器出得去卻問不到 LAN 的 DNS。
+#    真兇紀錄 2026-09-08 (.4 跑 OpenList): 容器噴
+#    `dial tcp: lookup drive.quark.cn on 100.100.100.100:53: connection refused`——
+#    因為 Tailscale 接管了宿主 /etc/resolv.conf, Docker 照抄後容器拿到
+#    MagicDNS 的 100.100.100.100, 但那位址只在宿主 netns 有效, 容器連不到;
+#    改問 LAN 的 dnsmasq 又因為缺這條 forwarding 而 100% 掉包(實測 ping LAN gw
+#    全掉, 出 WAN 的 1.1.1.1 卻通 → 精準指向缺的是 docker→lan)。
+#    ⚠️ 容器要指到「LAN 上另一台」的位址(如主 gw 192.168.1.1)才算 forward;
+#      指到本機 LAN IP 屬 input 鏈, 這條 forwarding 管不到。
+fwd_exists docker lan || { uci add firewall forwarding >/dev/null; uci set firewall.@forwarding[-1].src='docker'; uci set firewall.@forwarding[-1].dest='lan'; }
 
 # --- WireGuard port redirect + rules ---
 # wg1 (port 51820)
