@@ -44,13 +44,13 @@ OL_PASSFILE="/etc/myscript/.secrets/openlist.pass"
 # 來源目錄(第 1 參數)。預設監看「来自：分享」——夸克把別人分享、你存進網盤的
 # 東西都放這層, 新片會自動落在這裡, 遞迴掃下去就會被抓到。
 REMOTE_DIR="${1:-/夸克網盤/来自：分享}"
-LOCAL_DIR="${2:-/srv/share/USB/1_42_6-25556/Video}"
+LOCAL_DIR="${2:-/srv/share/USB/8TB/Video}"
 
 # 暫存區(第 3 參數): 下載寫這裡, 完成才搬到 LOCAL_DIR。
 # ⚠️ 為什麼要暫存: (1) 8TB 機械碟已通電 4.1 年 + 72 壞軌, 少讓它做長時間零碎
 #    追加寫入 (2) 未完成的 .part 不會混進正式媒體目錄 (3) 8TB 拔掉時仍能續傳。
 #    設成空字串 STAGE_DIR="" 即退回「直接下載到 LOCAL_DIR」的舊行為。
-STAGE_DIR="${3:-/srv/share/SSD/Video}"
+STAGE_DIR="${3:-/srv/share/USB/SSD/Video}"
 
 # 完成記錄目錄。★ 關鍵: 8TB 離線時, 光看 LOCAL_DIR 會誤判「這檔還沒下載」而
 # 重抓 29GB。故每個搬移完成的檔案留一個 <相對路徑>.ok(內容是檔案大小),
@@ -64,7 +64,7 @@ else
 fi
 
 DRY_RUN=0
-[ "$1" = "--dry-run" ] && { DRY_RUN=1; REMOTE_DIR="${2:-/夸克網盤/来自：分享}"; LOCAL_DIR="${3:-/srv/share/USB/1_42_6-25556/Video}"; STAGE_DIR="${4:-/srv/share/SSD/Video}"; }
+[ "$1" = "--dry-run" ] && { DRY_RUN=1; REMOTE_DIR="${2:-/夸克網盤/来自：分享}"; LOCAL_DIR="${3:-/srv/share/USB/8TB/Video}"; STAGE_DIR="${4:-/srv/share/USB/SSD/Video}"; }
 
 LOCKFILE="/tmp/openlist-sync.lock"
 STATEDIR="/etc/myscript/.openlist-sync"
