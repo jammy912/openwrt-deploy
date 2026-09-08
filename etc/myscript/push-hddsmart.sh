@@ -285,10 +285,37 @@ for _p in /proc/[0-9]*; do
     [ "${_hit:-0}" -gt 0 ] 2>/dev/null || continue
     _cmd=$(cat "$_p/comm" 2>/dev/null)
     # 去掉掛載點前綴讓訊息短一點; 同程序多個 fd 指同目錄時去重, 最多列 3 個
-    _files=$(ls -l "$_p/fd/" 2>/dev/null | sed -n "s|.*-> ${MNT}/*||p" \
-             | sed 's/ (deleted)$//' | grep -v '^$' | sort -u | head -3 \
-             | tr '\n' ',' | sed 's/,$//')
-    [ -z "$_files" ] && _files="${_hit}個fd"
+    _flist=$(ls -l "$_p/fd/" 2>/dev/null | sed -n "s|.*-> ${MNT}/*||p" \
+             | sed 's/ (deleted)$//' | grep -v '^$' | sort -u | head -3)
+    if [ -z "$_flist" ]; then
+        _files="${_hit}個fd"
+    else
+        # ⚠️ 附上檔案大小: 看到「誰開著碟」還不夠, 知道多大才判斷得出是
+        #    大檔傳輸(正常會佔久)還是小檔輪詢(異常)。2026-09-08 加。
+        # ⚠️ busybox 沒有 stat! 取大小一律 `wc -c <`(本 repo 在 openlist-sync
+        #    踩過, stat -c %s 會靜默回空)。目錄沒有意義的大小, 跳過不標。
+        _files=""
+        _oldifs="$IFS"; IFS='
+'
+        for _f in $_flist; do
+            _full="$MNT/$_f"
+            if [ -f "$_full" ]; then
+                _sz=$(wc -c < "$_full" 2>/dev/null | tr -d ' ')
+                case "$_sz" in
+                    ''|*[!0-9]*) _tag="" ;;
+                    *) if   [ "$_sz" -ge 1099511627776 ]; then _tag=" $(( _sz / 1099511627776 ))TB"
+                       elif [ "$_sz" -ge 1073741824 ];    then _tag=" $(( _sz / 1073741824 ))GB"
+                       elif [ "$_sz" -ge 1048576 ];       then _tag=" $(( _sz / 1048576 ))MB"
+                       elif [ "$_sz" -ge 1024 ];          then _tag=" $(( _sz / 1024 ))KB"
+                       else _tag=" ${_sz}B"; fi ;;
+                esac
+            else
+                _tag=""          # 目錄或已消失的檔
+            fi
+            _files="${_files:+$_files,}${_f}${_tag}"
+        done
+        IFS="$_oldifs"
+    fi
     holders="${holders} ${_cmd}[${_files}]"
 done
 
