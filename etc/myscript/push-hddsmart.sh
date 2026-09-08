@@ -1,6 +1,10 @@
 #!/bin/sh
 # 推播外接硬碟 SMART 健康狀態: 溫度 / 壞軌 / 通電時數 / 傳輸錯誤
 #
+# 用法:
+#   push-hddsmart.sh            # 正常執行(推播)
+#   push-hddsmart.sh --show     # 只把推播內容印到 console, 不推播、不搶鎖
+#
 # ⚠️ 眉角一: 只在「碟有掛載成 share」時才推播。沒插碟或沒掛載時直接靜默退出,
 #    否則每次 cron 都會推一則「查不到硬碟」的垃圾訊息。
 # ⚠️ 眉角二: smartctl 讀取會喚醒休眠中的硬碟。本機碟由韌體 APM=128 管休眠,
@@ -21,10 +25,21 @@
 #    ⚠️ busybox 無 lsof, 只能掃 /proc/[0-9]*/fd/ 的 symlink。同程序常有多個 fd
 #      指向同一目錄, 用 sort -u 收斂; 已刪除檔案的 symlink 會帶 " (deleted)" 尾綴。
 
-# 全域 cron 排隊鎖
-. /etc/myscript/lock-handler.sh
-cron_global_lock 60 || exit 0
-trap 'rm -f /tmp/cron_global.lock' EXIT
+# --show / --dry-run: 只把推播內容印到 console, 不真的推。
+# ⚠️ 要在搶鎖「之前」判斷: cron 版每 5 分鐘跑一次, 手動執行常常搶不到全域鎖
+#    而靜默 exit 0, 看起來像沒反應(本 repo 在 auto-role 踩過同樣的坑)。
+#    ★ 故 --show 模式完全不碰鎖, 隨時可看。
+SHOW_ONLY=0
+case "$1" in
+    --show|--dry-run) SHOW_ONLY=1 ;;
+esac
+
+# 全域 cron 排隊鎖 (--show 不搶鎖)
+if [ "$SHOW_ONLY" = "0" ]; then
+    . /etc/myscript/lock-handler.sh
+    cron_global_lock 60 || exit 0
+    trap 'rm -f /tmp/cron_global.lock' EXIT
+fi
 
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 . /etc/myscript/push-notify.inc
@@ -33,15 +48,25 @@ SHARE_BASE="/srv/share/USB"
 
 # --- 前置檢查: 沒掛載就靜默退出 ---
 MOUNT_LINE=$(grep " ${SHARE_BASE}/" /proc/mounts 2>/dev/null | head -1)
-[ -z "$MOUNT_LINE" ] && exit 0
+if [ -z "$MOUNT_LINE" ]; then
+    # --show 時要講清楚為什麼沒東西, 否則使用者看到空輸出會以為腳本壞了
+    [ "$SHOW_ONLY" = "1" ] && echo "(沒有掛載在 ${SHARE_BASE}/ 下的碟, 正常執行時會靜默跳過不推播)"
+    exit 0
+fi
 
 DEV=$(echo "$MOUNT_LINE" | awk '{print $1}')          # /dev/sdb1
 MNT=$(echo "$MOUNT_LINE" | awk '{print $2}')          # /srv/share/USB/xxx
 # 分割 -> 整顆碟 (smartctl 要對整顆碟下, 不是分割)
 DISK=$(echo "$DEV" | sed 's/[0-9]*$//')               # /dev/sdb
-[ -b "$DISK" ] || exit 0
+if [ ! -b "$DISK" ]; then
+    [ "$SHOW_ONLY" = "1" ] && echo "(找不到整顆碟裝置 $DISK, 正常執行時會靜默跳過)"
+    exit 0
+fi
 
-command -v smartctl >/dev/null 2>&1 || exit 0
+if ! command -v smartctl >/dev/null 2>&1; then
+    [ "$SHOW_ONLY" = "1" ] && echo "(未安裝 smartctl, 正常執行時會靜默跳過)"
+    exit 0
+fi
 
 # --- 前置: 碟閒置就靜默跳過, 連 smartctl 都不要跑 ---
 #
@@ -98,7 +123,9 @@ else
         ''|*[!0-9]*) echo "$_i2 $_now" > "$STATE_FILE" ;;   # 狀態檔壞了, 重來
         *)
             if [ "$(( _now - _prev_t ))" -ge "$IDLE_THRESHOLD" ]; then
-                exit 0                   # 靜夠久了, 碟應已 spin down -> 別碰它
+                # 靜夠久了, 碟應已 spin down -> 別碰它
+                [ "$SHOW_ONLY" = "1" ] && echo "(碟閒置已達門檻, 判定已休眠; 為免吵醒它本輪不讀 SMART)"
+                exit 0
             fi
             ;;
     esac
@@ -141,9 +168,15 @@ for _dt in sat sat,12 usbjmicron usbsunplus auto; do
     # 每多試一次都是一次喚醒風險
     { [ "$_rc" = "2" ] || [ "$_rc" = "4" ]; } && { _sawstandby=1; break; }
 done
-[ "$_sawstandby" = "1" ] && exit 0
+if [ "$_sawstandby" = "1" ]; then
+    [ "$SHOW_ONLY" = "1" ] && echo "(碟目前在 standby 休眠中, 不喚醒它讀 SMART; 正常執行時會靜默跳過)"
+    exit 0
+fi
 # 全部候選都讀不到 -> 靜默退出(裝置消失、或這個外接盒不支援任何已知轉譯)
-[ -z "$OUT" ] && exit 0
+if [ -z "$OUT" ]; then
+    [ "$SHOW_ONLY" = "1" ] && echo "(所有 -d 候選都讀不到 SMART 屬性: 裝置消失或外接盒不支援)"
+    exit 0
+fi
 
 # --- 取值: RAW_VALUE 是第 10 欄 ---
 smart_raw() {
@@ -240,4 +273,8 @@ else
 fi
 [ -n "$warn" ] && msg="${msg} |${warn}"
 
-push_notify "$msg"
+if [ "$SHOW_ONLY" = "1" ]; then
+    echo "$msg"
+else
+    push_notify "$msg"
+fi
