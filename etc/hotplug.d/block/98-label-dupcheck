@@ -1,0 +1,65 @@
+#!/bin/sh
+# USB 碟掛載時偵測「LABEL 撞名 / 掛載點疊掛」並推播警示
+#
+# ⚠️ 真兇紀錄 2026-09-08 (.4): 接第二顆 USB 碟後發現它「等於沒接」——兩顆碟的
+#    LABEL 都是 "1.42.6-25556"(疑似同一套備份工具/外接盒韌體寫的版本號),
+#    而 OpenWrt 的自動掛載是用 /srv/share/USB/<LABEL> 算掛載點 → 同名就算出
+#    同一個路徑 → 兩顆疊在一起掛, 後掛的蓋住先掛的。
+#    ★ 最危險的不是當下, 是「重開後列舉順序可能對調」: 你看到的內容會整個
+#      換成另一顆碟, samba 分享、媒體目錄、下載目錄全部指到錯的地方。
+#    ⚠️ df 會騙人(報的是上層那顆的數字), 要用 findmnt 才看得出疊掛。
+#    根治法是改用 UUID 指定掛載(見 /etc/config/fstab), 但 auto_mount 仍開著,
+#    之後接的新碟還是會走 LABEL 老路 —— 故留這支在掛載當下就抓出來。
+
+[ "$ACTION" = "add" ] || exit 0
+
+. /etc/myscript/push-notify.inc 2>/dev/null
+PUSH_NAMES="${PUSH_NAMES:-admin}"
+
+LOGTAG="label-dupcheck"
+STATE="/tmp/.label-dupcheck.notified"
+
+# ⚠️ hotplug 是每個 block 事件都觸發(一顆碟可能連發數次), 且掛載未必已完成。
+#    ★ 延遲幾秒讓 mount 落定, 並用旗標檔避免同一次插拔連推好幾則。
+sleep 5
+
+# ---- 找出被掛了不只一次的掛載點(疊掛) ----
+DUP_MP=$(awk '$2 ~ /^\/srv\/share/ {print $2}' /proc/mounts | sort | uniq -d)
+
+# ---- 找出 LABEL 相同的分割(即使還沒疊掛, 也是未爆彈) ----
+# block info 每行形如: /dev/sdb1: UUID="..." LABEL="xxx" ... TYPE="ext4"
+DUP_LABEL=$(block info 2>/dev/null \
+    | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p' \
+    | sort | uniq -d)
+
+[ -z "$DUP_MP" ] && [ -z "$DUP_LABEL" ] && { rm -f "$STATE"; exit 0; }
+
+# 同一組問題只推一次(旗標內容 = 問題摘要, 變了才再推)
+SIG="${DUP_MP}|${DUP_LABEL}"
+[ "$(cat "$STATE" 2>/dev/null)" = "$SIG" ] && exit 0
+echo "$SIG" > "$STATE"
+
+MSG="⚠️USB碟異常"
+
+if [ -n "$DUP_MP" ]; then
+    for _mp in $DUP_MP; do
+        # 列出疊在同一掛載點的裝置
+        _devs=$(awk -v m="$_mp" '$2==m {printf "%s ", $1}' /proc/mounts)
+        logger -t "$LOGTAG" "疊掛: $_mp <- $_devs"
+        MSG="$MSG | 疊掛:${_mp##*/}(${_devs% })後掛蓋住先掛"
+    done
+fi
+
+if [ -n "$DUP_LABEL" ]; then
+    for _lb in $DUP_LABEL; do
+        _which=$(block info 2>/dev/null | grep "LABEL=\"$_lb\"" | cut -d: -f1 | tr '\n' ' ')
+        logger -t "$LOGTAG" "LABEL 撞名: '$_lb' <- $_which"
+        MSG="$MSG | LABEL撞名:'$_lb'(${_which% })"
+    done
+fi
+
+MSG="$MSG | 請改用 UUID 掛載或改名"
+logger -t "$LOGTAG" "$MSG"
+push_notify "$MSG"
+
+exit 0
