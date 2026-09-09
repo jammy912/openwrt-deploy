@@ -541,18 +541,40 @@ else
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr="$SELF_IP"
         uci set network.lan.netmask='255.255.255.0'
-        if [ "$NEW_ROLE" = "client" ]; then
-            # client 沒 WAN，走 .1
-            uci set network.lan.gateway='192.168.1.1'
-            uci set network.lan.dns='192.168.1.1'
-        else
-            # 副gw 有 WAN，不設 gateway（走自己的 WAN）
-            uci delete network.lan.gateway 2>/dev/null
-            uci delete network.lan.dns 2>/dev/null
-        fi
         log "LAN IP: $SELF_IP (非主, role=$NEW_ROLE)"
         NEED_RESTART_NET=1
         CHANGED=1
+    fi
+
+    # ★ gateway/dns 必須「獨立於 IP 有沒有變」來判斷!
+    # ⚠️ 真兇(實測 2026-09-09): 原本這段包在上面的 IP 變更條件裡。.4 的
+    #    SELF_IP 由 dhcp 靜態租約查出來就是 192.168.1.4, 跟現有 IP 相同 ->
+    #    條件為假 -> 整段被跳過 -> 副gw 切 client 時 gateway 從沒被設進去。
+    #    結果: 角色確實切成 client、DHCP 也正確宣告 .1 給下游, 但「.4 自己」
+    #    沒有 default route -> ping 8.8.8.8 回 "Network unreachable"。
+    #    角色會變而 IP 不會變是常態(拔掉 WAN 就是這種), 故兩者必須解耦。
+    CUR_LAN_GW=$(uci get network.lan.gateway 2>/dev/null)
+    if [ "$NEW_ROLE" = "client" ]; then
+        # client 沒 WAN，走 .1
+        if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
+            uci set network.lan.gateway='192.168.1.1'
+            uci set network.lan.dns='192.168.1.1'
+            log "client 角色: gateway/DNS 指向 192.168.1.1"
+            NEED_RESTART_NET=1
+            CHANGED=1
+        fi
+        # 設定寫進 uci 不等於路由表生效(NEED_RESTART_NET 只在 IP 也變時才會
+        # 走熱切換那段)。★ 直接補一條, 冪等。
+        ip route replace default via 192.168.1.1 dev br-lan 2>/dev/null
+    else
+        # 副gw 有 WAN，不設 gateway（走自己的 WAN）
+        if [ -n "$CUR_LAN_GW" ]; then
+            uci delete network.lan.gateway 2>/dev/null
+            uci delete network.lan.dns 2>/dev/null
+            log "副gw 角色: 清除 LAN gateway, 改走自己的 WAN"
+            NEED_RESTART_NET=1
+            CHANGED=1
+        fi
     fi
 fi
 uci commit network
