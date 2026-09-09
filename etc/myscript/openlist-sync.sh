@@ -553,7 +553,10 @@ _EPATH=$(jq -rn --arg s "$PICK" '$s|@uri')
 #      10 分鐘一輪的 cron 配 max-time 540(9分) + retry 1, 最壞約 9 分鐘結束,
 #      不會跨到下一輪。卡住就早點放手, 下輪帶新 sign 重來。
 #    -C - 讓下次接著抓, 慢速大檔靠多輪 cron 累積完成 —— 放棄不會損失進度。
-curl -sL -C - --max-time 540 --retry 1 --retry-delay 5 \
+#    ⚠️ --max-time 540 --retry 1 的最壞情況是 (540+5)x2 = 18 分鐘, 仍會跨過
+#      10 分鐘的 cron! ★ 要再加 --retry-max-time 給「重試總窗口」一個上限,
+#      這才是唯一能保證「單輪不跨到下一輪」的參數。
+curl -sL -C - --max-time 480 --retry 1 --retry-delay 5 --retry-max-time 540 \
     --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
     -o "$PART" \
     -H "Authorization: $TOKEN" \
