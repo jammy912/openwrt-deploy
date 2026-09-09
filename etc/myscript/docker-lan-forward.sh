@@ -27,7 +27,12 @@ WAN_IF="${2:-$(ip route show default 2>/dev/null | awk '/^default/{print $5; exi
 command -v iptables >/dev/null 2>&1 || exit 0
 iptables -L DOCKER-USER -n >/dev/null 2>&1 || exit 0   # 沒裝 Docker 就安靜跳過
 
-# 先刪再加, 避免 reload 時累積重複規則
+# 先刪再加, 避免 reload 時累積重複規則。
+# ⚠️ 綁在「任何 ifup」上, wg 頻繁 up/down 會很常跑 —— 故只在規則真的不在時
+#    才寫 log, 否則 syslog 會被洗版。
+_had=0
+iptables -C DOCKER-USER -i "$LAN_IF" -o "$WAN_IF" -j ACCEPT 2>/dev/null && _had=1
+
 iptables -D DOCKER-USER -i "$LAN_IF" -o "$WAN_IF" -j ACCEPT 2>/dev/null
 iptables -D DOCKER-USER -i "$WAN_IF" -o "$LAN_IF" \
     -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
@@ -35,4 +40,7 @@ iptables -D DOCKER-USER -i "$WAN_IF" -o "$LAN_IF" \
 iptables -I DOCKER-USER 1 -i "$LAN_IF" -o "$WAN_IF" -j ACCEPT
 iptables -I DOCKER-USER 1 -i "$WAN_IF" -o "$LAN_IF" \
     -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-logger -t docker-lan-forward "已放行 $LAN_IF -> $WAN_IF (修 Docker FORWARD policy DROP)"
+
+[ "$_had" = "0" ] && logger -t docker-lan-forward \
+    "已放行 $LAN_IF <-> $WAN_IF (修 Docker FORWARD policy DROP)"
+exit 0
