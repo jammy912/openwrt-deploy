@@ -1,0 +1,12 @@
+#!/bin/sh
+# WAN 起來後補上 DOCKER-USER 的 LAN->WAN 放行規則。
+# 原因見 /etc/myscript/docker-lan-forward.sh 開頭註解(Docker 的 iptables
+# FORWARD policy DROP 會吃掉 LAN client 的對外流量)。
+# ⚠️ firewall reload / docker 重啟都可能重建鏈, 所以綁在 iface 事件上重補。
+[ "$ACTION" = "ifup" ] || exit 0
+case "$INTERFACE" in
+    wan|wan6|wan_usb|lan) ;;
+    *) exit 0 ;;
+esac
+[ -x /etc/myscript/docker-lan-forward.sh ] || exit 0
+/etc/myscript/docker-lan-forward.sh >/dev/null 2>&1 &

@@ -489,6 +489,16 @@ if [ "$install_docker" = "y" ]; then
     #    ★ 補 conntrack 例外: WAN 仍無法主動連進容器(安全性不變), 但回程放行。
     #    這行在 /etc/config/dockerd 原本就有, 只是被註解掉。
     uci set dockerd.firewall.extra_iptables_args='--match conntrack ! --ctstate RELATED,ESTABLISHED'
+    # ⚠️ 真兇紀錄 2026-09-09 (.4 切成主 gw 後全部 client 斷網):
+    #    OpenWrt 用 nftables(fw4), Docker 用傳統 iptables, 兩套並存。fw4 的
+    #    accept_to_wan 已經 accept, 封包仍要再過 iptables 的 filter FORWARD,
+    #    而 Docker 把該鏈 policy 設成 DROP -> LAN->WAN 不匹配任何 DOCKER-*
+    #    規則 -> 全被丟掉(實測 policy DROP 38094 packets, 12M bytes)。
+    #    ★ 只有本機當主 gw 做 NAT 轉發時才發作(副 gw 不轉發、本機流量走
+    #      OUTPUT), 所以裝完當下不會發現, 角色切換才爆。
+    #    ★ 用 nft monitor trace 才查得出來, 詳見腳本開頭註解。
+    # ⚠️ 此時 /etc/myscript/ 還沒部署(在下一節), 故只記旗標, 部署完再套用
+    DOCKER_LAN_FWD_PENDING=1
     uci commit dockerd
     echo "  ✅ Docker 根目錄: $docker_root"
 fi
@@ -505,6 +515,13 @@ cp -a "$DEPLOY_DIR/etc/myscript/"*.sh /etc/myscript/ 2>/dev/null
 cp -a "$DEPLOY_DIR/etc/myscript/"*.inc /etc/myscript/ 2>/dev/null
 cp -a "$DEPLOY_DIR/etc/myscript/"*.nft /etc/myscript/ 2>/dev/null
 chmod +x /etc/myscript/*.sh
+
+# Docker 的 iptables FORWARD policy DROP 會吃掉 LAN client 的對外流量,
+# 腳本已部署到 /etc/myscript/, 這裡才套用(原因見該腳本開頭註解)。
+if [ "${DOCKER_LAN_FWD_PENDING:-0}" = "1" ] && [ -x /etc/myscript/docker-lan-forward.sh ]; then
+    /etc/myscript/docker-lan-forward.sh 2>/dev/null
+    echo "  ✅ 已放行 LAN->WAN (修 Docker FORWARD policy DROP)"
+fi
 
 # .secrets 目錄
 if [ -d "$DEPLOY_DIR/etc/myscript/.secrets" ]; then
