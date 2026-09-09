@@ -1163,6 +1163,18 @@ else
 fi
 sysctl -w vm.swappiness=200 >/dev/null 2>&1
 
+# --- 關閉 bridge netfilter (副 gw 的 client 才拿得到 IP) ---
+# ⚠️ Docker 會放 /etc/sysctl.d/12-br-netfilter-ip.conf 把 bridge-nf-call-iptables
+#    設成 1, 使橋接封包進入 iptables, 副 gw 幫下游轉發的 DHCP 廣播被防火牆丟掉
+#    -> client 卡在「取得 IP」。實測 lan3 送出 0 筆 -> 關掉後 21 筆。
+#    重開機修不好(是設定不是狀態)。詳見該檔註解。
+if [ -f "$DEPLOY_DIR/etc/sysctl.d/99-bridge-dhcp-relay.conf" ]; then
+    mkdir -p /etc/sysctl.d
+    cp -a "$DEPLOY_DIR/etc/sysctl.d/99-bridge-dhcp-relay.conf" /etc/sysctl.d/
+    sysctl -p /etc/sysctl.d/99-bridge-dhcp-relay.conf >/dev/null 2>&1
+    echo "  ✅ bridge netfilter 已關閉 (99-bridge-dhcp-relay.conf)"
+fi
+
 # NTP 時間同步伺服器
 uci set system.ntp.enabled='1'
 uci delete system.ntp.server 2>/dev/null
