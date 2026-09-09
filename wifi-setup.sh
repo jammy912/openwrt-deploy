@@ -147,7 +147,16 @@ for radio in $RADIO_LIST; do
             uci set wireless.$iface.bss_transition='1'
             uci set wireless.$iface.wnm_sleep_mode='1'
             uci set wireless.$iface.wnm_sleep_mode_no_keys='1'
-            uci set wireless.$iface.proxy_arp='1'
+            # ⚠️ 不要設 proxy_arp='1'! OpenWrt 的 hostapd 一看到它就強制加上
+            #    ap_isolate=1, 而核心的 net.ipv4.conf.br-lan.proxy_arp 預設是 0
+            #    -> 隔離生效、代答沒生效 -> 副 gw 上的 client 連不到主 gw。
+            # 實測災情(2026-09-09 .4): 手機連 .4 後 ping 不到 .1, conntrack
+            #    對外連線掛零(完全上不了網)。.1 上不發作是因為 client 要找的
+            #    閘道就是本機, 隔離擋不住。
+            # 已試過補 sysctl proxy_arp=1 + proxy_arp_pvlan=1(方案B): ARP 確實
+            #    被代答了(.1 的 ARP 0x6->0x2), 但 ping 仍 100% 掉包 —— ap_isolate
+            #    擋的是資料封包, 代答補不回轉發。★ 唯一解是不要設 proxy_arp。
+            # 802.11r/k/v 漫遊不受影響, 那些是獨立參數。
             echo "  ✅ 漫遊已啟用 (802.11r/k/v + nasid=$nasid)"
             ;;
     esac
@@ -239,7 +248,8 @@ else
                     uci set wireless.$IOT_IFACE.bss_transition='1'
                     uci set wireless.$IOT_IFACE.wnm_sleep_mode='1'
                     uci set wireless.$IOT_IFACE.wnm_sleep_mode_no_keys='1'
-                    uci set wireless.$IOT_IFACE.proxy_arp='1'
+                    # ⚠️ 同上, 不設 proxy_arp(會連帶開 ap_isolate 害 client
+                    #    連不到主 gw)。原因與實測見本檔 line 150 附近註解。
                     echo "  ✅ 漫遊已啟用 (802.11r/k/v + nasid=$iot_nasid)"
                     ;;
             esac

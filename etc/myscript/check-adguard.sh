@@ -12,6 +12,13 @@ trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
 . /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 
+# 只有主 gw 需要檢查 AGH 接手狀態。
+# ⚠️ 副 gw 本來就不跑 AGH(DNS 由主 gw 統一提供), 沒有它就一直推「AGH 未接手」
+#    是誤報 —— 實測 .4(副gw) 會一直推這則(2026-09-09)。
+# ★ 與 check-pbr-wg.sh:47-49 同一套判準, 值是 主gw / 副gw(auto-role 寫入)。
+GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+[ "$GW_TYPE" != "主gw" ] && exit 0
+
 # 引入通知器
 . /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
