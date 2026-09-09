@@ -310,15 +310,20 @@ for _p in /proc/[0-9]*; do
     else
         # ⚠️ 附上檔案大小: 看到「誰開著碟」還不夠, 知道多大才判斷得出是
         #    大檔傳輸(正常會佔久)還是小檔輪詢(異常)。2026-09-08 加。
-        # ⚠️ busybox 沒有 stat! 取大小一律 `wc -c <`(本 repo 在 openlist-sync
-        #    踩過, stat -c %s 會靜默回空)。目錄沒有意義的大小, 跳過不標。
+        # ⚠️⚠️ 取大小絕對不能用 `wc -c`! 它會把整個檔案讀完才算出位元組數,
+        #    對 12GB 的 .part 等於從碟上讀 12GB。實測兩個 wc -c 各吃 47% CPU,
+        #    把整台 RAX3000M 拖到 0% idle / load 2.2, 且 cron 前一輪沒跑完
+        #    下一輪又進來疊上去(2026-09-09 實測, 就是本腳本自己造成的)。
+        #    ★ 改用 `ls -l` 取第 5 欄: 只讀 inode metadata, 實測 0ms。
+        #    ⚠️ memory 記的「busybox 沒 stat 就用 wc -c」只適用小檔, 大檔會炸。
+        #    目錄沒有意義的大小, 跳過不標。
         _files=""
         _oldifs="$IFS"; IFS='
 '
         for _f in $_flist; do
             _full="$MNT/$_f"
             if [ -f "$_full" ]; then
-                _sz=$(wc -c < "$_full" 2>/dev/null | tr -d ' ')
+                _sz=$(ls -l "$_full" 2>/dev/null | awk '{print $5}')
                 case "$_sz" in
                     ''|*[!0-9]*) _tag="" ;;
                     *) _tag=" $(fmt_size "$_sz")" ;;
