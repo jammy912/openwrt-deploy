@@ -220,6 +220,17 @@ stage_flush() {
 
 # 取鎖: $1=鎖檔路徑。回傳 0=取到, 1=別人正在跑。
 # ⚠️ 不能只用 [ -f ] 判斷: 上次被 kill 掉會留下死鎖檔。存 PID 並驗證行程還在。
+# 殺掉某個行程的所有子行程。⚠️ busybox 的 ps 沒有 -o 選項(實測
+# "ps: unrecognized option: o"), 只能從 /proc/<pid>/stat 第 4 欄讀 PPID。
+kill_children() {
+    _pp="$1"; _sig="$2"
+    for _d in /proc/[0-9]*; do
+        _cp="${_d#/proc/}"
+        [ "$(awk '{print $4}' "$_d/stat" 2>/dev/null)" = "$_pp" ] || continue
+        kill $_sig "$_cp" 2>/dev/null
+    done
+}
+
 take_lock() {
     _lk="$1"
     if [ -f "$_lk" ]; then
@@ -270,10 +281,43 @@ if take_lock "$FLUSHLOCK"; then
 fi
 
 # ---- 下載併發鎖 ----
-# ⚠️ 這把鎖只管下載: 一個 cron instance 可能活好幾天(50分 max-time × 多輪),
-#    不能讓下一輪再疊一個 curl 上來把頻寬吃光。
-take_lock "$LOCKFILE" || exit 0
+# ⚠️ 這把鎖只管下載: 一個 cron instance 可能活很久, 不能讓下一輪再疊一個
+#    curl 上來把頻寬吃光。
+# ★ 但「行程還活著」不等於「還在做事」: 實測 2026-09-09 有個 curl 卡了 116
+#   分鐘、.part 完全沒長, 卻因為 PID 還在而一直佔著鎖 —— 每輪 cron 都被它擋
+#   掉, 等於整個同步停擺。故取不到鎖時再檢查「上一輪是不是卡死了」。
+if ! take_lock "$LOCKFILE"; then
+    _stall="$STATEDIR/.stall"
+    _cur=0
+    _pf=$(find "$STAGE_DIR" -name "*.part" 2>/dev/null | head -1)
+    [ -n "$_pf" ] && _cur=$(ls -l "$_pf" 2>/dev/null | awk '{print $5}')
+    _prev=$(cat "$_stall" 2>/dev/null | awk '{print $1}')
+    _cnt=$(cat "$_stall" 2>/dev/null | awk '{print $2+0}')
+    if [ -n "$_prev" ] && [ "$_cur" = "$_prev" ]; then
+        _cnt=$(( _cnt + 1 ))
+    else
+        _cnt=0
+    fi
+    echo "$_cur $_cnt" > "$_stall"
+    # 連續 3 輪(整點 cron = 3 小時)完全沒進展才動手, 避免誤殺慢速但正常的下載
+    if [ "$_cnt" -ge 3 ]; then
+        _oldpid=$(cat "$LOCKFILE" 2>/dev/null)
+        log "上一輪卡死 (PID $_oldpid, 連續 $_cnt 輪停在 $_cur bytes), 終止它"
+        # 先殺 curl 子行程再殺主行程, 否則 curl 會被 init 收養繼續佔頻寬
+        kill_children "$_oldpid"
+        [ -n "$_oldpid" ] && kill "$_oldpid" 2>/dev/null
+        sleep 2
+        kill_children "$_oldpid" -9
+        [ -n "$_oldpid" ] && kill -9 "$_oldpid" 2>/dev/null
+        rm -f "$LOCKFILE" "$_stall"
+        push_notify "OpenList: 下載卡死 $_cnt 輪(停在 $(( _cur / 1048576 ))MB)已重啟, 續傳不會損失進度"
+        take_lock "$LOCKFILE" || exit 0
+    else
+        exit 0
+    fi
+fi
 trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+rm -f "$STATEDIR/.stall"
 
 OL_PASS=$(cat "$OL_PASSFILE")
 
@@ -497,9 +541,15 @@ log "開始下載: $PICK_REL ($(( PICK_SIZE / 1048576 ))MB), 已有 $(( _have / 
 #    OpenList 收得下)。sign 不要編碼, 它本來就是 URL-safe base64。
 _EPATH=$(jq -rn --arg s "$PICK" '$s|@uri')
 
-# ⚠️ --max-time 3000 (50分): 配合 cron */10 不會無限堆疊, 又能一次推進一大段。
-#    -C - 讓下次接著抓, 慢速大檔靠多輪 cron 累積完成。
+# ⚠️ --max-time 是「單次嘗試」的上限, 不是整條指令的上限!
+#    實測 2026-09-09: --max-time 3000 --retry 3 的 curl 活了 116 分鐘還沒被砍,
+#    因為 retry 3 次 = 最多 4 次嘗試 -> 上限其實是 3000 x 4 = 12000 秒(200分)。
+#    ★ 加 --speed-limit/--speed-time: 連續 120 秒低於 1KB/s 就放棄這輪, 讓
+#      cron 下一輪帶著新的 sign 重來(卡住的主因是 sign 過期或夸克端斷流,
+#      乾等到 max-time 只是白白佔著鎖不讓別人跑)。
+#    -C - 讓下次接著抓, 慢速大檔靠多輪 cron 累積完成 —— 放棄不會損失進度。
 curl -sL -C - --max-time 3000 --retry 3 --retry-delay 10 \
+    --speed-limit 1024 --speed-time 120 \
     -o "$PART" \
     -H "Authorization: $TOKEN" \
     "$OL_HOST/d${_EPATH}?sign=$SIGN"
