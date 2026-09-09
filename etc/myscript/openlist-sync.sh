@@ -95,6 +95,59 @@ dest_online() {
     return 1
 }
 
+# 驗證 MKV 結構完整性。回傳 0=通過(或非 mkv 不驗), 1=結構異常。
+# ⚠️ 夸克 API 不回 hash(實測 2026-09-09: fs/get 的 hash_info 恆為 null),
+#    無法跟遠端比對 checksum。但 MKV 檔頭自己就宣告了總長度, 可自我驗證:
+#      1a 45 df a3            = EBML magic(不符 = 根本不是 mkv, 例如抓到錯誤頁)
+#      18 53 80 67 + VINT     = Segment ID 與其 payload 長度
+#    Segment 長度 + 檔頭偏移 ≈ 檔案總大小, 對不上就是被截斷。
+# ★ 只讀 64 bytes, 對 30GB 檔案成本等於零 —— 不要用會讀完整顆檔的做法
+#   (參見 wc -c 的教訓: busybox wc -c 會把整個檔案讀過一遍)。
+# ⚠️ 副檔名要用「最終檔名」判斷, 不能用被讀的那個檔:下載中的檔叫 xxx.mkv.part,
+#    拿它比對 *.mkv 永遠不中 → 整個檢查靜默跳過(實測 2026-09-09 踩到)。
+#    故 $1=要讀的檔, $3=最終檔名(省略時才退回用 $1 判斷)。
+verify_mkv() {
+    _vf="$1"; _vsz="$2"; _vname="${3:-$1}"
+    case "$_vname" in *.mkv|*.MKV) ;; *) return 0 ;; esac   # 非 mkv 不驗
+    command -v hexdump >/dev/null 2>&1 || return 0        # 沒 hexdump 就跳過
+
+    _hx=$(hexdump -v -e '1/1 "%02x "' -n 64 "$_vf" 2>/dev/null)
+    [ -n "$_hx" ] || return 0
+
+    # 1) EBML magic
+    case "$_hx" in
+        "1a 45 df a3 "*) ;;
+        *) log "結構異常: $(basename "$_vname") 不是 MKV(檔頭 $(echo "$_hx" | cut -c1-11))"
+           return 1 ;;
+    esac
+
+    # 2) 找 Segment ID (18 53 80 67), 取其後的 VINT 長度
+    _pre="${_hx%%18 53 80 67 *}"
+    [ "$_pre" = "$_hx" ] && return 0          # 64 bytes 內沒看到 Segment, 不判定
+    _off=$(( ${#_pre} / 3 ))                  # 每 byte 佔 "xx " 三字元
+    _rest="${_hx#*18 53 80 67 }"
+    set -- $_rest
+    _first="$1"
+    # VINT: 首 byte 的最高位標示長度。只處理最常見的 01(8-byte)與 ff(未知長度)
+    [ "$_first" = "ff" ] && return 0          # 未知長度(串流式寫入), 無從比對
+    [ "$_first" = "01" ] || return 0          # 其他編碼不判定, 避免誤殺
+
+    _val=0
+    for _b in "$2" "$3" "$4" "$5" "$6" "$7" "$8"; do
+        _val=$(( _val * 256 + 0x$_b ))
+    done
+    _hdr=$(( _off + 4 + 8 ))                  # Segment ID(4) + 長度欄(8)
+    _exp=$(( _val + _hdr ))
+    _diff=$(( _vsz - _exp ))
+    [ "$_diff" -lt 0 ] && _diff=$(( - _diff ))
+    # 容差 1KB: 檔尾可能有 EBML void/padding(實測某片差 22 bytes)
+    if [ "$_diff" -gt 1024 ]; then
+        log "結構異常: $(basename "$_vname") 宣告 $_exp bytes 實際 $_vsz bytes(差 $_diff)"
+        return 1
+    fi
+    return 0
+}
+
 # 把暫存區的一個完成檔搬到目的地並記 .ok。
 # 回傳 0=已搬(或本來就沒暫存區), 1=目的地離線(留在暫存區)
 stage_move() {
@@ -141,13 +194,27 @@ stage_flush() {
     [ -n "$STAGE_DIR" ] || return 0
     [ -d "$STAGE_DIR" ] || return 0
     dest_online || return 0
+    # ⚠️ while 由管線餵食 = 跑在子 shell, 迴圈內的變數出不來。改用暫存檔累計,
+    #    否則補搬幾個、總共多大這些數字在迴圈結束後全部歸零。
+    _fl="/tmp/olsync.flush.$$"; : > "$_fl"
     # ⚠️ 要排除 .done 目錄本身(裡面是 .ok 記錄, 不是待搬的影片)
     find "$STAGE_DIR" -type f ! -name ".*.part" ! -name "*.moving" ! -name "*.ok" 2>/dev/null | while read -r _f; do
         _r="${_f#$STAGE_DIR/}"
         case "$_r" in .done/*) continue ;; esac
         _s=$(ls -l "$_f" 2>/dev/null | awk '{print $5}')
-        [ -n "$_s" ] && [ "$_s" -gt 0 ] && stage_move "$_r" "$_s"
+        [ -n "$_s" ] && [ "$_s" -gt 0 ] || continue
+        stage_move "$_r" "$_s" && echo "$_s $(basename "$_r")" >> "$_fl"
     done
+    # 補搬完成才推播。★ 彙總成一則: 8TB 接回來時可能一次搬好幾個檔,
+    #   每個檔推一則會連環轟炸。
+    if [ -s "$_fl" ]; then
+        _n=$(wc -l < "$_fl")
+        _mb=$(awk '{t+=$1} END{printf "%d", t/1048576}' "$_fl")
+        _names=$(awk '{$1=""; sub(/^ /,""); print}' "$_fl" | head -3 | tr '\n' ' ')
+        [ "$_n" -gt 3 ] && _names="$_names..."
+        push_notify "OpenList: 8TB 已接回, 補搬 $_n 個檔案完成 (${_mb}MB): $_names"
+    fi
+    rm -f "$_fl"
 }
 
 # ---- 併發鎖 ----
@@ -428,6 +495,13 @@ if [ "$_now" = "$PICK_SIZE" ]; then
         push_notify "OpenList: $PICK_REL 已存在未覆寫, 新檔暫存為 .part"
         exit 0
     fi
+    # ★ 結構檢查: 大小對不代表內容完整。不通過就留著 .part 不改名, 讓下一輪
+    #   不會把壞檔當成完成品搬進 8TB(改名後 .ok 一記就再也不會重抓)。
+    if ! verify_mkv "$PART" "$PICK_SIZE" "$PICK_REL"; then
+        push_notify "OpenList: ⚠️$(basename "$PICK_REL") 大小正確但 MKV 結構異常, 未歸檔; 檔案留在 .part 待檢查"
+        exit 0
+    fi
+
     # .part → 暫存區的正式檔名(先落地, 再談搬不搬)
     _staged="$_workdir/$(basename "$PICK_REL")"
     mv "$PART" "$_staged"
