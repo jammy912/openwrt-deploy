@@ -686,40 +686,12 @@ if [ "$DHCP_ACTION" = "server" ]; then
         fi
     fi
 elif [ "$DHCP_ACTION" = "off" ]; then
-    # ⚠️ 副 gw 不能只設 ignore='1'! 它會產生 no-dhcp-interface=br-lan,
-    #    讓 dnsmasq 完全不碰 br-lan 的 DHCP —— 連「轉發」也不做。
-    #    後果: client 連到副 gw 時 DHCP Request 進得來卻出不去(實測 25 進
-    #    1 出), 永遠拿不到 IP, 畫面卡在「取得 IP」/「沒有網路連線」。
-    #    2026-09-09 在 .4 實測抓包確認, 重開機無法修復。
-    # ⚠️ 不要用 dhcp.lan.dhcpv4='relay': 本平台裝的是 odhcpd-ipv6only
-    #    (Features 明寫 no-dhcpv4), 那個設定沒有任何實作會讀它。
-    # ★ 正解是 dnsmasq 的 dhcp-relay: 副 gw 收到 client 的 DHCP 廣播後
-    #   單播轉給主 gw, 主 gw 回應再轉回去。要生效必須「沒有」ignore。
-    # 主 gw IP 全篇寫死 192.168.1.1(見 line 519/546/547), 這裡沿用同一慣例
-    _relay_srv="192.168.1.1"
-    _relay_local=$(uci -q get network.lan.ipaddr)
-    [ -z "$_relay_local" ] && _relay_local=$(ip -4 addr show br-lan 2>/dev/null \
-        | sed -n 's|.*inet \([0-9.]*\)/.*|\1|p' | head -1)
-    _cur_relay_srv=$(uci -q get dhcp.relay.server_addr)
-    _cur_relay_local=$(uci -q get dhcp.relay.local_addr)
-    if [ "$CUR_DHCP_IGNORE" = "1" ] || [ "$_cur_relay_srv" != "$_relay_srv" ] \
-       || [ "$_cur_relay_local" != "$_relay_local" ]; then
-        uci -q delete dhcp.lan.ignore
-        uci -q delete dhcp.lan.dhcpv4
-        if [ -n "$_relay_local" ] && [ "$_relay_local" != "$_relay_srv" ]; then
-            uci -q delete dhcp.relay
-            uci set dhcp.relay=relay
-            uci set dhcp.relay.interface='lan'
-            uci set dhcp.relay.local_addr="$_relay_local"
-            uci set dhcp.relay.server_addr="$_relay_srv"
-            log "DHCP: 改為 relay $_relay_local -> $_relay_srv (副 gw)"
-        else
-            # 取不到本機 IP 就退回舊行為, 至少不要變成第二台 DHCP server
-            uci set dhcp.lan.ignore='1'
-            log "⚠️ DHCP relay 無法設定(本機 IP=$_relay_local), 退回 ignore=1"
-        fi
+    if [ "$CUR_DHCP_IGNORE" != "1" ]; then
+        uci set dhcp.lan.ignore='1'
+        uci set dhcp.lan.dhcpv4='disabled'
         uci commit dhcp
         /etc/init.d/dnsmasq restart
+        log "DHCP server 已關閉 (非主 gateway)"
         CHANGED=1
     fi
     # 副 gw 沒有 public IPv6 prefix,odhcpd 不該發 RA/DHCPv6,
