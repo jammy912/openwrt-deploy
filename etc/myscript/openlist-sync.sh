@@ -76,6 +76,7 @@ DRY_RUN=0
 [ "$1" = "--dry-run" ] && { DRY_RUN=1; REMOTE_DIR="${2:-/夸克網盤/来自：分享}"; LOCAL_DIR="${3:-/srv/share/USB/8TB/Video}"; STAGE_DIR="${4:-/srv/share/USB/SSD/Video}"; }
 
 LOCKFILE="/tmp/openlist-sync.lock"
+FLUSHLOCK="/tmp/openlist-sync-flush.lock"
 STATEDIR="/etc/myscript/.openlist-sync"
 LOGTAG="openlist-sync"
 
@@ -217,19 +218,21 @@ stage_flush() {
     rm -f "$_fl"
 }
 
-# ---- 併發鎖 ----
+# 取鎖: $1=鎖檔路徑。回傳 0=取到, 1=別人正在跑。
 # ⚠️ 不能只用 [ -f ] 判斷: 上次被 kill 掉會留下死鎖檔。存 PID 並驗證行程還在。
-if [ -f "$LOCKFILE" ]; then
-    _oldpid=$(cat "$LOCKFILE" 2>/dev/null)
-    if [ -n "$_oldpid" ] && kill -0 "$_oldpid" 2>/dev/null; then
-        # 正在跑就安靜結束, 不洗 log(cron 每 10 分鐘跑一次)
-        exit 0
+take_lock() {
+    _lk="$1"
+    if [ -f "$_lk" ]; then
+        _oldpid=$(cat "$_lk" 2>/dev/null)
+        if [ -n "$_oldpid" ] && kill -0 "$_oldpid" 2>/dev/null; then
+            return 1
+        fi
+        log "清除死鎖檔 $_lk (舊 PID $_oldpid 已不存在)"
+        rm -f "$_lk"
     fi
-    log "清除死鎖檔 (舊 PID $_oldpid 已不存在)"
-    rm -f "$LOCKFILE"
-fi
-echo $$ > "$LOCKFILE"
-trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    echo $$ > "$_lk"
+    return 0
+}
 
 # ---- 沒裝 OpenList 的機器安靜跳過(要在建目錄之前!) ----
 # ⚠️ 2026-09-08: 這支 cron 由 Google Sheet 下發給整個機隊, 但只有 .4 跑
@@ -251,8 +254,26 @@ dest_online && mkdir -p "$LOCAL_DIR" 2>/dev/null
 mkdir -p "$STATEDIR" 2>/dev/null
 [ -n "$STAGE_DIR" ] && mkdir -p "$STAGE_DIR" "$DONEDIR" 2>/dev/null
 
-# 補搬上次因 8TB 離線而留在 SSD 的完成檔
-stage_flush
+# ---- 補搬上次因 8TB 離線而留在 SSD 的完成檔 ----
+# ★ 必須在「下載鎖」之前, 而且用自己獨立的鎖。
+#   ⚠️ 2026-09-09 實測的坑: 原本 stage_flush 在下載鎖「之後」, 而 curl 帶
+#      --max-time 3000(50分) 配 cron 每小時一次 = 下載幾乎永遠在跑 -> 每輪
+#      都在鎖那裡 exit 0 -> 走不到補搬。結果「8TB 接回來了, 但因為正在抓別的
+#      檔, 已完成的檔就一直躺在 SSD」, 要等整個下載結束才會搬。
+#   搬檔(本地 mv)與下載(網路 I/O)沒有共用資源, 可以並行。同時搬同一個檔也
+#   安全: mv 對同一來源只有一個會成功, 另一個 [ -f "$_src" ] 就 return 了。
+if take_lock "$FLUSHLOCK"; then
+    trap 'rm -f "$FLUSHLOCK"' EXIT INT TERM
+    stage_flush
+    rm -f "$FLUSHLOCK"
+    trap - EXIT INT TERM
+fi
+
+# ---- 下載併發鎖 ----
+# ⚠️ 這把鎖只管下載: 一個 cron instance 可能活好幾天(50分 max-time × 多輪),
+#    不能讓下一輪再疊一個 curl 上來把頻寬吃光。
+take_lock "$LOCKFILE" || exit 0
+trap 'rm -f "$LOCKFILE"' EXIT INT TERM
 
 OL_PASS=$(cat "$OL_PASSFILE")
 
