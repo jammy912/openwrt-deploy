@@ -25,10 +25,13 @@
 # ⚠️ OpenList 的 /d/ 端點沒帶 sign 一律回 401(實測), 每個檔都要先用
 #    fs/get 取得自己的 sign。
 # ⚠️ 用 .part 暫存檔, 抓完才 mv 成正式檔名 —— 避免半截檔被誤認為已完成。
-# ⚠️ busybox 沒有 `stat`(實測 2026-09-08 .4: "stat: not found")! 取檔案大小
-#    一律用 `wc -c < 檔案`。原本寫 stat -c %s 會靜默回空字串 → 判定永遠是
-#    「沒有進展」, 明明檔案已經抓下來了還一直重抓。同理 busybox 的 cat 沒有
-#    -A、也沒有 od, debug 時別用。
+# ⚠️ busybox 沒有 `stat`(實測 2026-09-08 .4: "stat: not found")! 但取大小
+#    也 **不能用 `wc -c`** —— 它為了算位元組數會把整個檔案讀過一遍, 對這裡
+#    動輒 13GB 的 .part 等於每次執行都從碟上讀 13GB(實測會燒滿 CPU、拖垮
+#    整台, 且大檔讀到一半被打斷還會回錯的數字, 顯示「已有 742MB」而實際是
+#    13030MB)。★ 一律用 `ls -l <檔> | awk '{print $5}'`, 只讀 inode
+#    metadata, 實測 0ms。2026-09-09 已把本檔六處 wc -c 全部換掉。
+#    同理 busybox 的 cat 沒有 -A、也沒有 od 與 timeout/nohup, debug 時別用。
 # =====================================================================
 
 # ⚠️ 固定用絕對路徑, 不用 dirname $0: 從別的目錄執行(例如 debug 時複製到 /tmp)
@@ -37,7 +40,13 @@
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 
 # ---- 設定 ----
-OL_HOST="${OL_HOST:-http://192.168.1.4:5244}"
+# ⚠️ 一律用 127.0.0.1, 不要寫本機的 LAN IP。
+#    2026-09-09 實測: .4 接手主 gw 後 LAN IP 從 192.168.1.4 變成 192.168.1.1,
+#    而容器 -p 綁死在 192.168.1.4 -> DNAT 與 docker-proxy 都指向一個已經不
+#    存在的位址 -> 腳本每輪都「登入失敗 — OpenList 沒回應或密碼錯誤」,
+#    下載整整停了一小時(容器本身完全正常, 直連 172.17.0.2:5244 回 200)。
+#    ★ 配套: 容器要用 `-p 5244:5244`(綁 0.0.0.0)而不是 `-p <LAN IP>:5244`。
+OL_HOST="${OL_HOST:-http://127.0.0.1:5244}"
 OL_USER="${OL_USER:-admin}"
 OL_PASSFILE="/etc/myscript/.secrets/openlist.pass"
 
@@ -109,7 +118,8 @@ stage_move() {
     # ⚠️ 跨檔案系統 mv = 複製後刪除, 中途斷電會留半截檔。先搬成 .moving 再改名,
     #    這樣目的地不會出現看似完整的半截檔。
     if mv "$_src" "$LOCAL_DIR/$_rel.moving" 2>/dev/null; then
-        _msz=$(wc -c < "$LOCAL_DIR/$_rel.moving" 2>/dev/null | tr -d " " || echo 0)
+        _msz=$(ls -l "$LOCAL_DIR/$_rel.moving" 2>/dev/null | awk '{print $5}')
+        [ -z "$_msz" ] && _msz=0
         if [ "$_msz" = "$_sz" ]; then
             mv "$LOCAL_DIR/$_rel.moving" "$LOCAL_DIR/$_rel"
             mkdir -p "$(dirname "$_okf")" 2>/dev/null; echo "$_sz" > "$_okf"
@@ -135,7 +145,7 @@ stage_flush() {
     find "$STAGE_DIR" -type f ! -name ".*.part" ! -name "*.moving" ! -name "*.ok" 2>/dev/null | while read -r _f; do
         _r="${_f#$STAGE_DIR/}"
         case "$_r" in .done/*) continue ;; esac
-        _s=$(wc -c < "$_f" 2>/dev/null | tr -d " ")
+        _s=$(ls -l "$_f" 2>/dev/null | awk '{print $5}')
         [ -n "$_s" ] && [ "$_s" -gt 0 ] && stage_move "$_r" "$_s"
     done
 }
@@ -286,13 +296,15 @@ while IFS="$(printf '\t')" read -r rsize rrel rabs; do
 
     # 暫存區已有完整檔(等著搬) 也算完成, 避免重抓
     if [ -n "$STAGE_DIR" ] && [ -f "$STAGE_DIR/$rrel" ]; then
-        _ssize=$(wc -c < "$STAGE_DIR/$rrel" 2>/dev/null | tr -d " " || echo 0)
+        _ssize=$(ls -l "$STAGE_DIR/$rrel" 2>/dev/null | awk '{print $5}')
+        [ -z "$_ssize" ] && _ssize=0
         [ "$_ssize" = "$rsize" ] && { DONE=$((DONE + 1)); continue; }
     fi
 
     _local="$LOCAL_DIR/$rrel"
     if [ -f "$_local" ]; then
-        _lsize=$(wc -c < "$_local" 2>/dev/null | tr -d " " || echo 0)
+        _lsize=$(ls -l "$_local" 2>/dev/null | awk '{print $5}')
+        [ -z "$_lsize" ] && _lsize=0
         if [ "$_lsize" = "$rsize" ]; then
             DONE=$((DONE + 1))
             # 補記 .ok(舊檔或手動放的檔第一次掃到時建立)
@@ -387,7 +399,8 @@ _destdir=$(dirname "$LOCAL_DIR/$PICK_REL")
 mkdir -p "$_workdir" 2>/dev/null
 PART="$_workdir/.$(basename "$PICK_REL").part"
 _have=0
-[ -f "$PART" ] && _have=$(wc -c < "$PART" 2>/dev/null | tr -d " " || echo 0)
+[ -f "$PART" ] && _have=$(ls -l "$PART" 2>/dev/null | awk '{print $5}')
+[ -z "$_have" ] && _have=0
 log "開始下載: $PICK_REL ($(( PICK_SIZE / 1048576 ))MB), 已有 $(( _have / 1048576 ))MB, 進度 $DONE/$TOTAL"
 
 # ⚠️ 路徑一定要 URL encode! 實測 2026-09-08: 檔名含空格或單引號(例如
@@ -405,7 +418,8 @@ curl -sL -C - --max-time 3000 --retry 3 --retry-delay 10 \
 _rc=$?
 
 _now=0
-[ -f "$PART" ] && _now=$(wc -c < "$PART" 2>/dev/null | tr -d " " || echo 0)
+[ -f "$PART" ] && _now=$(ls -l "$PART" 2>/dev/null | awk '{print $5}')
+[ -z "$_now" ] && _now=0
 
 if [ "$_now" = "$PICK_SIZE" ]; then
     # ⚠️ 最後一道保險: 就算跑到這裡, 目標若已存在也絕不覆寫(留 .part 讓人處理)
