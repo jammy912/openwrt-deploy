@@ -153,28 +153,48 @@ for _if in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
         [ -z "$_ip" ] && continue      # 連 IP 都沒有 = 還沒拿到位址, 屬另一種問題
         _name=$(mac2name "$_mac")
 
-        # 只算「真的出得去」的連線。
-        # ⚠️ 2026-09-08 誤報真兇: conntrack 每一行同時含去程與回程, 回程那半段
-        #    的 dst 是本機 WAN IP(例如 dst=192.168.168.153)。原本用
-        #    `grep -v "dst=192.168."` 過濾, 結果把「去程明明連到 17.250.x.x」
-        #    的那整行也剔掉 -> 每台都算 0 條, 5 台同時誤報(連 switch1 都中)。
-        # ★ 正確作法: 只取「src=<client> 之後的第一個 dst=」(去程目的地),
-        #   再判斷它是不是私有位址。
-        _out=$(awk -v ip="src=$_ip" '
-            index($0, ip) {
-                for (i = 1; i <= NF; i++) {
-                    if ($i == ip) {
-                        d = $(i+1)                       # 去程的 dst=x.x.x.x
-                        sub(/^dst=/, "", d)
-                        if (d !~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|224\.|239\.|127\.|255\.)/)
-                            n++
-                        break
+        # ⚠️⚠️ 副 gw 不能用 conntrack 判斷! 2026-09-09 誤報真兇:
+        #    client 關聯在副 gw 的 WiFi, 但它的「閘道是主 gw」, 所有對外流量
+        #    都在主 gw 做 NAT —— 副 gw 只是 L2 橋接, 本來就不會有這些 client
+        #    的 conntrack。★ 於是判準 3 在副 gw 上「必然成立」, 只要有 client
+        #    關聯就誤報。實測 .4 推播 4 台「完全不通」, 但同時在 .1 上查
+        #    這 4 台各有 21/13/1/5 條對外連線, 用起來完全正常。
+        # ★ 副 gw 改用 station 的封包計數增量: client 真的在傳資料時 rx/tx
+        #   packets 會持續成長; 真卡住才不會動。
+        if [ "$GW_TYPE" = "副gw" ] || [ "$GW_TYPE" = "client" ]; then
+            _pk=$(iw dev "$_if" station get "$_mac" 2>/dev/null \
+                  | awk '/rx packets:/{r=$3} /tx packets:/{t=$3} END{print r+0"_"t+0}')
+            _pf="$STATEDIR/.pk.$(echo "$_mac" | tr -d ':')"
+            _prev_pk=$(cat "$_pf" 2>/dev/null)
+            echo "$_pk" > "$_pf"
+            # 第一輪沒有基準可比, 一律當正常(下一輪才有得比)
+            [ -z "$_prev_pk" ] && continue
+            [ "$_pk" != "$_prev_pk" ] && continue          # 封包數有變 = 正常
+            # 封包數完全沒動 -> 落到下面算「卡住」
+        else
+            # 主 gw: client 的 NAT 就在本機, conntrack 查得到才算正常。
+            # 只算「真的出得去」的連線。
+            # ⚠️ 2026-09-08 誤報真兇: conntrack 每一行同時含去程與回程, 回程那半段
+            #    的 dst 是本機 WAN IP(例如 dst=192.168.168.153)。原本用
+            #    `grep -v "dst=192.168."` 過濾, 結果把「去程明明連到 17.250.x.x」
+            #    的那整行也剔掉 -> 每台都算 0 條, 5 台同時誤報(連 switch1 都中)。
+            # ★ 正確作法: 只取「src=<client> 之後的第一個 dst=」(去程目的地),
+            #   再判斷它是不是私有位址。
+            _out=$(awk -v ip="src=$_ip" '
+                index($0, ip) {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == ip) {
+                            d = $(i+1)                       # 去程的 dst=x.x.x.x
+                            sub(/^dst=/, "", d)
+                            if (d !~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|224\.|239\.|127\.|255\.)/)
+                                n++
+                            break
+                        }
                     }
                 }
-            }
-            END { print n+0 }' /proc/net/nf_conntrack 2>/dev/null)
-        [ "${_out:-0}" -gt 0 ] && continue                   # 有對外連線 = 正常
-
+                END { print n+0 }' /proc/net/nf_conntrack 2>/dev/null)
+            [ "${_out:-0}" -gt 0 ] && continue                   # 有對外連線 = 正常
+        fi
         _stuck="${_stuck} ${_name:-$_mac}($_ip)"
         _stuck_n=$((_stuck_n + 1))
     done < "/tmp/.ccs.$$"
