@@ -595,6 +595,20 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
                 done
         fi
         log "LAN IP 熱切換: $OLD_IP → ${NEW_IP}/${NEW_MASK:-255.255.255.0}"
+        # ⚠️ 熱切換只換了介面上的 IP, 「已經綁在舊 IP 上的服務」不會自己跟上。
+        #    實測 2026-09-09 (.4 從主gw 切回副gw): smbd 仍 LISTEN 在
+        #    192.168.1.1:445, 而那位址已經不在本機 -> SMB 完全連不上,
+        #    且沒有任何錯誤訊息, 服務看起來還「在跑」。
+        #    ★ samba 在啟動時解析 interface='lan' 的 IP 並綁定, IP 變更後
+        #      必須重啟才會重綁。
+        #    (OpenList 容器是同一個病, 已改用 -p 5244:5244 綁 0.0.0.0 根治,
+        #     詳見 docs/openlist-netdisk-download.md)
+        for _svc in samba4 minidlna; do
+            [ -x "/etc/init.d/$_svc" ] || continue
+            /etc/init.d/$_svc enabled 2>/dev/null || continue
+            /etc/init.d/$_svc restart >/dev/null 2>&1 &
+            log "IP 變更, 重啟 $_svc 以重新綁定 $NEW_IP"
+        done
     else
         log "重啟網路 (無法熱切換)..."
         /etc/init.d/network restart
