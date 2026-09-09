@@ -268,7 +268,7 @@ mkdir -p "$STATEDIR" 2>/dev/null
 # ---- 補搬上次因 8TB 離線而留在 SSD 的完成檔 ----
 # ★ 必須在「下載鎖」之前, 而且用自己獨立的鎖。
 #   ⚠️ 2026-09-09 實測的坑: 原本 stage_flush 在下載鎖「之後」, 而 curl 帶
-#      --max-time 3000(50分) 配 cron 每小時一次 = 下載幾乎永遠在跑 -> 每輪
+#      舊設定 --max-time 3000(50分) = 下載幾乎永遠在跑 -> 每輪
 #      都在鎖那裡 exit 0 -> 走不到補搬。結果「8TB 接回來了, 但因為正在抓別的
 #      檔, 已完成的檔就一直躺在 SSD」, 要等整個下載結束才會搬。
 #   搬檔(本地 mv)與下載(網路 I/O)沒有共用資源, 可以並行。同時搬同一個檔也
@@ -544,12 +544,17 @@ _EPATH=$(jq -rn --arg s "$PICK" '$s|@uri')
 # ⚠️ --max-time 是「單次嘗試」的上限, 不是整條指令的上限!
 #    實測 2026-09-09: --max-time 3000 --retry 3 的 curl 活了 116 分鐘還沒被砍,
 #    因為 retry 3 次 = 最多 4 次嘗試 -> 上限其實是 3000 x 4 = 12000 秒(200分)。
-#    ★ 加 --speed-limit/--speed-time: 連續 120 秒低於 1KB/s 就放棄這輪, 讓
-#      cron 下一輪帶著新的 sign 重來(卡住的主因是 sign 過期或夸克端斷流,
-#      乾等到 max-time 只是白白佔著鎖不讓別人跑)。
+#    ⚠️ --speed-limit/--speed-time 也擋不住這種卡法! 實測 2026-09-09: 帶了
+#      --speed-time 120 的 curl 照樣跑 663 秒不放棄。原因是 speed 計量要等
+#      「回應主體開始傳輸」才啟動, 而夸克限速時是 TCP 連線 ESTABLISHED、
+#      卻遲遲不回 header -> 速度計根本沒開始算 -> 這道防護形同虛設。
+#      (驗證法: /proc/<pid>/net/tcp 看到狀態 01=ESTABLISHED 但 -o 目標 0 bytes)
+#    ★ 真正有效的是 --max-time 壓低 + 少 retry: 讓「單輪」有絕對上限。
+#      10 分鐘一輪的 cron 配 max-time 540(9分) + retry 1, 最壞約 9 分鐘結束,
+#      不會跨到下一輪。卡住就早點放手, 下輪帶新 sign 重來。
 #    -C - 讓下次接著抓, 慢速大檔靠多輪 cron 累積完成 —— 放棄不會損失進度。
-curl -sL -C - --max-time 3000 --retry 3 --retry-delay 10 \
-    --speed-limit 1024 --speed-time 120 \
+curl -sL -C - --max-time 540 --retry 1 --retry-delay 5 \
+    --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
     -o "$PART" \
     -H "Authorization: $TOKEN" \
     "$OL_HOST/d${_EPATH}?sign=$SIGN"
