@@ -276,6 +276,24 @@ if [ -n "$_s1" ] && [ -n "$_s2" ]; then
     }')
 fi
 
+# 人類可讀的大小。TB 保留 2 位小數(3.14TB), 其餘 1 位(20.5MB)。
+# ⚠️ TB 級距太粗: 1 位小數時 3.1TB 涵蓋 110GB 的範圍, 看不出碟到底長多少,
+#    所以 TB 特別給 2 位。
+# ⚠️ busybox ash 只有整數運算, 沒有 bc, printf 也沒有 %f —— 自己乘 10/100
+#    取餘數湊小數。餘數要補前導零, 否則 3.04TB 會印成 3.4TB。
+fmt_size() {
+    _n="$1"
+    if   [ "$_n" -ge 1099511627776 ]; then _d=1099511627776; _u=TB; _s=100
+    elif [ "$_n" -ge 1073741824 ];    then _d=1073741824;    _u=GB; _s=10
+    elif [ "$_n" -ge 1048576 ];       then _d=1048576;       _u=MB; _s=10
+    elif [ "$_n" -ge 1024 ];          then _d=1024;          _u=KB; _s=10
+    else echo "${_n}B"; return; fi
+    _int=$(( _n / _d ))
+    _frac=$(( _n * _s / _d % _s ))
+    [ "$_s" = "100" ] && [ "$_frac" -lt 10 ] && _frac="0$_frac"
+    echo "${_int}.${_frac}$_u"
+}
+
 # --- 誰開著碟上的檔案 (碟不休眠時的元兇, 見眉角五) ---
 holders=""
 for _p in /proc/[0-9]*; do
@@ -303,11 +321,7 @@ for _p in /proc/[0-9]*; do
                 _sz=$(wc -c < "$_full" 2>/dev/null | tr -d ' ')
                 case "$_sz" in
                     ''|*[!0-9]*) _tag="" ;;
-                    *) if   [ "$_sz" -ge 1099511627776 ]; then _tag=" $(( _sz / 1099511627776 ))TB"
-                       elif [ "$_sz" -ge 1073741824 ];    then _tag=" $(( _sz / 1073741824 ))GB"
-                       elif [ "$_sz" -ge 1048576 ];       then _tag=" $(( _sz / 1048576 ))MB"
-                       elif [ "$_sz" -ge 1024 ];          then _tag=" $(( _sz / 1024 ))KB"
-                       else _tag=" ${_sz}B"; fi ;;
+                    *) _tag=" $(fmt_size "$_sz")" ;;
                 esac
             else
                 _tag=""          # 目錄或已消失的檔
