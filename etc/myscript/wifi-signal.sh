@@ -216,22 +216,10 @@ FIRST_RUN=0
 # =====================
 # Enable / Disable 介面
 # =====================
-# IOT(2.4G) 開關以 .mesh_runiotwifi 為準 (來自 Google Sheet runiotwifi 欄位,
-# 與 auto-role apply_iot_wifi 同一真相來源)。每次無條件依 flag 覆寫 ENABLE_2G,
-# 不依賴 GW_TYPE 或 cron 參數,避免兩者對打。flag 預設 N;副gw/client 只要 flag=Y 也能開 IOT
-RUN_IOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
-[ -z "$RUN_IOTWIFI" ] && RUN_IOTWIFI=N
-[ "$RUN_IOTWIFI" = "Y" ] && ENABLE_2G=1 || ENABLE_2G=0
-
-# 5G 開關以 .mesh_run5gwifi 為準 (來自 Google Sheet run5gwifi 欄位),
-# 效果與 runiotwifi 相同, 且「優先權大於 wifi-monitor.sh 傳入的第 9 個參數
-# ENABLE_5G」—— 故意放在命令列參數讀取「之後」覆寫。
-# ⚠️ 預設 Y 而不是 N: 5G 是主要 WiFi, flag 檔還沒下發就當成關會把主 WiFi
-#    關掉。★ 只有明確 N 才關 (與 runiotwifi 預設 N 的取捨不同, 別跟著抄)。
-RUN_5GWIFI=$(cat /etc/myscript/.mesh_run5gwifi 2>/dev/null)
-[ -z "$RUN_5GWIFI" ] && RUN_5GWIFI=Y
-[ "$RUN_5GWIFI" = "N" ] && ENABLE_5G=0 || ENABLE_5G=1
-
+# ★ 2.4G/5G 的開關完全由命令列參數決定 (第 9 個 ENABLE_5G、第 10 個 ENABLE_2G),
+#   哪一台要跑則由 wifi-monitor.sh 的第 24 個參數 HOST_NAME 指定。
+#   (2026-09-10 移除 .mesh_runiotwifi / .mesh_run5gwifi 兩個 flag 覆寫: 原本它們
+#    無條件蓋掉 cron 參數, 與「用排程指定機器」的做法重複且會互相打架。)
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)
 

@@ -47,125 +47,6 @@ for _arg in "$@"; do
 done
 dbg() { [ "$DEBUG" = "1" ] && push_notify "AutoRole-DBG: $1"; }
 
-# radio 下排除指定 iface 後，是否還有其他啟用中 (disabled!=1) 的 wifi-iface
-# $1=radio  $2=要排除的 iface
-radio_has_other_active_iface() {
-    local _radio="$1" _skip="$2" _has=0 _sec _dev _dis
-    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/{print $2}'); do
-        [ "$_sec" = "$_skip" ] && continue
-        _dev=$(uci -q get wireless.$_sec.device)
-        [ "$_dev" = "$_radio" ] || continue
-        _dis=$(uci -q get wireless.$_sec.disabled)
-        [ "$_dis" = "1" ] && continue
-        _has=1; break
-    done
-    return $((1 - _has))
-}
-
-# 依 .mesh_runiotwifi 決定本機 IOT WiFi 開/關 (脫離角色綁定, 預設 N)
-# Y=開 (確保 iface+radio enabled 且 runtime up), N/空=關
-# 與 wifi-signal.sh 同讀 .mesh_runiotwifi 作為唯一真相來源, 避免兩者對打
-apply_iot_wifi() {
-    local _run=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
-    [ -z "$_run" ] && _run=N
-    local IOT_IF=$(uci show wireless 2>/dev/null | grep "ssid='IOT'" | cut -d. -f2)
-    [ -z "$IOT_IF" ] && return
-    local _radio=$(uci -q get wireless.${IOT_IF}.device)
-
-    if [ "$_run" = "Y" ]; then
-        # 開: 清 disabled (iface+radio), 必要時 commit+reload, 否則檢查 runtime
-        local _need=0
-        [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${IOT_IF}.disabled; _need=1; }
-        [ -n "$_radio" ] && [ "$(uci get wireless.${_radio}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_radio}.disabled; _need=1; }
-        if [ "$_need" = "1" ]; then
-            uci commit wireless; wifi reload
-            log "IOT WiFi ($IOT_IF+$_radio) 啟用 (runiotwifi=Y)"
-        else
-            local _up=$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.${_radio}.up")
-            if [ "$_up" != "true" ]; then
-                wifi up ${_radio}
-                log "IOT WiFi (${_radio}) runtime 修復 (wifi up): up=$_up"
-            fi
-        fi
-    else
-        # 關: 停 IOT iface; radio 無其他啟用 SSID 才一起停
-        if [ "$(uci get wireless.${IOT_IF}.disabled 2>/dev/null)" != "1" ]; then
-            uci set wireless.${IOT_IF}.disabled='1'
-            if [ -n "$_radio" ]; then
-                if radio_has_other_active_iface "$_radio" "$IOT_IF"; then
-                    log "[$_radio] 尚有其他啟用 SSID，保留 radio"
-                else
-                    uci set wireless.${_radio}.disabled='1'
-                fi
-            fi
-            uci commit wireless; wifi reload
-            log "IOT WiFi ($IOT_IF+$_radio) 停用 (runiotwifi=N)"
-        else
-            # ⚠️ 同 apply_5g_wifi: UCI 已對但 runtime 沒跟上時要補 reload,
-            #    否則「設定關了卻還在廣播」會是穩定狀態, 永遠不會自我修復。
-            if [ -n "$_radio" ] && ubus call network.wireless status 2>/dev/null \
-               | jsonfilter -e "@.${_radio}.interfaces[0].ifname" | grep -q .; then
-                wifi reload
-                log "IOT WiFi ($_radio) runtime 仍啟用但 UCI 已停用, 補做 reload"
-            fi
-        fi
-    fi
-}
-
-# 依 .mesh_run5gwifi 決定本機 5G WiFi 開/關 (脫離角色綁定)
-# 與 wifi-signal.sh 同讀 .mesh_run5gwifi 作為唯一真相來源, 避免兩者對打
-# ⚠️ 預設 Y (不是 runiotwifi 的 N): 5G 是主要 WiFi, flag 還沒下發就關會斷網。
-# ⚠️ 不動 mesh iface: 5G radio 上可能同時掛著 mesh(mode=mesh), 關 AP 不代表
-#    要關 radio —— radio_has_other_active_iface 已處理, 但 mesh 停用時
-#    (disabled=1) 不算 active, 故關 5G AP 會連 radio 一起關, 這是預期行為。
-apply_5g_wifi() {
-    local _run=$(cat /etc/myscript/.mesh_run5gwifi 2>/dev/null)
-    [ -z "$_run" ] && _run=Y
-    # 找 5G radio 上的 AP iface (band=5g 且 mode=ap)
-    local _radio="" _sec _if=""
-    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-device$/{print $2}'); do
-        [ "$(uci -q get wireless.${_sec}.band)" = "5g" ] && { _radio="$_sec"; break; }
-    done
-    [ -z "$_radio" ] && return
-    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/{print $2}'); do
-        [ "$(uci -q get wireless.${_sec}.device)" = "$_radio" ] || continue
-        [ "$(uci -q get wireless.${_sec}.mode)" = "ap" ] || continue
-        _if="$_sec"; break
-    done
-    [ -z "$_if" ] && return
-
-    if [ "$_run" = "Y" ]; then
-        local _need=0
-        [ "$(uci get wireless.${_if}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_if}.disabled; _need=1; }
-        [ "$(uci get wireless.${_radio}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_radio}.disabled; _need=1; }
-        if [ "$_need" = "1" ]; then
-            uci commit wireless; wifi reload
-            log "5G WiFi ($_if+$_radio) 啟用 (run5gwifi=Y)"
-        fi
-    else
-        if [ "$(uci get wireless.${_if}.disabled 2>/dev/null)" != "1" ]; then
-            uci set wireless.${_if}.disabled='1'
-            if radio_has_other_active_iface "$_radio" "$_if"; then
-                log "[$_radio] 尚有其他啟用 SSID，保留 radio"
-            else
-                uci set wireless.${_radio}.disabled='1'
-            fi
-            uci commit wireless; wifi reload
-            log "5G WiFi ($_if+$_radio) 停用 (run5gwifi=N)"
-        else
-            # ⚠️ UCI 已經是 disabled=1 但 runtime 還在廣播 —— 上次 reload 沒套用
-            #    (實測 2026-09-10: sync 寫好 UCI, 但 apply 因為「值已經對了」
-            #    而跳過 reload -> 變成永久不一致, 不會自我修復)。
-            #    ★ 判斷要看「實際狀態」不能只看 UCI, 否則設定與現實永遠對不上。
-            if ubus call network.wireless status 2>/dev/null \
-               | jsonfilter -e "@.${_radio}.interfaces[0].ifname" | grep -q .; then
-                wifi reload
-                log "5G WiFi ($_radio) runtime 仍啟用但 UCI 已停用, 補做 reload"
-            fi
-        fi
-    fi
-}
-
 # =====================
 # 一次性 fw3→fw4 遷移
 # =====================
@@ -845,9 +726,6 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
         [ "$PROMOTED" = "0" ] && log "服務: 全開 (主 gateway)"
         CHANGED=1
     fi
-    # IOT WiFi: 每輪依 .mesh_runiotwifi 自我修復 (脫離角色綁定)
-    apply_iot_wifi
-    apply_5g_wifi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi (AGH 由 check-adguard 管)
@@ -857,9 +735,6 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     wg_stop
-    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
-    apply_iot_wifi
-    apply_5g_wifi
     dbg "5.非主gateway: 停全部服務+IOT"
 else
     # client: 停全部服務 + IOT WiFi (AGH 與 dnsmasq upstream 由 check-adguard 管)
@@ -868,9 +743,6 @@ else
     [ -L /etc/dnsmasq.d/pbr ] && touch /var/run/pbr.dnsmasq 2>/dev/null
     svc_disable qosify
     wg_stop
-    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
-    apply_iot_wifi
-    apply_5g_wifi
     dbg "5.client: 停全部服務+IOT"
 fi
 
@@ -1499,9 +1371,6 @@ else
         add_fixup "補建 /var/run/pbr.dnsmasq (防 dnsmasq crash)"
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
-    # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定, 函式自行 log)
-    apply_iot_wifi
-    apply_5g_wifi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP | ${FIXUP_WHY:-未記錄原因}"
 

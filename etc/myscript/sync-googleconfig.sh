@@ -692,7 +692,7 @@ main() {
         eval $(awk -v host="$MY_HOSTNAME" '
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
-                h=""; p=""; wl=""; wr=""; gw=""; ra=""; rio=""; r5g=""; d1=""; d2=""; d3=""; d4=""
+                h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
                 c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
@@ -701,8 +701,6 @@ main() {
                     if ($i ~ /option wired_mesh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); wr=a[n] }
                     if ($i ~ /option gw_mode/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); gw=a[n] }
                     if ($i ~ /option runagh/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ra=a[n] }
-                    if ($i ~ /option runiotwifi/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); rio=a[n] }
-                    if ($i ~ /option run5gwifi/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); r5g=a[n] }
                     # 頻道清單欄位含多個頻道(空白分隔),不可用 a[n] 只取最後一個 token,
                     # 需比照 upstream_dns* 取第 3 欄以後整段
                     if ($i ~ /option ch5g_main/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch5g_main[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c5m=v }
@@ -720,7 +718,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra " NEW_RUNIOTWIFI=" rio " NEW_RUN5GWIFI=" r5g " NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -777,32 +775,6 @@ main() {
         if [ "$NEW_RUNAGH" != "$CUR_RUNAGH" ]; then
             echo "$NEW_RUNAGH" > /etc/myscript/.mesh_runagh
             log "🔧 mesh_runagh: $CUR_RUNAGH → $NEW_RUNAGH (hostname=$MY_HOSTNAME)"
-        fi
-        # 更新 .mesh_runiotwifi (TRUE/FALSE → Y/N, 預設 N)
-        case "$NEW_RUNIOTWIFI" in
-            TRUE|true|1|Y|y) NEW_RUNIOTWIFI=Y ;;
-            FALSE|false|0|N|n) NEW_RUNIOTWIFI=N ;;
-            "") NEW_RUNIOTWIFI=N ;;
-        esac
-        CUR_RUNIOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
-        if [ "$NEW_RUNIOTWIFI" != "$CUR_RUNIOTWIFI" ]; then
-            echo "$NEW_RUNIOTWIFI" > /etc/myscript/.mesh_runiotwifi
-            log "🔧 mesh_runiotwifi: $CUR_RUNIOTWIFI → $NEW_RUNIOTWIFI (hostname=$MY_HOSTNAME)"
-        fi
-        # 更新 .mesh_run5gwifi (TRUE/FALSE → Y/N)
-        # ⚠️ 預設 Y 而不是像 runiotwifi 那樣預設 N! 5G 是主要 WiFi(這裡是
-        #    default_radio1/SSID Portkey), 欄位還沒建或讀不到就預設關,
-        #    會讓整個機隊的主 WiFi 被關掉。★ 只有明確填 FALSE 才關。
-        case "$NEW_RUN5GWIFI" in
-            TRUE|true|1|Y|y) NEW_RUN5GWIFI=Y ;;
-            FALSE|false|0|N|n) NEW_RUN5GWIFI=N ;;
-            "") NEW_RUN5GWIFI=Y ;;
-            *) NEW_RUN5GWIFI=Y ;;
-        esac
-        CUR_RUN5GWIFI=$(cat /etc/myscript/.mesh_run5gwifi 2>/dev/null)
-        if [ "$NEW_RUN5GWIFI" != "$CUR_RUN5GWIFI" ]; then
-            echo "$NEW_RUN5GWIFI" > /etc/myscript/.mesh_run5gwifi
-            log "🔧 mesh_run5gwifi: $CUR_RUN5GWIFI → $NEW_RUN5GWIFI (hostname=$MY_HOSTNAME)"
         fi
         # 更新 .mesh_upstream_dns (一行一組 DNS，空值略過)
         NEW_DNS=""
