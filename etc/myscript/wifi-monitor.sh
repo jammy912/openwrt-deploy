@@ -15,17 +15,16 @@
 
 LOCK="/tmp/wifi-monitor.lock"
 
-# 已有實例在跑就跳過
-if [ -f "$LOCK" ]; then
-    kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0
-    rm -f "$LOCK"
-fi
-echo $$ > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
-
 # ---- 第 24 個參數: 限定只在指定 hostname 上執行 ----
 # ⚠️ 這支 cron 由 Google Sheet 下發給整個機隊, 不符的機器要「安靜」跳過:
 #    不 log 不推播, 否則每分鐘一筆噪音會洗掉 log buffer(只有 128KB)。
+# ★ 這段必須在「取鎖之前」!
+#   ⚠️ 實測 2026-09-10 踩到: 機隊 cron 是「一台一行」都下發到每台機器上,
+#      同一分鐘會同時啟動多個 wifi-monitor。若先取鎖, 別台的那行(hostname
+#      不符, 本來就該跳過)可能先搶到 /tmp/wifi-monitor.lock, 讓本台該跑的
+#      那行在鎖那裡就 exit 0 -> 參數改了卻毫無作用。
+#      症狀: .12 的 cron 第10參數已改成 0(關 2.4G), 但 150 秒後 IOT 仍在廣播。
+#   ★ 過濾放前面, 不符的行連鎖都不碰, 就不會互相卡。
 if [ $# -ge 24 ]; then
     # 取第 24 個參數(busybox ash 沒有陣列, 用 shift 取)
     _HOST_FILTER=$(shift 23; echo "$1")
@@ -45,6 +44,15 @@ if [ $# -ge 24 ]; then
            "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}" "${20}" \
            "${21}" "${22}" "${23}"
 fi
+
+# ---- 併發鎖(要在 hostname 過濾「之後」, 理由見上) ----
+# 已有實例在跑就跳過
+if [ -f "$LOCK" ]; then
+    kill -0 "$(cat "$LOCK")" 2>/dev/null && exit 0
+    rm -f "$LOCK"
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 
 # 將參數原樣傳遞
 /etc/myscript/wifi-signal.sh "$@"
