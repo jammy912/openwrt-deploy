@@ -12,13 +12,6 @@ trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
 . /etc/myscript/lock-handler.sh
 cron_global_lock 60 || exit 0
 
-# 只有主 gw 需要檢查 AGH 接手狀態。
-# ⚠️ 副 gw 本來就不跑 AGH(DNS 由主 gw 統一提供), 沒有它就一直推「AGH 未接手」
-#    是誤報 —— 實測 .4(副gw) 會一直推這則(2026-09-09)。
-# ★ 與 check-pbr-wg.sh:47-49 同一套判準, 值是 主gw / 副gw(auto-role 寫入)。
-GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
-[ "$GW_TYPE" != "主gw" ] && exit 0
-
 # 引入通知器
 . /etc/myscript/push-notify.inc
 PUSH_NAMES="admin" # 多人用分號分隔，例如 "admin;ann"
@@ -438,7 +431,20 @@ verify_dnsmasq_retry() {
 # ==============================
 # 主要邏輯
 # ==============================
+# ★ ensure_agh_state 要在「主gw 守衛」之前跑: .mesh_runagh 是「每台獨立」的
+#   開關(Y=本機允許跑 AGH / N=一律不跑), 與角色無關。
+# ⚠️ 2026-09-10 實測踩到: 守衛原本放在檔案開頭(第 20 行), 副gw 每輪都在那裡
+#    exit 0 -> ensure_agh_state 永遠跑不到 -> .4 設了 runagh=N 卻照樣跑著 AGH,
+#    且 init 仍 enabled(重開機還會自己起來), 整個 flag 形同虛設。
+#    證據: .4 的 adguard-switch log 掛 0 筆(連鎖都沒取), 對照 .12 有 39 筆。
 ensure_agh_state
+
+# 以下是「AGH 接手 DNS」的健檢與 upstream 決策, 只有主 gw 需要做。
+# ⚠️ 副 gw 本來就不跑 AGH(DNS 由主 gw 統一提供), 沒有它就一直推「AGH 未接手」
+#    是誤報 —— 實測 .4(副gw) 會一直推這則(2026-09-09)。
+# ★ 與 check-pbr-wg.sh:47-49 同一套判準, 值是 主gw / 副gw(auto-role 寫入)。
+GW_TYPE=$(cat /etc/myscript/.mesh_gw_type 2>/dev/null)
+[ "$GW_TYPE" != "主gw" ] && exit 0
 
 DECISION=$(pick_upstream)
 KIND=$(echo "$DECISION" | cut -d'|' -f1)

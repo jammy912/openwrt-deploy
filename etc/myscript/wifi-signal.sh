@@ -271,6 +271,37 @@ DESIRED_5G_STATUS=$((1 - ENABLE_5G))
     [ "$ENABLE_5G" -eq 1 ] && log "[$UCI_IFACE_5G] 啟用" || log "[$UCI_IFACE_5G] 停用"
 }
 
+# ★ UCI 已經是想要的值, 但 runtime 沒跟上時要補做 reload。
+# ⚠️ 上面兩段只在「UCI 值需要改變」時才設 change_occured, 若 UCI 早就對了
+#    (例如上次 reload 沒套用成功), 條件為假 -> 永遠不 reload -> 「設定停用了
+#    卻還在廣播」變成穩定狀態, 不會自我修復(實測 2026-09-10: .4 的
+#    radio0.disabled=1 但 iw dev 仍看得到 IOT 在 channel 6 廣播)。
+#    原本這個自我修復在 auto-role 的 apply_iot_wifi/apply_5g_wifi 裡, 移除那兩個
+#    函式後就沒人做了, 故補在這裡。
+# ⚠️ 判斷要看 interfaces[0].ifname 是否為空, 不能看 <radio>.up ——
+#    radio 停用後 up 仍回 true(radio 物件還在, 只是沒有 AP), 會每輪都 reload。
+#    ⚠️ 不能靠 change_occured 觸發: 它下游那段(第 1075 行)刻意「只用 iw 套用
+#       txpower, 不做 wifi reload」(避免 reload 讓 mesh+AP channel 歸 0), 全檔
+#       唯一的 wifi down/up 只在 Channel 0 修復時才跑。★ 故這裡直接自己 reload。
+_rt_mismatch=0
+for _pair in "$UCI_RADIO_2G:$ENABLE_2G" "$UCI_RADIO_5G:$ENABLE_5G"; do
+    _r="${_pair%:*}"; _want="${_pair##*:}"
+    [ -n "$_r" ] || continue
+    _ifn=$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.${_r}.interfaces[0].ifname" 2>/dev/null)
+    if [ "$_want" -eq 0 ] && [ -n "$_ifn" ]; then
+        _rt_mismatch=1; log "[$_r] UCI 已停用但 runtime 仍在廣播($_ifn), 補做 reload"
+    elif [ "$_want" -eq 1 ] && [ -z "$_ifn" ] \
+         && [ "$(uci -q get wireless.${_r}.disabled)" != "1" ]; then
+        _rt_mismatch=1; log "[$_r] UCI 已啟用但 runtime 沒有 AP, 補做 reload"
+    fi
+done
+# ⚠️ 首次執行(開機後)不 reload —— 與本檔既有的 FIRST_RUN 取捨一致,
+#    開機當下 radio 還沒收斂, 這時 reload 會讓 mesh+AP channel 歸 0。
+if [ "$_rt_mismatch" = "1" ] && [ "$FIRST_RUN" -ne 1 ]; then
+    uci commit wireless
+    wifi reload
+fi
+
 
 # =====================
 # BATMAN mesh 本機客戶端偵測
