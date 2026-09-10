@@ -100,6 +100,14 @@ apply_iot_wifi() {
             fi
             uci commit wireless; wifi reload
             log "IOT WiFi ($IOT_IF+$_radio) 停用 (runiotwifi=N)"
+        else
+            # ⚠️ 同 apply_5g_wifi: UCI 已對但 runtime 沒跟上時要補 reload,
+            #    否則「設定關了卻還在廣播」會是穩定狀態, 永遠不會自我修復。
+            if [ -n "$_radio" ] && ubus call network.wireless status 2>/dev/null \
+               | jsonfilter -e "@.${_radio}.interfaces[0].ifname" | grep -q .; then
+                wifi reload
+                log "IOT WiFi ($_radio) runtime 仍啟用但 UCI 已停用, 補做 reload"
+            fi
         fi
     fi
 }
@@ -144,6 +152,16 @@ apply_5g_wifi() {
             fi
             uci commit wireless; wifi reload
             log "5G WiFi ($_if+$_radio) 停用 (run5gwifi=N)"
+        else
+            # ⚠️ UCI 已經是 disabled=1 但 runtime 還在廣播 —— 上次 reload 沒套用
+            #    (實測 2026-09-10: sync 寫好 UCI, 但 apply 因為「值已經對了」
+            #    而跳過 reload -> 變成永久不一致, 不會自我修復)。
+            #    ★ 判斷要看「實際狀態」不能只看 UCI, 否則設定與現實永遠對不上。
+            if ubus call network.wireless status 2>/dev/null \
+               | jsonfilter -e "@.${_radio}.interfaces[0].ifname" | grep -q .; then
+                wifi reload
+                log "5G WiFi ($_radio) runtime 仍啟用但 UCI 已停用, 補做 reload"
+            fi
         fi
     fi
 }
