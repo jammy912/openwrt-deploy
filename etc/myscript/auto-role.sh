@@ -104,6 +104,50 @@ apply_iot_wifi() {
     fi
 }
 
+# 依 .mesh_run5gwifi 決定本機 5G WiFi 開/關 (脫離角色綁定)
+# 與 wifi-signal.sh 同讀 .mesh_run5gwifi 作為唯一真相來源, 避免兩者對打
+# ⚠️ 預設 Y (不是 runiotwifi 的 N): 5G 是主要 WiFi, flag 還沒下發就關會斷網。
+# ⚠️ 不動 mesh iface: 5G radio 上可能同時掛著 mesh(mode=mesh), 關 AP 不代表
+#    要關 radio —— radio_has_other_active_iface 已處理, 但 mesh 停用時
+#    (disabled=1) 不算 active, 故關 5G AP 會連 radio 一起關, 這是預期行為。
+apply_5g_wifi() {
+    local _run=$(cat /etc/myscript/.mesh_run5gwifi 2>/dev/null)
+    [ -z "$_run" ] && _run=Y
+    # 找 5G radio 上的 AP iface (band=5g 且 mode=ap)
+    local _radio="" _sec _if=""
+    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-device$/{print $2}'); do
+        [ "$(uci -q get wireless.${_sec}.band)" = "5g" ] && { _radio="$_sec"; break; }
+    done
+    [ -z "$_radio" ] && return
+    for _sec in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/{print $2}'); do
+        [ "$(uci -q get wireless.${_sec}.device)" = "$_radio" ] || continue
+        [ "$(uci -q get wireless.${_sec}.mode)" = "ap" ] || continue
+        _if="$_sec"; break
+    done
+    [ -z "$_if" ] && return
+
+    if [ "$_run" = "Y" ]; then
+        local _need=0
+        [ "$(uci get wireless.${_if}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_if}.disabled; _need=1; }
+        [ "$(uci get wireless.${_radio}.disabled 2>/dev/null)" = "1" ] && { uci delete wireless.${_radio}.disabled; _need=1; }
+        if [ "$_need" = "1" ]; then
+            uci commit wireless; wifi reload
+            log "5G WiFi ($_if+$_radio) 啟用 (run5gwifi=Y)"
+        fi
+    else
+        if [ "$(uci get wireless.${_if}.disabled 2>/dev/null)" != "1" ]; then
+            uci set wireless.${_if}.disabled='1'
+            if radio_has_other_active_iface "$_radio" "$_if"; then
+                log "[$_radio] 尚有其他啟用 SSID，保留 radio"
+            else
+                uci set wireless.${_radio}.disabled='1'
+            fi
+            uci commit wireless; wifi reload
+            log "5G WiFi ($_if+$_radio) 停用 (run5gwifi=N)"
+        fi
+    fi
+}
+
 # =====================
 # 一次性 fw3→fw4 遷移
 # =====================
@@ -785,6 +829,7 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$LAN_MODE" = "static" ]; then
     fi
     # IOT WiFi: 每輪依 .mesh_runiotwifi 自我修復 (脫離角色綁定)
     apply_iot_wifi
+    apply_5g_wifi
     dbg "5.主gateway (changed=$CHANGED promoted=$PROMOTED)"
 elif [ "$NEW_ROLE" = "gateway" ]; then
     # 非主 gateway: 停全部服務 + IOT WiFi (AGH 由 check-adguard 管)
@@ -796,6 +841,7 @@ elif [ "$NEW_ROLE" = "gateway" ]; then
     wg_stop
     # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
     apply_iot_wifi
+    apply_5g_wifi
     dbg "5.非主gateway: 停全部服務+IOT"
 else
     # client: 停全部服務 + IOT WiFi (AGH 與 dnsmasq upstream 由 check-adguard 管)
@@ -806,6 +852,7 @@ else
     wg_stop
     # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定)
     apply_iot_wifi
+    apply_5g_wifi
     dbg "5.client: 停全部服務+IOT"
 fi
 
@@ -1436,6 +1483,7 @@ else
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
     # IOT WiFi: 依 .mesh_runiotwifi 決定 (脫離角色綁定, 函式自行 log)
     apply_iot_wifi
+    apply_5g_wifi
 fi
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP | ${FIXUP_WHY:-未記錄原因}"
 

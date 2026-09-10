@@ -223,6 +223,15 @@ RUN_IOTWIFI=$(cat /etc/myscript/.mesh_runiotwifi 2>/dev/null)
 [ -z "$RUN_IOTWIFI" ] && RUN_IOTWIFI=N
 [ "$RUN_IOTWIFI" = "Y" ] && ENABLE_2G=1 || ENABLE_2G=0
 
+# 5G 開關以 .mesh_run5gwifi 為準 (來自 Google Sheet run5gwifi 欄位),
+# 效果與 runiotwifi 相同, 且「優先權大於 wifi-monitor.sh 傳入的第 9 個參數
+# ENABLE_5G」—— 故意放在命令列參數讀取「之後」覆寫。
+# ⚠️ 預設 Y 而不是 N: 5G 是主要 WiFi, flag 檔還沒下發就當成關會把主 WiFi
+#    關掉。★ 只有明確 N 才關 (與 runiotwifi 預設 N 的取捨不同, 別跟著抄)。
+RUN_5GWIFI=$(cat /etc/myscript/.mesh_run5gwifi 2>/dev/null)
+[ -z "$RUN_5GWIFI" ] && RUN_5GWIFI=Y
+[ "$RUN_5GWIFI" = "N" ] && ENABLE_5G=0 || ENABLE_5G=1
+
 CURRENT_2G_STATUS=$(uci get wireless.$UCI_IFACE_2G.disabled 2>/dev/null || echo 0)
 CURRENT_5G_STATUS=$(uci get wireless.$UCI_IFACE_5G.disabled 2>/dev/null || echo 0)
 
