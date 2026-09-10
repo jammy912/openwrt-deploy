@@ -298,7 +298,15 @@ done
 # ⚠️ 首次執行(開機後)不 reload —— 與本檔既有的 FIRST_RUN 取捨一致,
 #    開機當下 radio 還沒收斂, 這時 reload 會讓 mesh+AP channel 歸 0。
 if [ "$_rt_mismatch" = "1" ] && [ "$FIRST_RUN" -ne 1 ]; then
-    uci commit wireless
+    # ⚠️ 絕對不可以在這裡 uci commit wireless!
+    #    本檔對 txpower 的設計是「只寫 uci 暫存, 靠 iw 即時套用, 從不 commit」
+    #    (見第 1086 行 FIRST_RUN 時還會 uci revert wireless)。此處若 commit,
+    #    會把當下暫存的 txpower(可能是 LOW_PWR, cron 第 2 參數就是 1)一起
+    #    寫進 flash -> LuCI 的「最大傳輸功率」被凍結成 1 dBm。
+    #    實測 2026-09-10 踩到: .4 overlay 被寫成 txpower '1'(mtime 21:07,
+    #    正是我 20:11 部署新版之後), .12 更是 overlay/tmpfs/執行中全變 1。
+    # ★ disabled 旗標是 wifi reload 自己會從 /etc/config 讀的, 不需要 commit;
+    #   要的只是讓 runtime 重新對齊 UCI 現值。
     wifi reload
 fi
 
