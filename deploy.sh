@@ -364,6 +364,19 @@ if [ "$install_usb" = "y" ]; then
         samba4-server luci-app-samba4 luci-i18n-samba4-zh-tw 2>/dev/null
     uci set samba4.@samba[0].interface='lan'
     uci commit samba4
+    # 掛載前自動檢查檔案系統 (block-mount 內建選項, 預設 '0')
+    # ⚠️ 2026-09-10 .4 實測: 8TB 的目錄項損壞害 smbd 遞迴索引失敗
+    #    (EXT4-fs error __ext4_find_entry: EIO)。開這個讓 block 在「mount 之前」
+    #    自動跑 e2fsck。★ 不要自己寫 /etc/hotplug.d/block/ 來跑 fsck ——
+    #    block 的 add 事件觸發時碟「可能已經掛好」(現有 98-label-dupcheck 就得
+    #    sleep 5 等 mount 落定), 對已掛載的檔案系統跑 fsck 會毀資料。
+    # ★ block 用的旗標是 -p (只自動修安全的問題, 遇到需人工判斷就中止),
+    #   不是危險的 -y。(要用 strings -n 2 /sbin/block 才看得到單字元旗標)
+    # ⚠️ 這是機器層 UCI 設定, sysupgrade 後會回到預設 '0', 故寫進 deploy.sh。
+    if [ "$(uci -q get fstab.@global[0].check_fs)" != "1" ]; then
+        uci set fstab.@global[0].check_fs='1' 2>/dev/null && uci commit fstab 2>/dev/null \
+            && echo "  ✅ fstab check_fs=1 (掛載前自動 e2fsck -p)"
+    fi
     echo "usb-samba" >> "$MODULES_FILE"
     echo "  ✅ USB/Samba 已安裝 (interface=lan)"
 fi
