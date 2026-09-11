@@ -59,16 +59,32 @@ awk '$3=="ext4"{print $1" "$2}' /proc/mounts 2>/dev/null | sort -u | while read 
     _cnt=$(echo "$_info"   | awk -F: '/^FS Error count/{gsub(/[ \t]/,"",$2); print $2}')
     # ★ 歸零時該行不存在 -> 補預設 0(見檔頭說明)
     [ -z "$_cnt" ] && _cnt=0
+    # Last checked: e2fsck 跑過就會更新 -> 用來偵測「掛載前被自動修復」。
+    # ⚠️ 值含空白(如 "Fri Sep 11 11:07:11 2026"), 故狀態檔用 | 分隔不用空白。
+    _chk=$(echo "$_info" | sed -n 's/^Last checked:[[:space:]]*//p')
 
     # 狀態檔以裝置名為 key(去掉 /dev/)
     _key=$(echo "$_dev" | tr -d '/' | sed 's/^dev//')
     _sf="$STATEDIR/.$_key"
-    _prev=$(cat "$_sf" 2>/dev/null | awk '{print $1+0}')
+    # 格式: <errcount>|<last checked>。⚠️ 舊版只存數字, 用 -F'|' 取第一欄仍相容。
+    _raw=$(cat "$_sf" 2>/dev/null)
+    _prev=$(echo "$_raw" | awk -F'|' '{print $1+0}')
     [ -z "$_prev" ] && _prev=0
+    _prevchk=$(echo "$_raw" | awk -F'|' '{print $2}')
+
+    # ★ Last checked 變了 = 這顆碟被 e2fsck 修過(多半是開機時 block 的
+    #   check_fs=1 在 mount 前自動跑的)。★ 這個訊號不依賴 log ——
+    #   實測開機時的 fsck 在 logread 裡抓不到(buffer 只有 128KB 早被沖掉),
+    #   但 tune2fs 的 Last checked 會確實更新。
+    # ⚠️ 首次執行(_prevchk 空)不推播, 否則剛部署就誤報一次。
+    if [ -n "$_prevchk" ] && [ -n "$_chk" ] && [ "$_chk" != "$_prevchk" ]; then
+        log "🔧 $_mnt ($_dev) 已被 e2fsck 檢查/修復: $_prevchk -> $_chk"
+        push_notify "🔧檔案系統 $_mnt 已自動修復 (掛載前 e2fsck): 檢查時間 $_chk, 先前錯誤累計 $_prev, 目前 state=$_state"
+    fi
 
     # ⚠️ 只在「有變化」時才寫檔: /etc/myscript 在 flash 上,
     #    每輪無條件寫 = 1440 次/天磨 flash(參見 flash-wear-audit 的教訓)。
-    [ "$_cnt" != "$_prev" ] && echo "$_cnt" > "$_sf"
+    [ "$_cnt|$_chk" != "$_raw" ] && echo "$_cnt|$_chk" > "$_sf"
 
     case "$_state" in
         *"with errors"*)
