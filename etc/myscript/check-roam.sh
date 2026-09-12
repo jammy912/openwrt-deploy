@@ -1,41 +1,39 @@
 #!/bin/sh
 # =====================================================================
-# check-roam.sh — 監控指定 client 在 AP 之間的漫遊, 切換時推播
+# check-roam.sh — 監控 client 漫遊, 切換時推播
 #
-# 用法: check-roam.sh <IP|名稱樣式> [...]
-#   例: check-roam.sh 192.168.1.10          # 指定 IP
-#       check-roam.sh Phone                  # 所有名稱含 Phone 的(自動展開)
-#       check-roam.sh Phone Pad 192.168.1.87 # 可混用
-#   ★ 名稱樣式會即時查 DHCP 租約展開, 所以新手機加入後不必改 cron。
+# 用法: check-roam.sh            # 監看所有「有 DHCP 租約」的裝置
+#       check-roam.sh <名稱樣式> # 只看符合的(例: Phone)
 #
-# 推播內容: 從哪台切到哪台 + 訊號(只報「有沒有切換」, 不含 ping)
+# ★ 資料來源是「本機 hostapd 的 syslog 事件」, 不是 usteer。
+#   實測 2026-09-12: 對照 4 分鐘的實走測試, hostapd 的 AP-STA-CONNECTED
+#   與真實漫遊 7/7 完全吻合, 而舊的 usteer 判定法 12 次裡有 7 次是假的。
 #
-# ★ 判斷「現在關聯在哪台 AP」的方法(實測 2026-09-11 才確定):
-#   usteer 的 ubus 介面會同時回報本機與遠端節點, 例如同一個 MAC 底下有:
-#       "hostapd.phy1-ap0"              (本機)
-#       "192.168.1.4#hostapd.phy1-ap0"  (遠端節點)
-#   ⚠️ 但漫遊後「兩邊的 connected 都會是 true」(舊的關聯尚未被清掉),
-#      所以 **不能只看 connected**, 會一直誤判成在切換。
-#   ★ 正解: 用 iw 的 inactive time 決勝 —— 真正的關聯 inactive 很低。
-#     實測同一支手機: .4 的 inactive=460ms(真), .1 的 inactive=20000ms(殘留)。
-#     usteer 的 signal 可當輔助佐證(-50 vs -56)。
+# ⚠️⚠️ 為什麼放棄 usteer(舊版的真兇, 別再走回頭路):
+#   usteer get_clients 對每個節點只給 connected 與 signal 兩個欄位:
+#       "46:9d:4d:09:6f:6e": {
+#           "hostapd.phy1-ap0":             {"connected": true, "signal": -68},
+#           "192.168.1.1#hostapd.phy1-ap0": {"connected": true, "signal": -57}
+#       }
+#   (a) 漫遊後兩邊 connected 都是 true(舊關聯數分鐘才清), 不能當判準;
+#   (b) 遠端節點「沒有 inactive 欄位」, 只好拿 signal 猜 —— 但兩台訊號
+#       長期只差幾 dB(實測 -54 vs -60), 每輪隨機翻面, 於是腳本自己在
+#       兩台之間亂跳, 推播 7/12 是假的。使用者看到的「同一個一直跳」
+#       大部分是這個 bug, 不是手機真的在跳。
+#   (c) 想「ssh 去對台查 inactive」也行不通: .4 只有 host key 沒有 client
+#       私鑰, 實測 "No auth methods could be used"。
+#   -> 結論: 本機 hostapd 事件是唯一可信且拿得到的真相來源。
 #
-# ⚠️ 不要用 iwinfo / iw scan 取資料: 5G 跑 HE160 時 off-channel scan 會失敗,
-#    iw 回 "Resource busy(-16)", 而 iwinfo 會**無限卡住**(實測卡 15 分鐘以上,
-#    還會擋住後續所有 iw 呼叫)。詳見 push-wifistatus.sh 的眉角三。
+# ★ 只報「本機視角」: CONNECTED = 接上本機, DISCONNECTED = 離開本機。
+#   刻意不宣稱「跑去哪一台」—— 那需要對台資料, 而我們拿不到(見上)。
+#   硬猜就是舊版造假的根源。
 #
-# ⚠️ 每輪要夠快才能縮短間隔: 拿掉 ping 後一輪只剩 ubus+iw 約 0.1 秒,
-#    因此 --loop 5(每 5 秒一次)完全跑得動。
+# ⚠️ 只在「一台」啟動。兩台各跑會各自從自己視角推播, 同一次漫遊收到兩則
+#    (一則「離開」一則「接上」), 且無法合併。目前只在 .4 由 rc.local 啟動。
 # =====================================================================
 
-# ---- 常駐模式: --loop <秒> ----
-# ★ cron 最快只能「每分鐘」一次, 而漫遊是秒級事件。要 10 秒偵測一次就得常駐。
-# ⚠️ 常駐模式「不取 cron_global_lock」: 那把鎖是給每分鐘的排程排隊用的,
-#    每 10 秒去搶一次會跟其他所有 cron 工作打架。常駐只用自己的 LOCK。
-LOOP=0
-if [ "$1" = "--loop" ]; then
-    LOOP="${2:-10}"; shift 2
-fi
+# ---- 參數: 名稱樣式(可省略 = 全部有租約的裝置) ----
+PATTERN="$*"
 
 LOCK="/tmp/check-roam.lock"
 if [ -f "$LOCK" ]; then
@@ -43,148 +41,94 @@ if [ -f "$LOCK" ]; then
     rm -f "$LOCK"
 fi
 echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT INT TERM
 
-if [ "$LOOP" = "0" ]; then
-    trap 'rm -f "$LOCK" /tmp/cron_global.lock' EXIT
-    # 單次模式(cron 用): 照慣例排隊, 避免與其他 cron 工作撞在一起
-    . /etc/myscript/lock-handler.sh
-    cron_global_lock 60 || exit 0
-else
-    trap 'rm -f "$LOCK"' EXIT INT TERM
-fi
-
-# ---- 沒有 usteer 的機器安靜跳過(機隊防護) ----
-# ⚠️ 這支 cron 可能下發給整個機隊, 沒跑 usteer 的機器要安靜退出不洗 log。
-ubus list 2>/dev/null | grep -qx usteer || exit 0
+# ---- 沒有 hostapd 的機器安靜跳過(機隊防護) ----
+# ⚠️ 這支可能下發給整個機隊, 沒跑 AP 的機器要安靜退出不洗 log。
+[ -d /var/run/hostapd ] || ubus list 2>/dev/null | grep -q '^hostapd\.' || exit 0
 
 . /etc/myscript/push-notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 
-# ★ 狀態檔放 /tmp(tmpfs)不放 /etc/myscript(flash):
-#   這裡存的只是「上次判定在哪台 AP」, 屬純執行期資料 —— 重開機後第一輪
-#   (5 秒內)就會重建, 完全不需要持久化。
-#   ⚠️ 反之放 flash 會被高頻改寫: 常駐每 5 秒一輪 = 最多 17280 次/天,
-#      即使只在有變化時才寫, 漫遊頻繁時仍遠高於其他每分鐘一次的腳本。
-#   ⚠️ 副作用(刻意接受): 重開機後狀態歸零, 第一次判定因為沒有 _prev
-#      而不推播(見下方比對邏輯), 所以開機後的第一次漫遊不會通知。
-STATEDIR="/tmp/.roam"
-mkdir -p "$STATEDIR" 2>/dev/null
-
 LOGTAG="check-roam"
-log() { echo "$1"; logger -t "$LOGTAG" "$1"; }
+log() { logger -t "$LOGTAG" "$1"; }
 
-[ $# -eq 0 ] && { echo "用法: $0 <IP> [IP2 ...]"; exit 1; }
-
-# IP -> MAC (查 DHCP 租約)
-ip2mac() {
-    awk -v ip="$1" '$3==ip{print $2; exit}' /tmp/dhcp.leases 2>/dev/null
-}
-# MAC -> 裝置名
+# MAC -> 裝置名。★ 回空 = 沒有 DHCP 租約。
+# ⚠️ hostapd 與 dhcp.leases 的 MAC 都是小寫冒號格式, 可直接比對(已實測)。
 mac2name() {
-    awk -v m="$1" '$2==m{print $4; exit}' /tmp/dhcp.leases 2>/dev/null
+    awk -v m="$1" 'tolower($2)==tolower(m){print $4; exit}' /tmp/dhcp.leases 2>/dev/null
+}
+mac2ip() {
+    awk -v m="$1" 'tolower($2)==tolower(m){print $3; exit}' /tmp/dhcp.leases 2>/dev/null
 }
 
-# 取該 MAC 在本機各介面的 inactive time(毫秒); 找不到回空
-local_inactive() {
-    _m="$1"
-    for _if in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
-        _v=$(iw dev "$_if" station get "$_m" 2>/dev/null \
-             | awk '/inactive time:/{print $3; exit}')
-        [ -n "$_v" ] && { echo "$_v"; return; }
-    done
-}
+HOSTNAME="$(uci -q get system.@system[0].hostname)"
+log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有有租約的裝置} (來源: hostapd 事件)"
 
-# (原本會附上切換前後的 ping 值, 已移除: 只要知道「有沒有切換」。
-#  ★ ping 是每輪最慢的部分(5 次 x 3 台約 15 秒), 拿掉後一輪只剩 ubus+iw
-#    約 0.1 秒, 才能做到 5 秒偵測一次。
-#  ⚠️ 而且不是每台都 ping 得到 —— 實測 Phone_Yiting 100% 遺失, 那串
-#     "5 packets transmitted, 0 packets received" 會被當成 ping 值推播出去。)
+# ---- 主迴圈: 串流 hostapd 事件 ----
+# ★ 用 logread -f 串流而非輪詢: 漫遊是秒級事件, 輪詢會漏也會延遲。
+#   實測 logread 有 -f(Follow log messages)。
+# ⚠️ 用 -e 先在 logread 端過濾, 避免把整個 log 都丟進 shell 迴圈。
+# ⚠️ while 由管線餵食 = 跑在子 shell, 迴圈內設的變數帶不出來。本迴圈
+#    刻意不依賴任何值傳出去(推播在迴圈內完成), 故子 shell 不影響正確性。
+logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
 
-# ---- 參數展開: 名稱樣式 -> 實際 IP ----
-# ★ 非 IP 格式的參數當成「名稱樣式」, 即時查 DHCP 租約展開成所有符合的 IP。
-#   這樣新手機加入後不必改 cron(例: 傳 Phone 就涵蓋 Phone_Jammy/Yiting/HTC...)。
-# ⚠️ 只展開「目前有租約」的裝置; 沒上線的(如 uci 靜態設定裡的 Phone_Nana)
-#    不會出現, 這是刻意的 —— 沒關聯的裝置本來就無從判斷漫遊。
-
-while :; do
-
-# ★ 目標展開放在迴圈「內」: DHCP 租約會變(新手機加入、租約更新),
-#   每輪重新展開才抓得到新裝置。
-_TARGETS=""
-for _a in "$@"; do
-    case "$_a" in
-        # 看起來像 IPv4 就直接用
-        [0-9]*.[0-9]*.[0-9]*.[0-9]*)
-            _TARGETS="$_TARGETS $_a"
-            ;;
-        *)
-            _m=$(awk -v p="$_a" 'tolower($4) ~ tolower(p) {print $3}' /tmp/dhcp.leases 2>/dev/null)
-            [ -z "$_m" ] && log "樣式 '$_a' 在 DHCP 租約中找不到符合的裝置"
-            _TARGETS="$_TARGETS $_m"
-            ;;
+    case "$line" in
+        *AP-STA-CONNECTED*)    _ev="connected" ;;
+        *AP-STA-DISCONNECTED*) _ev="disconnected" ;;
+        *) continue ;;
     esac
-done
 
-for _ip in $_TARGETS; do
-    _mac=$(ip2mac "$_ip")
-    [ -z "$_mac" ] && { log "找不到 $_ip 的 MAC(不在 DHCP 租約)"; continue; }
+    # 行格式(實測逐字):
+    #   Sat Sep 12 16:10:12 2026 daemon.notice hostapd: phy1-ap0: AP-STA-CONNECTED 46:9d:4d:09:6f:6e auth_alg=ft
+    #   Sat Sep 12 16:10:37 2026 daemon.notice hostapd: phy1-ap0: AP-STA-DISCONNECTED 46:a2:41:eb:f2:97
+    _mac=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:/){print tolower($i); exit}}')
+    [ -z "$_mac" ] && continue
+
+    # auth_alg=ft 代表走 802.11r 快速漫遊(只有 CONNECTED 行才有)
+    _alg=$(echo "$line" | sed -n 's/.*auth_alg=\([a-z]*\).*/\1/p')
+
+    # ---- 過濾: 只看有 DHCP 租約的裝置 ----
+    # ★ 使用者選擇「只限有租約的」: usteer/hostapd 看得到 19 台, 但其中
+    #   11 台是無租約的隨機 MAC(鄰居裝置、訪客), 推播只會是一串裸 MAC。
     _name=$(mac2name "$_mac")
+    [ -z "$_name" ] && continue
+    [ "$_name" = "*" ] && continue          # 租約有但沒主機名的也跳過
+    _ip=$(mac2ip "$_mac")
 
-    # ---- 從 usteer 取出該 MAC 在各 AP 的 connected / signal ----
-    # 輸出格式: <node>|<connected>|<signal>
-    _snap=$(ubus call usteer get_clients 2>/dev/null | awk -v m="$_mac" '
-        $0 ~ "\""m"\"" {f=1; next}
-        f && /^\t\t"/ { gsub(/[",:]/,""); node=$1; next }
-        f && /connected/ { gsub(/[",]/,""); conn=$2; next }
-        f && /signal/ { gsub(/[",]/,""); print node"|"conn"|"$2; next }
-        f && /^\t}/ {exit}
-    ')
-    [ -z "$_snap" ] && continue          # usteer 沒看到這台, 跳過不誤報
-
-    # ---- 決定「目前真正關聯在哪」----
-    # ★ connected 可能多台都 true(舊關聯未清), 故用 inactive time 決勝:
-    #   本機有 inactive 就比較它; 遠端節點無法直接查 inactive, 改用 signal 最強者。
-    _local_ia=$(local_inactive "$_mac")
-    _best=""; _best_sig=-999
-    for _row in $_snap; do
-        _node=$(echo "$_row" | cut -d'|' -f1)
-        _conn=$(echo "$_row" | cut -d'|' -f2)
-        _sig=$(echo "$_row"  | cut -d'|' -f3)
-        [ "$_conn" = "true" ] || continue
-        case "$_node" in
-            hostapd.*)  _label="$(uci -q get system.@system[0].hostname)" ;;
-            *#hostapd.*) _label="${_node%%#*}" ;;
-            *) _label="$_node" ;;
-        esac
-        # 本機且 inactive 很低 -> 幾乎確定是它
-        if [ "${_node#hostapd.}" != "$_node" ] && [ -n "$_local_ia" ] \
-           && [ "$_local_ia" -lt 2000 ] 2>/dev/null; then
-            _best="$_label"; _best_sig="$_sig"; break
-        fi
-        # 否則取訊號最強者
-        if [ "${_sig:--999}" -gt "$_best_sig" ] 2>/dev/null; then
-            _best="$_label"; _best_sig="$_sig"
-        fi
-    done
-    [ -z "$_best" ] && continue
-
-    # ---- 與上次比對 ----
-    _sf="$STATEDIR/.$(echo "$_ip" | tr -d '.')"
-    _raw=$(cat "$_sf" 2>/dev/null)
-    _prev=$(echo "$_raw" | cut -d'|' -f1)
-
-    if [ -n "$_prev" ] && [ "$_prev" != "$_best" ]; then
-        log "漫遊: ${_name:-$_ip} $_prev -> $_best (signal ${_best_sig}dBm)"
-        push_notify "📶${_name:-$_ip}($_ip) 漫遊: $_prev → $_best (訊號 ${_best_sig}dBm)"
+    # ---- 名稱樣式過濾(有給才比對) ----
+    if [ -n "$PATTERN" ]; then
+        _hit=0
+        for _p in $PATTERN; do
+            case "$(echo "$_name" | tr 'A-Z' 'a-z')" in
+                *"$(echo "$_p" | tr 'A-Z' 'a-z')"*) _hit=1; break ;;
+            esac
+        done
+        [ "$_hit" = "1" ] || continue
     fi
 
-    # 只在有變化時才寫(狀態檔已移到 tmpfs, 這裡純粹是省掉無謂的 I/O)。
-    [ "$_best" != "$_raw" ] && echo "$_best" > "$_sf"
-done
+    # ---- 去重 ----
+    # ⚠️ hostapd 對同一次漫遊會連發多行(DISCONNECTED + associated + CONNECTED
+    #    同一秒), 且重連時會先 DISCONNECTED 再立刻 CONNECTED。
+    #    只推「狀態真的改變」的那一次, 用 /tmp 記住上次狀態。
+    _sf="/tmp/.roam/.$(echo "$_mac" | tr -d ':')"
+    mkdir -p /tmp/.roam 2>/dev/null
+    _prev=$(cat "$_sf" 2>/dev/null)
+    [ "$_prev" = "$_ev" ] && continue
+    echo "$_ev" > "$_sf"
 
-    # 單次模式(cron)跑完就走; 常駐模式睡 $LOOP 秒後再來
-    [ "$LOOP" = "0" ] && break
-    sleep "$LOOP"
+    # ★ 首次看到這台不推播(沒有前一個狀態可比), 避免剛啟動就洗一輪。
+    [ -z "$_prev" ] && continue
+
+    if [ "$_ev" = "connected" ]; then
+        _ft=""
+        [ "$_alg" = "ft" ] && _ft=" (FT 快速漫遊)"
+        log "漫遊: $_name($_ip) 接上 $HOSTNAME$_ft"
+        push_notify "📶${_name}(${_ip}) 接上 ${HOSTNAME}${_ft}"
+    else
+        log "漫遊: $_name($_ip) 離開 $HOSTNAME"
+        push_notify "📶${_name}(${_ip}) 離開 ${HOSTNAME}"
+    fi
 done
 
 exit 0
