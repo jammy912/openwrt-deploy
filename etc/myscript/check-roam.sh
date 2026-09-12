@@ -147,29 +147,36 @@ logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
         [ "$_hit" = "1" ] || continue
     fi
 
+    # ---- 只推「漫遊過來」那一方, 且限 auth_alg=ft ----
+    #   - 離開(DISCONNECTED)不推 —— 同一次漫遊由接收端推, 兩邊都推等於重複。
+    #   - auth_alg=open/sae 不推 —— 那是全新連線(開機、關開 WiFi、離開後重連),
+    #     不是 AP 之間的漫遊。只有 ft 才是 802.11r 快速漫遊。
+    # ★ 提前 continue: 不合格的事件「完全不碰狀態檔」。這是關鍵, 見下方說明。
+    [ "$_ev" = "connected" ] || continue
+    [ "$_alg" = "ft" ] || continue
+
     # ---- 去重 ----
-    # ⚠️ hostapd 對同一次漫遊會連發多行(DISCONNECTED + associated + CONNECTED
-    #    同一秒), 且重連時會先 DISCONNECTED 再立刻 CONNECTED。
-    #    只推「狀態真的改變」的那一次, 用 /tmp 記住上次狀態。
+    # ⚠️⚠️ 舊版把狀態檔當成 connected/disconnected 兩態機, 有兩個漏洞(實測踩到):
+    #   (a) auth_alg=open 的全新連線雖然不推播, 卻仍寫入 "connected", 把狀態
+    #       卡住; 之後真正的 FT 漫遊因為「狀態沒變」被去重吃掉, 永遠不推。
+    #       實測 2026-09-12: Phone_HTC_Android 16:42:26 一筆 open 連線後,
+    #       狀態檔=connected, 下次 FT 漫遊必定被吃掉。
+    #   (b) 連續兩次 FT CONNECTED 中間若沒有 DISCONNECTED(漫遊走 over-the-air
+    #       時本機未必看得到離開事件), 第二次也會被吃掉。
+    #       實測: Phone_Jammy 在 .1 的 16:31:03 → 16:31:55 就是連續 CONNECTED。
+    #
+    # ★ 正解: 去重的目的只是「濾掉 hostapd 對同一次事件連發的重複行」,
+    #   不是模擬連線狀態。所以改用「事件指紋」= 時間戳, 只要不是同一秒的
+    #   同一筆就放行。不同 auth_alg / 不同時刻的事件不會互相干擾。
+    _ts=$(echo "$line" | awk '{print $4}')
     _sf="/tmp/.roam/.$(echo "$_mac" | tr -d ':')"
     mkdir -p /tmp/.roam 2>/dev/null
     _prev=$(cat "$_sf" 2>/dev/null)
-    [ "$_prev" = "$_ev" ] && continue
-    echo "$_ev" > "$_sf"
+    [ "$_prev" = "$_ts" ] && continue
+    echo "$_ts" > "$_sf"
 
-    # ★ 首次看到這台不推播(沒有前一個狀態可比), 避免剛啟動就洗一輪。
-    [ -z "$_prev" ] && continue
-
-    # ★ 只推「漫遊過來」那一方, 且限 auth_alg=ft:
-    #   - 離開(DISCONNECTED)不推 —— 同一次漫遊會由接收端推, 兩邊都推等於重複。
-    #   - auth_alg=open/sae 不推 —— 那是全新連線(開機、關開 WiFi、離開後重連),
-    #     不是 AP 之間的漫遊。只有 ft 才是 802.11r 快速漫遊。
-    #   ⚠️ 但 DISCONNECTED 仍要記狀態(上面已寫 $_sf), 否則下次 CONNECTED
-    #      會因為狀態沒變而被去重吃掉。
-    if [ "$_ev" = "connected" ] && [ "$_alg" = "ft" ]; then
-        log "漫遊: $_name($_ip) FT 漫遊到 $HOSTNAME"
-        push_notify "📶${_name}(${_ip}) 漫遊到 ${HOSTNAME}"
-    fi
+    log "漫遊: $_name($_ip) FT 漫遊到 $HOSTNAME"
+    push_notify "📶${_name}(${_ip}) 漫遊到 ${HOSTNAME}"
 done
 
 exit 0
