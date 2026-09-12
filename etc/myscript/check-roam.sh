@@ -53,17 +53,53 @@ PUSH_NAMES="${PUSH_NAMES:-admin}"
 LOGTAG="check-roam"
 log() { logger -t "$LOGTAG" "$1"; }
 
-# MAC -> 裝置名。★ 回空 = 沒有 DHCP 租約。
-# ⚠️ hostapd 與 dhcp.leases 的 MAC 都是小寫冒號格式, 可直接比對(已實測)。
+# MAC -> 裝置名 / IP。資料來源是 /etc/config/dhcp 的靜態綁定, 不是 /tmp/dhcp.leases。
+#
+# ⚠️⚠️ 為什麼不能用 /tmp/dhcp.leases(踩過, 害整支靜默失效):
+#   .4 是副 gw, dhcp.lan.ignore='1' 不發 DHCP, 它的 /tmp/dhcp.leases 是 0 bytes。
+#   實測 2026-09-12: .1 有 22 筆租約, .4 有 0 筆。曾一度看到 .4 有 8 筆是
+#   「短暫當過主 gw 的殘留」, 16:24 被清空 —— 而我剛好在清空前驗證「端到端通過」,
+#   等於驗證在即將消失的資料上。角色切換(auto-role)會讓租約檔時有時無,
+#   所以本機租約檔在這個架構下根本不可靠。
+#
+# ★ 改用 /etc/config/dhcp 的 config host 靜態綁定:
+#   - 兩台各 38 筆且內容一致(deploy 下發), 不受角色切換影響
+#   - 每筆都有 name + mac + ip(已實測 38/38 齊全)
+#   ⚠️ uci 裡的 MAC 是大寫('6E:A2:93:A9:6D:F1'), hostapd log 是小寫,
+#      必須大小寫無關比對, 否則全查不到。
+#
+# ★ 快取: 每次事件都跑 uci show 太慢, 開機讀一次進變數。
+#   ⚠️ 但新增裝置後要重啟常駐才會生效 —— 這是刻意取捨(靜態綁定很少變動)。
+_HOSTMAP=""
+load_hostmap() {
+    _HOSTMAP=$(uci -q show dhcp 2>/dev/null | awk -F'[.=]' '
+        /^dhcp\.@host\[[0-9]+\]\.(name|mac|ip)=/ {
+            idx = $2; key = $3
+            gsub(/^.*\[|\].*$/, "", idx)
+            val = $0; sub(/^[^=]*=/, "", val); gsub(/'"'"'/, "", val)
+            if (key == "name") n[idx] = val
+            else if (key == "mac") m[idx] = tolower(val)
+            else if (key == "ip")  p[idx] = val
+        }
+        END { for (i in m) if (m[i] != "" && n[i] != "") print m[i]"|"n[i]"|"p[i] }
+    ')
+}
 mac2name() {
-    awk -v m="$1" 'tolower($2)==tolower(m){print $4; exit}' /tmp/dhcp.leases 2>/dev/null
+    echo "$_HOSTMAP" | awk -F'|' -v m="$(echo "$1" | tr 'A-Z' 'a-z')" '$1==m{print $2; exit}'
 }
 mac2ip() {
-    awk -v m="$1" 'tolower($2)==tolower(m){print $3; exit}' /tmp/dhcp.leases 2>/dev/null
+    echo "$_HOSTMAP" | awk -F'|' -v m="$(echo "$1" | tr 'A-Z' 'a-z')" '$1==m{print $3; exit}'
 }
 
 HOSTNAME="$(uci -q get system.@system[0].hostname)"
-log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有有租約的裝置} (來源: hostapd 事件)"
+
+# ★ 一定要載入, 否則 _HOSTMAP 是空的 -> 所有查詢回空 -> 全部被過濾掉不推播。
+load_hostmap
+_HOSTCNT=$(echo "$_HOSTMAP" | grep -c .)
+log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有靜態綁定裝置} (來源: hostapd 事件, 已載入 ${_HOSTCNT} 筆綁定)"
+
+# ⚠️ 載不到就直接退出, 不要靜默空跑。(踩過三次: 看似在跑卻從不推播)
+[ "$_HOSTCNT" -lt 1 ] && { log "❌ /etc/config/dhcp 讀不到任何 config host 綁定, 結束"; exit 1; }
 
 # ---- 主迴圈: 串流 hostapd 事件 ----
 # ★ 用 logread -f 串流而非輪詢: 漫遊是秒級事件, 輪詢會漏也會延遲。
@@ -93,12 +129,11 @@ logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
     # auth_alg=ft 代表走 802.11r 快速漫遊(只有 CONNECTED 行才有)
     _alg=$(echo "$line" | sed -n 's/.*auth_alg=\([a-z]*\).*/\1/p')
 
-    # ---- 過濾: 只看有 DHCP 租約的裝置 ----
-    # ★ 使用者選擇「只限有租約的」: usteer/hostapd 看得到 19 台, 但其中
-    #   11 台是無租約的隨機 MAC(鄰居裝置、訪客), 推播只會是一串裸 MAC。
+    # ---- 過濾: 只看 /etc/config/dhcp 裡有靜態綁定的裝置 ----
+    # ★ hostapd 看得到的不只自家裝置(鄰居、訪客的隨機 MAC), 沒綁定的推播
+    #   只會是一串裸 MAC, 故一律略過。
     _name=$(mac2name "$_mac")
     [ -z "$_name" ] && continue
-    [ "$_name" = "*" ] && continue          # 租約有但沒主機名的也跳過
     _ip=$(mac2ip "$_mac")
 
     # ---- 名稱樣式過濾(有給才比對) ----
