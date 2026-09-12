@@ -132,7 +132,10 @@ HOSTNAME="$(uci -q get system.@system[0].hostname)"
 # ★ 一定要載入, 否則 _HOSTMAP 是空的 -> 所有查詢回空 -> 全部被過濾掉不推播。
 load_hostmap
 _HOSTCNT=$(echo "$_HOSTMAP" | grep -c .)
-log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有靜態綁定裝置} (去重 ${FT_TRACKING_TIME}s, 來源: hostapd 事件, 已載入 ${_HOSTCNT} 筆綁定)"
+# ⚠️ 不可寫成 ${PATTERN:+「$PATTERN」}${PATTERN:-預設字串}: PATTERN 非空時兩個
+#    展開式都會生效, log 會變成「監看「Phone」Phone」(實測踩過)。
+if [ -n "$PATTERN" ]; then _scope="「$PATTERN」"; else _scope="所有靜態綁定裝置"; fi
+log "啟動: 監看${_scope} (去重 ${FT_TRACKING_TIME}s, 來源: hostapd 事件, 已載入 ${_HOSTCNT} 筆綁定)"
 
 # ⚠️ 載不到就直接退出, 不要靜默空跑。(踩過三次: 看似在跑卻從不推播)
 [ "$_HOSTCNT" -lt 1 ] && { log "❌ /etc/config/dhcp 讀不到任何 config host 綁定, 結束"; exit 1; }
