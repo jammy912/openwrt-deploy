@@ -142,12 +142,17 @@ rm -f /tmp/luci-indexcache
 ) &
 
 
-# 漫遊監控常駐(串流本機 hostapd 事件; 不帶參數 = 所有有 DHCP 租約的裝置)
+# 漫遊監控常駐(串流本機 hostapd 事件)
 # ★ 用 rc.local 不用 cron: cron 最快每分鐘一次, 漫遊是秒級事件會整段漏掉。
 # ★ 不再有 --loop: 改用 logread -f 串流, 不輪詢(舊版 usteer 輪詢法 12 次
 #   有 7 次是假的, 詳見 check-roam.sh 檔頭)。
-# ⚠️ 只在一台啟動: 兩台各跑會從各自視角各推一則(離開/接上)無法合併。
-#    沒跑 hostapd 的機器腳本自己會安靜退出, 故此行可安全下發給整個機隊。
+# ★ 不帶參數 = 讀 Google Sheet 下發的旗標檔:
+#     .ft_tracking_time        去重秒數, 0 = 不跑
+#     .ft_tracking_member 裝置名樣式, 空白或 ALL = 全部
+#   旗標檔不存在 = 監看所有靜態綁定裝置(預設行為)。
+# ★ .1 與 .4 兩台都跑: 只推「接上端且 auth_alg=ft」, 同一次漫遊只由接收端
+#   推一則不會重複, 兩台都跑才看得到雙向。
+#   沒跑 hostapd 的機器腳本自己會安靜退出, 故此行可安全下發給整個機隊。
 /etc/myscript/check-roam.sh &
 
 exit 0

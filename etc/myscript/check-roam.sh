@@ -2,8 +2,8 @@
 # =====================================================================
 # check-roam.sh — 監控 client 漫遊, 切換時推播
 #
-# 用法: check-roam.sh            # 監看所有「有 DHCP 租約」的裝置
-#       check-roam.sh <名稱樣式> # 只看符合的(例: Phone)
+# 用法: check-roam.sh            # 不帶參數 = 讀 Google Sheet 旗標檔(見下方)
+#       check-roam.sh <名稱樣式> # 只看符合的(例: Phone), 優先於旗標檔
 #
 # ★ 資料來源是「本機 hostapd 的 syslog 事件」, 不是 usteer。
 #   實測 2026-09-12: 對照 4 分鐘的實走測試, hostapd 的 AP-STA-CONNECTED
@@ -43,6 +43,33 @@
 # ⚠️ 逗號與分號要先轉成空白, 否則 `for _p in $PATTERN` 只會依 IFS(空白)切,
 #    "Phone,Pad" 會被當成單一字串去比對而全部落空。
 PATTERN=$(echo "$*" | tr ',;' '  ')
+
+# ---- Google Sheet 旗標檔(沒帶參數時才生效) ----
+#   /etc/myscript/.ft_tracking_time         去重秒數; 0 = 整支不跑
+#   /etc/myscript/.ft_tracking_member  裝置名樣式; 空白或 ALL = 全部
+# ★ 命令列參數優先於旗標檔, 方便手動臨時指定裝置測試而不動 Sheet。
+# ★ 旗標檔不存在 = 行為與加此功能前完全一致(監看全部, 去重 1 秒)。
+FT_TRACKING_TIME=$(cat /etc/myscript/.ft_tracking_time 2>/dev/null)
+FT_TRACKING_TIME="${FT_TRACKING_TIME:-1}"
+if [ -z "$PATTERN" ]; then
+    PATTERN=$(cat /etc/myscript/.ft_tracking_member 2>/dev/null | tr ',;' '  ')
+fi
+# ALL(不分大小寫) = 全部裝置, 等同留空
+case "$(echo "$PATTERN" | tr 'A-Z' 'a-z' | tr -d ' ')" in
+    all|"") PATTERN="" ;;
+esac
+
+# ---- ft_tracking_time=0 -> 不跑 ----
+# ★ 放在取鎖之前: 不留鎖檔、不留行程, 純粹安靜退出。
+if [ "$FT_TRACKING_TIME" = "0" ]; then
+    logger -t check-roam "ft_tracking_time=0, 不啟動漫遊監控"
+    exit 0
+fi
+
+# ⚠️ 去重秒數必須是數字, 否則後面的算術比較會整個爆掉而讓事件全漏。
+case "$FT_TRACKING_TIME" in
+    ''|*[!0-9]*) logger -t check-roam "⚠️ ft_tracking_time=[$FT_TRACKING_TIME] 非數字, 改用預設 1 秒"; FT_TRACKING_TIME=1 ;;
+esac
 
 LOCK="/tmp/check-roam.lock"
 if [ -f "$LOCK" ]; then
@@ -105,7 +132,7 @@ HOSTNAME="$(uci -q get system.@system[0].hostname)"
 # ★ 一定要載入, 否則 _HOSTMAP 是空的 -> 所有查詢回空 -> 全部被過濾掉不推播。
 load_hostmap
 _HOSTCNT=$(echo "$_HOSTMAP" | grep -c .)
-log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有靜態綁定裝置} (來源: hostapd 事件, 已載入 ${_HOSTCNT} 筆綁定)"
+log "啟動: 監看${PATTERN:+「$PATTERN」}${PATTERN:-所有靜態綁定裝置} (去重 ${FT_TRACKING_TIME}s, 來源: hostapd 事件, 已載入 ${_HOSTCNT} 筆綁定)"
 
 # ⚠️ 載不到就直接退出, 不要靜默空跑。(踩過三次: 看似在跑卻從不推播)
 [ "$_HOSTCNT" -lt 1 ] && { log "❌ /etc/config/dhcp 讀不到任何 config host 綁定, 結束"; exit 1; }
@@ -177,12 +204,19 @@ logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
     # ★ 正解: 去重的目的只是「濾掉 hostapd 對同一次事件連發的重複行」,
     #   不是模擬連線狀態。所以改用「事件指紋」= 時間戳, 只要不是同一秒的
     #   同一筆就放行。不同 auth_alg / 不同時刻的事件不會互相干擾。
-    _ts=$(echo "$line" | awk '{print $4}')
+    # ★ 去重視窗 = ft_tracking_time 秒(Google Sheet 可調, 預設 1 秒 = 只濾同一秒的重複行)。
+    #   調大可抑制「同一支手機在兩台之間來回彈」的連續推播。
+    # ⚠️ 用 date +%s 取「現在」而不是解析 log 的時間戳: 時間戳只有時:分:秒,
+    #    跨午夜會從 23:59:59 跳回 00:00:00, 拿它做算術會得到負數而讓去重失效。
+    _now=$(date +%s)
     _sf="/tmp/.roam/.$(echo "$_mac" | tr -d ':')"
     mkdir -p /tmp/.roam 2>/dev/null
     _prev=$(cat "$_sf" 2>/dev/null)
-    [ "$_prev" = "$_ts" ] && continue
-    echo "$_ts" > "$_sf"
+    case "$_prev" in
+        ''|*[!0-9]*) _prev=0 ;;
+    esac
+    [ $((_now - _prev)) -lt "$FT_TRACKING_TIME" ] && continue
+    echo "$_now" > "$_sf"
 
     log "漫遊: $_name($_ip) FT 漫遊到 $HOSTNAME"
     push_notify "📶${_name}(${_ip}) 漫遊到 ${HOSTNAME}"

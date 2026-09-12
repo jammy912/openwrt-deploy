@@ -693,7 +693,7 @@ main() {
             BEGIN { RS=""; FS="\n" }
             /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
-                c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""
+                c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""; ftt=""; ftm=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -709,6 +709,12 @@ main() {
                     if ($i ~ /option ch2g/)      { v=$i; sub(/^[[:space:]]*option[[:space:]]+ch2g[[:space:]]+/, "", v);      gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); c2g=v }
                     if ($i ~ /option ht2g/)      { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h2g=a[n] }
                     if ($i ~ /option ht5g/)      { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h5g=a[n] }
+                    # ft_tracking_time: 漫遊推播的去重秒數。0 = 不跑 check-roam。
+                    if ($i ~ /option ft_tracking_time[[:space:]]/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); ftt=a[n] }
+                    # ft_tracking_member: 裝置名樣式, 可含多個(空白/逗號/分號分隔), ALL=全部。
+                    # ⚠️ 不可用 a[n] 只取最後一個 token —— "Phone Pad" 會只剩 Pad(靜默少監看一半),
+                    #    比照 ch5g_main/upstream_dns 取 option 名稱之後的整段。
+                    if ($i ~ /option ft_tracking_member/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ft_tracking_member[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); ftm=v }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -718,7 +724,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -801,6 +807,36 @@ main() {
                 log "🔧 ${_name}: $_cur → $_val (hostname=$MY_HOSTNAME)"
             fi
         done
+        # 更新漫遊監控旗標檔 (.ft_tracking_time / .ft_tracking_member)
+        # ★ 這兩個和上面那圈不同, 必須「空值也要能寫」:
+        #     ft_tracking_time       留空 = 用 check-roam.sh 內建預設去重秒數
+        #     ft_tracking_member 留空或 ALL = 監看全部裝置
+        #   若比照上面 `[ -z ] && continue`, 使用者把 Sheet 欄位清空後旗標檔會
+        #   永遠停在舊值, 改不回「全部」—— 故這裡改用「與現值不同才寫」。
+        # ⚠️ 仍要維持「值有變才寫」: 本腳本每分鐘跑一次, 無條件寫就是每分鐘磨 flash。
+        # ⚠️ FT_CHANGED 必須先歸零: shell 變數會繼承環境, 若外部剛好有同名變數=1,
+        #    下面會每分鐘無條件重啟一次 check-roam 常駐。
+        FT_CHANGED=0
+        for _pair in "ft_tracking_time:$NEW_FT_TRACKING_TIME" "ft_tracking_member:$NEW_FT_TRACKING_MEMBER"; do
+            _name="${_pair%%:*}"
+            _val="${_pair#*:}"
+            _cur=$(cat "/etc/myscript/.${_name}" 2>/dev/null)
+            if [ "$_val" != "$_cur" ]; then
+                echo "$_val" > "/etc/myscript/.${_name}"
+                log "🔧 ${_name}: [$_cur] → [$_val] (hostname=$MY_HOSTNAME)"
+                # 常駐在開機時讀一次旗標, 改了要重啟才生效
+                FT_CHANGED=1
+            fi
+        done
+        # 旗標有變 -> 重啟 check-roam 常駐(它自己會依 ft_tracking_time=0 決定要不要跑)
+        if [ "$FT_CHANGED" = "1" ]; then
+            for _p in $(ps w | grep -E "/bin/sh /etc/myscript/check-roam\.sh|logread -f -e AP-STA" | grep -v grep | grep -v "ash -c" | awk '{print $1}'); do
+                [ "$_p" = "$$" ] || kill "$_p" 2>/dev/null
+            done
+            rm -f /tmp/check-roam.lock
+            /etc/myscript/check-roam.sh &
+            log "🔧 check-roam 常駐已依新旗標重啟"
+        fi
     fi
 
     # =====================================================
