@@ -142,5 +142,11 @@ rm -f /tmp/luci-indexcache
 ) &
 
 
+# 漫遊監控常駐(每 5 秒一輪, 名稱樣式 Phone 會即時查 DHCP 租約展開)
+# ★ 用 rc.local 不用 cron: cron 最快每分鐘一次, 漫遊是秒級事件會整段漏掉。
+# ⚠️ 只在一台啟動: 兩台同時跑會得出相反結論並各推一則(見 check-roam.sh 檔頭)。
+#    沒跑 usteer 的機器腳本自己會安靜退出, 故此行可安全下發給整個機隊。
+/etc/myscript/check-roam.sh --loop 5 Phone &
+
 exit 0
 

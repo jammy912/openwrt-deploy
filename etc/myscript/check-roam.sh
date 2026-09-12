@@ -60,7 +60,14 @@ ubus list 2>/dev/null | grep -qx usteer || exit 0
 . /etc/myscript/push-notify.inc
 PUSH_NAMES="${PUSH_NAMES:-admin}"
 
-STATEDIR="/etc/myscript/.roam"
+# ★ 狀態檔放 /tmp(tmpfs)不放 /etc/myscript(flash):
+#   這裡存的只是「上次判定在哪台 AP」, 屬純執行期資料 —— 重開機後第一輪
+#   (5 秒內)就會重建, 完全不需要持久化。
+#   ⚠️ 反之放 flash 會被高頻改寫: 常駐每 5 秒一輪 = 最多 17280 次/天,
+#      即使只在有變化時才寫, 漫遊頻繁時仍遠高於其他每分鐘一次的腳本。
+#   ⚠️ 副作用(刻意接受): 重開機後狀態歸零, 第一次判定因為沒有 _prev
+#      而不推播(見下方比對邏輯), 所以開機後的第一次漫遊不會通知。
+STATEDIR="/tmp/.roam"
 mkdir -p "$STATEDIR" 2>/dev/null
 
 LOGTAG="check-roam"
@@ -171,7 +178,7 @@ for _ip in $_TARGETS; do
         push_notify "📶${_name:-$_ip}($_ip) 漫遊: $_prev → $_best (訊號 ${_best_sig}dBm)"
     fi
 
-    # ⚠️ 只在有變化時才寫: /etc/myscript 在 flash 上, 每輪無條件寫會磨 flash。
+    # 只在有變化時才寫(狀態檔已移到 tmpfs, 這裡純粹是省掉無謂的 I/O)。
     [ "$_best" != "$_raw" ] && echo "$_best" > "$_sf"
 done
 
