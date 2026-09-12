@@ -82,7 +82,12 @@ logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
     # 行格式(實測逐字):
     #   Sat Sep 12 16:10:12 2026 daemon.notice hostapd: phy1-ap0: AP-STA-CONNECTED 46:9d:4d:09:6f:6e auth_alg=ft
     #   Sat Sep 12 16:10:37 2026 daemon.notice hostapd: phy1-ap0: AP-STA-DISCONNECTED 46:a2:41:eb:f2:97
-    _mac=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:/){print tolower($i); exit}}')
+    # ⚠️⚠️ 必須匹配「完整 6 段」MAC, 不能只寫前兩段:
+    #    時間戳 "16:13:55" 也符合 ^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:
+    #    (16/13/55 都是合法十六進位), 而時間欄排在 MAC 前面, 會先被抓走,
+    #    導致每一行都查不到租約而被跳過 —— 腳本看似在跑卻從不推播。
+    #    實測 2026-09-12 踩過: 解析出 MAC=[16:13:55], 真實漫遊完全沒推。
+    _mac=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9a-fA-F][0-9a-fA-F](:[0-9a-fA-F][0-9a-fA-F]){5}$/){print tolower($i); exit}}')
     [ -z "$_mac" ] && continue
 
     # auth_alg=ft 代表走 802.11r 快速漫遊(只有 CONNECTED 行才有)
@@ -120,14 +125,15 @@ logread -f -e "AP-STA-" 2>/dev/null | while read -r line; do
     # ★ 首次看到這台不推播(沒有前一個狀態可比), 避免剛啟動就洗一輪。
     [ -z "$_prev" ] && continue
 
-    if [ "$_ev" = "connected" ]; then
-        _ft=""
-        [ "$_alg" = "ft" ] && _ft=" (FT 快速漫遊)"
-        log "漫遊: $_name($_ip) 接上 $HOSTNAME$_ft"
-        push_notify "📶${_name}(${_ip}) 接上 ${HOSTNAME}${_ft}"
-    else
-        log "漫遊: $_name($_ip) 離開 $HOSTNAME"
-        push_notify "📶${_name}(${_ip}) 離開 ${HOSTNAME}"
+    # ★ 只推「漫遊過來」那一方, 且限 auth_alg=ft:
+    #   - 離開(DISCONNECTED)不推 —— 同一次漫遊會由接收端推, 兩邊都推等於重複。
+    #   - auth_alg=open/sae 不推 —— 那是全新連線(開機、關開 WiFi、離開後重連),
+    #     不是 AP 之間的漫遊。只有 ft 才是 802.11r 快速漫遊。
+    #   ⚠️ 但 DISCONNECTED 仍要記狀態(上面已寫 $_sf), 否則下次 CONNECTED
+    #      會因為狀態沒變而被去重吃掉。
+    if [ "$_ev" = "connected" ] && [ "$_alg" = "ft" ]; then
+        log "漫遊: $_name($_ip) FT 漫遊到 $HOSTNAME"
+        push_notify "📶${_name}(${_ip}) 漫遊到 ${HOSTNAME}"
     fi
 done
 
