@@ -1,5 +1,5 @@
 #!/bin/sh
-# USB 碟掛載時偵測「LABEL 撞名 / 掛載點疊掛」並推播警示
+# USB 碟掛載時偵測「LABEL 撞名 / 掛載點疊掛 / 幽靈掛載」並推播警示
 #
 # ⚠️ 真兇紀錄 2026-09-08 (.4): 接第二顆 USB 碟後發現它「等於沒接」——兩顆碟的
 #    LABEL 都是 "1.42.6-25556"(疑似同一套備份工具/外接盒韌體寫的版本號),
@@ -7,9 +7,20 @@
 #    同一個路徑 → 兩顆疊在一起掛, 後掛的蓋住先掛的。
 #    ★ 最危險的不是當下, 是「重開後列舉順序可能對調」: 你看到的內容會整個
 #      換成另一顆碟, samba 分享、媒體目錄、下載目錄全部指到錯的地方。
-#    ⚠️ df 會騙人(報的是上層那顆的數字), 要用 findmnt 才看得出疊掛。
+#    ⚠️ df 會騙人(報的是「第一筆」符合的 mount entry), 要用 findmnt 或直接數
+#      /proc/mounts 才看得出疊掛。
 #    根治法是改用 UUID 指定掛載(見 /etc/config/fstab), 但 auto_mount 仍開著,
 #    之後接的新碟還是會走 LABEL 老路 —— 故留這支在掛載當下就抓出來。
+#
+# ⚠️⚠️ 2026-09-13 修正: 舊版只判斷「同一 target 有多筆」就一律報成「疊掛」,
+#    造成兩種誤導(實測踩到, 推播寫 `疊掛:8TB(/dev/sda1 /dev/sdc1)` 讓人以為
+#    LABEL 撞名復發, 實際 LABEL 是好的):
+#      (a) 幽靈掛載: 裝置已從系統消失(USB 重新列舉後改名), 但舊 mount entry
+#          沒被清掉。此時「兩筆」其實只有一筆是活的。
+#      (b) 自我重複: 同一個裝置掛在同一個點兩次(USB reset 後 hotplug 重跑),
+#          兩筆 device 完全相同, 根本不是兩顆碟。
+#    ★ 現在三者分開判斷、分開描述, 因為處理方式完全不同:
+#      幽靈/自我重複 → umount 清掉即可; LABEL 撞名 → 必須改名或改 UUID 掛載。
 
 [ "$ACTION" = "add" ] || exit 0
 
@@ -23,42 +34,63 @@ STATE="/tmp/.label-dupcheck.notified"
 #    ★ 延遲幾秒讓 mount 落定, 並用旗標檔避免同一次插拔連推好幾則。
 sleep 5
 
-# ---- 找出被掛了不只一次的掛載點(疊掛) ----
-DUP_MP=$(awk '$2 ~ /^\/srv\/share/ {print $2}' /proc/mounts | sort | uniq -d)
+# 裝置是否還真的存在(幽靈判定)。/dev/sdc1 -> /sys/block/sdc/sdc1
+# ⚠️ 不能只看 /dev/ 節點: udev 有時會留著。要看 /sys/block 才準。
+dev_alive() {
+    local d="${1#/dev/}"                 # sdc1
+    local base=$(echo "$d" | sed 's/[0-9]*$//')   # sdc
+    [ -e "/sys/block/$base/$d" ] || [ -e "/sys/block/$d" ]
+}
 
-# ---- 找出 LABEL 相同的分割(即使還沒疊掛, 也是未爆彈) ----
+MSG=""
+SIG=""
+
+# ---- 掛載點被掛了不只一次: 再細分成 幽靈 / 自我重複 / 真疊掛 ----
+for _mp in $(awk '$2 ~ /^\/srv\/share/ {print $2}' /proc/mounts | sort | uniq -d); do
+    _devs=$(awk -v m="$_mp" '$2==m {print $1}' /proc/mounts)
+    _uniq=$(echo "$_devs" | sort -u)
+    _ghost=""
+    _live=""
+    for _d in $_uniq; do
+        if dev_alive "$_d"; then _live="$_live $_d"; else _ghost="$_ghost $_d"; fi
+    done
+    _name="${_mp##*/}"
+
+    if [ -n "$_ghost" ]; then
+        # (a) 幽靈: 裝置不存在了, mount entry 還在
+        logger -t "$LOGTAG" "幽靈掛載: $_mp 殘留${_ghost}, 實際服務中=${_live:-無}"
+        MSG="$MSG | 幽靈掛載:${_name}(${_ghost# }已不存在, 實際=${_live:-無})→umount 清掉"
+        SIG="$SIG;ghost:$_mp:$_ghost"
+    elif [ "$(echo "$_uniq" | wc -l)" -eq 1 ]; then
+        # (b) 自我重複: 同一裝置掛兩次
+        _n=$(echo "$_devs" | wc -l)
+        logger -t "$LOGTAG" "重複掛載: $_mp <- $(echo $_uniq) x${_n}"
+        MSG="$MSG | 重複掛載:${_name}($(echo $_uniq) 掛了${_n}次)→umount 清掉"
+        SIG="$SIG;self:$_mp:$_n"
+    else
+        # (c) 真疊掛: 不同裝置疊在同一點, 後掛蓋住先掛
+        logger -t "$LOGTAG" "疊掛: $_mp <- $(echo $_uniq)"
+        MSG="$MSG | 疊掛:${_name}($(echo $_uniq))後掛蓋住先掛→改 UUID 掛載或改名"
+        SIG="$SIG;stack:$_mp:$_uniq"
+    fi
+done
+
+# ---- LABEL 相同的分割(即使還沒疊掛, 也是未爆彈) ----
 # block info 每行形如: /dev/sdb1: UUID="..." LABEL="xxx" ... TYPE="ext4"
-DUP_LABEL=$(block info 2>/dev/null \
-    | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p' \
-    | sort | uniq -d)
+for _lb in $(block info 2>/dev/null | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p' | sort | uniq -d); do
+    _which=$(block info 2>/dev/null | grep "LABEL=\"$_lb\"" | cut -d: -f1 | tr '\n' ' ')
+    logger -t "$LOGTAG" "LABEL 撞名: '$_lb' <- $_which"
+    MSG="$MSG | LABEL撞名:'$_lb'(${_which% })→改名或改 UUID 掛載"
+    SIG="$SIG;label:$_lb"
+done
 
-[ -z "$DUP_MP" ] && [ -z "$DUP_LABEL" ] && { rm -f "$STATE"; exit 0; }
+[ -z "$MSG" ] && { rm -f "$STATE"; exit 0; }
 
 # 同一組問題只推一次(旗標內容 = 問題摘要, 變了才再推)
-SIG="${DUP_MP}|${DUP_LABEL}"
 [ "$(cat "$STATE" 2>/dev/null)" = "$SIG" ] && exit 0
 echo "$SIG" > "$STATE"
 
-MSG="⚠️USB碟異常"
-
-if [ -n "$DUP_MP" ]; then
-    for _mp in $DUP_MP; do
-        # 列出疊在同一掛載點的裝置
-        _devs=$(awk -v m="$_mp" '$2==m {printf "%s ", $1}' /proc/mounts)
-        logger -t "$LOGTAG" "疊掛: $_mp <- $_devs"
-        MSG="$MSG | 疊掛:${_mp##*/}(${_devs% })後掛蓋住先掛"
-    done
-fi
-
-if [ -n "$DUP_LABEL" ]; then
-    for _lb in $DUP_LABEL; do
-        _which=$(block info 2>/dev/null | grep "LABEL=\"$_lb\"" | cut -d: -f1 | tr '\n' ' ')
-        logger -t "$LOGTAG" "LABEL 撞名: '$_lb' <- $_which"
-        MSG="$MSG | LABEL撞名:'$_lb'(${_which% })"
-    done
-fi
-
-MSG="$MSG | 請改用 UUID 掛載或改名"
+MSG="⚠️USB碟異常${MSG}"
 logger -t "$LOGTAG" "$MSG"
 push_notify "$MSG"
 
