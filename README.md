@@ -163,6 +163,98 @@ sh /tmp/deploy/tailscale-setup.sh
 
 ---
 
+## Google Sheet 遠端管理
+
+部署完成後，**日常設定改在 Google Sheet，不用 SSH 進機器**。
+`sync-googleconfig.sh` 拉取加密設定，比對 MD5，偵測到變更才套用。
+
+> 首次部署裝的是 `0 12 * * *`（每天一次）。實務上會再由 Sheet 的
+> `config crontab` 下發更密的排程（現行機隊是 `*/1 0,7-23`，即營運時段每分鐘），
+> 所以「改 Sheet 多久生效」取決於該台實際的 cron 行。
+
+### 支援的段別
+
+| 段別 | 用途 |
+|------|------|
+| `config interface` / `wireguard_wg` | 網路介面、WireGuard peer |
+| `config host` | DHCP static 綁定（MAC ↔ IP ↔ 名稱） |
+| `config policy` | PBR 分流規則 |
+| `config dbroute` | 域名路由（DBR） |
+| `config qosrule` / `qosinterface` | QoS 頻寬管理 |
+| `config crontab` | 排程工作 |
+| `config pushkey` | 推播金鑰 |
+| `config routerconfig` | 路由器基本設定 |
+| `config batmanmesh` | **逐台**覆寫 mesh / WiFi / 漫遊設定（見下） |
+| `config linecmd` | **遠端下指令**（見下） |
+
+> ⚠️ **任何 option 留白會讓「整份設定」都不套用**（驗證第 3 項會 `exit 1`），
+> 不是只有那一欄失效。新增欄位時記得填值。
+
+### config batmanmesh（依 hostname 逐台生效）
+
+| option | 說明 |
+|--------|------|
+| `hostname` | 對應哪一台（必填，比對 `system.@system[0].hostname`） |
+| `priority` | mesh 優先權，決定誰當主 gw |
+| `gw_mode` | 強制角色；`Auto` 或留白 = 自動偵測 |
+| `wireless_mesh` / `wired_mesh` | 無線 / 有線 mesh 開關（TRUE/FALSE） |
+| `runagh` | 是否跑 AdGuard Home |
+| `upstream_dns1`~`4` | 上游 DNS（可多個 IP，空白/逗號分隔） |
+| `ch5g_main` / `ch5g_sub` / `ch5g_mesh` | 5G 頻道清單（主gw / 副gw / mesh backhaul） |
+| `ch2g` | 2.4G 頻道 |
+| `ht5g` / `ht2g` | 頻寬模式（HE80 / VHT80 / HT20…）；**留白 = 不碰**，保留手動值 |
+| `ft_tracking_time` | 漫遊推播去重秒數；**`0` = 該台不跑 `check-roam`** |
+| `ft_tracking_member` | 監看的裝置名樣式（逗號/分號/空白分隔）；**留白或 `ALL` = 全部** |
+
+> 頻道與漫遊旗標改完**不用重開機**：sync 偵測到變更就寫旗標檔並自動重啟對應常駐。
+
+### config linecmd（遠端下指令）
+
+Sheet 只填**動作代號**，真正的指令由 `linecmd-handler.sh` 的 case 白名單決定；
+對應不到就忽略 → 不可能注入任意指令。
+
+| action | 參數 | 動作 |
+|--------|------|------|
+| `reboot` | — | 5 秒後重開（讓 sync 收尾） |
+| `sync-force` | — | 強制重套全部段 |
+| `wg-restart` | `wg0` / `wg2`… | ifdown → ifup（驗證介面存在） |
+| `dbr-refresh` | — | 刷新 DBR nft set |
+| `dbr-setup` | — | 重建 DBR ip rule/route |
+| `pbr-reload` | — | 重套 CustRule PBR |
+| `fw-reload` | — | firewall reload |
+| `dnsmasq-restart` | — | dnsmasq restart |
+| `blockdev` | `<裝置名清單>` + `add`/`del`/`status` | 依 DHCP 名稱封鎖／解封裝置上網 |
+
+`blockdev` 範例（arg1 = 名字清單，arg2 = 動作，**順序不可顛倒**）：
+
+```
+option action 'blockdev'
+list   arg    'TV_Apple,TV_Android,UBOX_PRO2,LGTV'
+list   arg    'add'
+```
+
+> 要「定時封鎖／放行」請用 `config crontab` 下發 cron 行，
+> 不要在 Sheet 裡串 `;` 或 `&&`──那會被當成字面字串擋掉。
+
+---
+
+## 常駐監控
+
+| 腳本 | 作用 |
+|------|------|
+| `check-roam.sh` | 串流本機 hostapd `AP-STA-CONNECTED` 事件，FT 漫遊時推播。由 `rc.local` 啟動，`logread -f` 阻塞等事件，不輪詢 |
+| `check-fserror.sh` | 每日唯讀檢查 USB 碟 ext4 錯誤計數並告警 |
+| `check-openlist.sh` | OpenList 容器異常自動重啟 |
+| `openlist-sync.sh` | 網盤 → SSD 暫存 → 8TB 歸檔 |
+| `blockdev.sh` | 依 DHCP 名稱把裝置 IP 加入 `inet fw4` 的 `blocked` set |
+| `auto-role.sh` | 角色自動偵測與切換（hybrid 模式） |
+| `watchdog.sh` | 對外連線監測與自癒 |
+
+> ⚠️ `blockdev.sh` 依賴 fw4 的 named set，**firewall restart 會清空整個 table**。
+> 腳本每次執行都會重建 set + rule，但若在別處 reload 防火牆，已封鎖的裝置會被解開。
+
+---
+
 ## Gateway vs Client 差異總覽
 
 | | Gateway（主路由） | Client（子路由） |
@@ -188,7 +280,11 @@ sh /tmp/deploy/tailscale-setup.sh
 | LuCI 管理介面 | http://192.168.1.1 |
 | AdGuard Home | http://192.168.1.1:3000（首次需設定密碼） |
 | 手動同步 Google Sheet | `/etc/myscript/sync-googleconfig.sh --apply` |
+| 預覽 Sheet 內容（不套用） | `/etc/myscript/sync-googleconfig.sh --dump` |
+| 更新腳本（從 GitHub） | `/etc/myscript/sync-deploy.sh` |
 | 檢查套件 | `/etc/myscript/check-custpkgs.sh --now` |
+| 封鎖/解封裝置 | `/etc/myscript/blockdev.sh TV_Apple,LGTV add` / `del` / `status` |
+| 查目前被封鎖的 IP | `/etc/myscript/blockdev.sh "" status` |
 | WiFi 重新設定 | `sh /tmp/deploy/wifi-setup.sh` |
 | BATMAN 重新設定 | `sh /tmp/deploy/batman-setup.sh` |
 | Tailscale 安裝/補裝 | `sh /tmp/deploy/tailscale-setup.sh` |
@@ -217,12 +313,23 @@ deploy/
 │   ├── init.d/              # 開機服務
 │   └── myscript/            # 所有自訂腳本
 │       ├── .secrets/        # 密鑰（不上傳 GitHub）
-│       ├── sync-googleconfig.sh  # Google Sheet 同步
+│       ├── sync-googleconfig.sh       # Google Sheet 同步（設定的總入口）
+│       ├── sync-deploy.sh             # 從 GitHub 拉最新腳本落地
+│       ├── linecmd-handler.sh         # LineCMD 白名單動作執行器
+│       ├── blockdev.sh                # 依裝置名封鎖/解封上網
 │       ├── check-custpkgs.sh          # 套件檢查
+│       ├── check-roam.sh              # 漫遊偵測常駐（hostapd 事件）
+│       ├── check-fserror.sh           # USB 碟檔案系統錯誤告警
+│       ├── auto-role.sh               # 主/副 gw 角色自動偵測
+│       ├── openlist-sync.sh           # 網盤下載 → SSD → 8TB 歸檔
 │       ├── dbroute-*.sh               # 域名路由
 │       ├── wifi-*.sh                  # WiFi 管理
+│       ├── push-*.sh                  # 各類推播（狀態/WiFi/SMART/公車…）
 │       └── ...
 ```
+
+> 腳本共 40+ 支。已部署的機器要更新腳本，跑 `/etc/myscript/sync-deploy.sh`
+> 從 GitHub 拉取即可，不必重跑整套部署。
 
 ---
 
