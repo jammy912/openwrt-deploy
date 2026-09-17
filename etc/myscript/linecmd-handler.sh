@@ -74,6 +74,33 @@ case "$ACTION" in
         /etc/init.d/dnsmasq restart
         ;;
 
+    blockdev)
+        # 依 DHCP static host 名字封鎖/解封上網。
+        #   $1 = 裝置名清單(逗號或空白分隔, blockdev.sh 自己會正規化)
+        #   $2 = add | del | status
+        # 例: action=blockdev arg1="TV_Apple,TV_Android,LGTV" arg2="add"
+        #
+        # ⚠️ blockdev.sh 的參數順序是「名字在前、動作在最後」($ACTION=${$#}),
+        #    這裡照它的介面傳 "$_names" "$_act", 不要顛倒。
+        _names="$1"
+        _act="$2"
+        # 動作白名單: 雖然 blockdev.sh 自己也有 case 擋(非法動作印 usage 後 exit 1),
+        # 但這裡再擋一層, 免得 Sheet 打錯字時只留下一則難懂的 usage。
+        case "$_act" in
+            add|del|status) ;;
+            *) logger -t "$TAG" "blockdev 動作非法: '$_act' (只允許 add/del/status)"; exit 1 ;;
+        esac
+        # 名字不做格式檢查: blockdev.sh 會去 /etc/config/dhcp 查 static host,
+        # 查無的名字只警告略過, 不會被當成指令執行(全部查無才 exit 1)。
+        # ★ 但空字串要擋: blockdev.sh "" status 是「列出所有被封鎖 IP」的合法用法,
+        #   對 add/del 卻會變成「找不到任何 host」而 exit 1, 徒增誤會。
+        if [ -z "$_names" ] && [ "$_act" != "status" ]; then
+            logger -t "$TAG" "blockdev $_act 未指定裝置名, 忽略"; exit 1
+        fi
+        logger -t "$TAG" "blockdev $_act: $_names"
+        /etc/myscript/blockdev.sh "$_names" "$_act"
+        ;;
+
     *)
         logger -t "$TAG" "未知動作(不在白名單): '$ACTION' → 忽略"
         exit 1
