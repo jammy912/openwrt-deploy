@@ -115,12 +115,45 @@ if [ "$CHANGED" -eq 0 ]; then
 fi
 
 uci commit wireless
+
+# --- 先掛寬限旗標, 再 reload(順序不可顛倒) ---
+# ★ reload 期間 radio 跑 ACS, iwinfo 會短暫回報 Channel 0。wifi-signal.sh 每分鐘
+#   巡檢必然撞上, 會多做一次 wifi down/up(中斷 50 秒)並推播假警報。
+#   這裡先寫到期時間戳, wifi-signal.sh 讀到未過期就跳過 Channel 0 檢查。
+# ⚠️ 必須在 wifi reload 之前寫: 反過來的話 reload 一開始的那幾秒沒有保護,
+#    而 wifi-signal.sh 隨時可能在那個空窗被 cron 叫起來。
+GRACE_FILE="/tmp/.wifi_reload_grace"
+GRACE_SEC=90
+echo "$(( $(date +%s) + GRACE_SEC ))" > "$GRACE_FILE"
+log "掛上 reload 寬限旗標 ${GRACE_SEC}s ($GRACE_FILE)"
+
 echo "🔄 wifi reload 套用中..."
 wifi reload
-sleep 8
+
+# --- 輪詢等介面回來, 取代固定 sleep 8 ---
+# ★ 原本寫死 sleep 8: 5GHz 走 DFS 頻道要做 CAC, 8 秒常常不夠 → 回讀 hostapd conf
+#   拿到空值或舊值 → 印出「uci=X 但 hostapd 實際=Y」的假警報。
+#   實測 2026-09-22 07:30 的 log 就是 8 秒時介面還沒回來:
+#     「⚠️ 找不到 phy1 底下任何介面, 略過 Channel 0 檢查」
+#   改為最多等 60 秒, 條件是該 phy 有介面且 Channel 不為 0。
+_phy=$(echo "$RADIO" | sed 's/radio/phy/')
+_waited=0
+while [ "$_waited" -lt 60 ]; do
+    sleep 3
+    _waited=$(( _waited + 3 ))
+    _ifs=$(iwinfo 2>/dev/null | awk -v p="$_phy" '$1 ~ "^"p"-" {print $1}')
+    [ -z "$_ifs" ] && continue          # 介面還沒回來
+    # 介面回來了, 但可能還在 ACS(Channel 0), 再等
+    _ch0=0
+    for _i in $_ifs; do
+        iwinfo "$_i" info 2>/dev/null | grep -q "Channel: 0" && { _ch0=1; break; }
+    done
+    [ "$_ch0" -eq 0 ] && break
+done
+log "reload 後等待 ${_waited}s 介面就緒"
 
 # --- 回讀 hostapd 實際值驗證(uci 寫了不代表生效) ---
-_phy=$(echo "$RADIO" | sed 's/radio/phy/')
+# (_phy 已在上方輪詢區算好, 不重複設定)
 _conf="/var/run/hostapd-${_phy}.conf"
 _actual=$(grep -E '^dtim_period=' "$_conf" 2>/dev/null | head -1 | cut -d= -f2)
 
@@ -153,3 +186,10 @@ else
         fi
     done
 fi
+
+# --- 收尾: 讓寬限旗標自然到期, 不主動刪除 ---
+# ⚠️ 刻意「不」rm 這個旗標。cron 的 5g 與 2g 兩行是同一分鐘一起跑的
+#   (實測 07:30:00 同時觸發), 若本支跑完就刪, 會把另一支還需要的保護拿掉,
+#   那支的 reload 空窗就又會被 wifi-signal.sh 抓到。
+#   旗標內是「到期時間戳」, wifi-signal.sh 讀到過期會自己清, 交給它即可。
+log "完成($RADIO/$BAND dtim=$DTIM), 寬限旗標留給另一支 radio 並自然到期"

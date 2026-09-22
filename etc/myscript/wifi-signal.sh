@@ -1135,7 +1135,30 @@ main() {
     # =====================
     # Channel 0 自動修復
     # =====================
-    if [ "$FIRST_RUN" -ne 1 ]; then
+    # ★ 寬限期抑制: wifi-dtim.sh 切換 dtim 時會 uci commit + wifi reload,
+    #   reload 期間 radio 正在跑 ACS(自動選台), iwinfo 會短暫回報 Channel 0。
+    #   本檢查每分鐘跑一次, 必然撞上那個空窗 → 多做一次 wifi down/up(中斷 50 秒)
+    #   並推播「已透過 wifi restart 修復」的假警報。實測 2026-09-22 07:30 兩台同時中。
+    #   ⚠️ 不可靠「拉開 cron 分鐘數」迴避: 本腳本是每分鐘執行, 沒有安全的錯開時段。
+    #   故改由 wifi-dtim.sh 在 reload 前寫下到期時間戳, 這裡讀到未過期就跳過本輪。
+    _grace_f="/tmp/.wifi_reload_grace"
+    _in_grace=0
+    if [ -f "$_grace_f" ]; then
+        _grace_until=$(cat "$_grace_f" 2>/dev/null)
+        case "$_grace_until" in
+            ''|*[!0-9]*) rm -f "$_grace_f" ;;   # 內容無效: 清掉當沒有
+            *)
+                if [ "$(date +%s)" -lt "$_grace_until" ]; then
+                    _in_grace=1
+                    log "[略過] wifi reload 寬限期內($(( _grace_until - $(date +%s) ))s 後到期), 跳過 Channel 0 檢查"
+                else
+                    rm -f "$_grace_f"            # 已過期: 順手清掉
+                fi
+                ;;
+        esac
+    fi
+
+    if [ "$FIRST_RUN" -ne 1 ] && [ "$_in_grace" -eq 0 ]; then
         _ch0_found=0
         for _iface in $(iwinfo | awk '{print $1}' | grep '^phy'); do
             if iwinfo "$_iface" info 2>/dev/null | grep -q "Channel: 0"; then
