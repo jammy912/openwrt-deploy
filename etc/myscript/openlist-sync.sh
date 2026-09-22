@@ -82,6 +82,36 @@ LOGTAG="openlist-sync"
 
 log() { logger -t "$LOGTAG" "$1"; echo "$1"; }
 
+# 同類錯誤在 N 秒內只推一次, 避免 cron 轟炸。
+# ⚠️ 本腳本 cron 是每 10 分鐘一次, 認證失效會讓每一輪都走到 exit 1 前的推播,
+#    不去重的話一小時 6 則、一天 144 則(實測 cron: 13:10/13:20/13:30/...)。
+# 用法: push_once <去重鍵> <冷卻秒數> <訊息>
+# ★ 去重鍵要用「錯誤種類」不要用完整訊息: 訊息裡常帶變動的檔名/路徑,
+#   用完整訊息當鍵等於沒去重。
+push_once() {
+    # ⚠️ 不可用 `echo "$1" | tr -c 'A-Za-z0-9_' '_'` 做鍵值正規化:
+    #    tr -c 會把 echo 補的換行也算進「補集」而轉成底線, 鍵變成 "auth_",
+    #    後面用 "auth" 去 rm 冷卻檔就永遠刪不到(實測踩過, 清除數=2 而非 0)。
+    #    ★ 呼叫端本來就只傳固定的英數鍵, 直接用即可, 不需要正規化。
+    _k="$1"
+    _cool="$2"
+    _txt="$3"
+    _f="$STATEDIR/.push.$_k"
+    _now=$(date +%s)
+    _prev=$(cat "$_f" 2>/dev/null)
+    # 內容無效(空/非數字)一律當成沒推過, 順手清掉避免永久卡住
+    case "$_prev" in
+        ''|*[!0-9]*) _prev=0; rm -f "$_f" 2>/dev/null ;;
+    esac
+    if [ $(( _now - _prev )) -lt "$_cool" ]; then
+        log "(推播去重) $_k 冷卻中, 剩 $(( _cool - (_now - _prev) ))s: $_txt"
+        return 0
+    fi
+    mkdir -p "$STATEDIR" 2>/dev/null
+    echo "$_now" > "$_f"
+    push_notify "$_txt"
+}
+
 # 目的地(8TB)是否真的掛載可寫。
 # ⚠️ 不能只看目錄在不在: 碟拔掉後掛載點目錄仍存在(空的), 寫進去會寫到根檔案
 #    系統的 overlay 把 flash 塞爆。★ 必須確認它是「掛載點」。
@@ -329,7 +359,8 @@ TOKEN=$(curl -s --max-time 20 -X POST "$OL_HOST/api/auth/login" \
 
 if [ -z "$TOKEN" ]; then
     log "登入失敗 — OpenList 沒回應或密碼錯誤"
-    push_notify "OpenList同步: 登入失敗, 請檢查 $OL_PASSFILE"
+    # 同樣去重: 容器掛掉時每 10 分鐘會推一次
+    push_once "login_fail" 3600 "OpenList同步: 登入失敗, 請檢查 $OL_PASSFILE 或容器狀態"
     exit 1
 fi
 
@@ -342,16 +373,35 @@ LIST=$(curl -s --max-time 60 -X POST "$OL_HOST/api/fs/list" \
 CODE=$(echo "$LIST" | jq -r '.code // 0' 2>/dev/null)
 if [ "$CODE" != "200" ]; then
     _msg=$(echo "$LIST" | jq -r '.message // "未知錯誤"' 2>/dev/null)
-    log "列目錄失敗: $_msg"
-    # ⚠️ Cookie 過期是這套最常見的故障, 要能明確辨識並通知, 否則會靜默停擺
-    case "$_msg" in
-        *cookie*|*Cookie*|*login*|*auth*|*401*)
-            push_notify "OpenList同步: 網盤認證失效(Cookie 可能過期), 需重新設定" ;;
+    log "列目錄失敗: code=$CODE msg=$_msg"
+    # ⚠️ Cookie 過期是這套最常見的故障, 要能明確辨識並通知, 否則會靜默停擺。
+    # ★ 必須同時看 CODE 與 message, 不能只比對 message:
+    #   實測 2026-09-22 用失效 token 打 /api/fs/list, 回的是
+    #     {"code":401,"message":"token is invalidated"}
+    #   message 裡沒有 cookie/login/auth/401 任一字樣, 舊的 *401* 比對的是
+    #   message 不是 code, 所以會掉進兜底分支, 文案變成「列目錄失敗」而非
+    #   「認證失效」——查起來會往錯的方向想。
+    # ⚠️ 夸克網盤的錯誤訊息可能是中文, 故一併比對常見中文字樣。
+    #   (中文樣式為預防性加入, 尚未實測過真正的 cookie 過期回應)
+    case "$CODE" in
+        401|403)
+            push_once "auth" 3600 "OpenList同步: 網盤認證失效(Cookie/Token 可能過期), 需重新設定 [code=$CODE] $_msg" ;;
         *)
-            push_notify "OpenList同步: 列目錄失敗 — $_msg" ;;
+            case "$_msg" in
+                *cookie*|*Cookie*|*login*|*auth*|*unauthor*|*过期*|*過期*|*登录*|*登入*|*失效*)
+                    push_once "auth" 3600 "OpenList同步: 網盤認證失效(Cookie/Token 可能過期), 需重新設定 [code=$CODE] $_msg" ;;
+                *)
+                    push_once "list_fail" 3600 "OpenList同步: 列目錄失敗 [code=$CODE] — $_msg" ;;
+            esac
+            ;;
     esac
     exit 1
 fi
+
+# ---- 認證恢復正常: 清掉冷卻紀錄 ----
+# ★ 沒有這段的話, 修好之後冷卻檔還留著, 一小時內若再次失效就不會通知(被誤判成
+#   冷卻中), 等於把最該告警的復發吃掉了。
+rm -f "$STATEDIR/.push.auth" "$STATEDIR/.push.login_fail" "$STATEDIR/.push.list_fail" 2>/dev/null
 
 # ---- 遞迴展開整個目錄樹, 挑出第一個「還沒抓完」的影片 ----
 # ⚠️ 用暫存檔+while, 不用管線右側的 while: 那會在子 shell 跑, TOTAL/PICK
