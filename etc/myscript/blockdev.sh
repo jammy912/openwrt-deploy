@@ -7,6 +7,7 @@
 #   blockdev.sh TV_Apple,TV_Android add         # 一次封鎖多台 (逗號分隔)
 #   blockdev.sh "TV_Apple TV_Android" add       # 多台也可用空白分隔 (需引號)
 #   blockdev.sh TV_Apple,TV_Android del         # 一次解封多台
+#   blockdev.sh '*tv*' add                      # 萬用字元: 所有名字含 tv 的裝置 (★引號必加)
 #   blockdev.sh TV_Apple status                 # 查狀態
 #   blockdev.sh "" status                       # 列出 set 內所有被封鎖的 IP
 #
@@ -42,8 +43,9 @@ TARGETS=$(echo "$TARGETS" | tr ',' ' ')
 TARGETS=$(echo $TARGETS)
 
 usage() {
-    echo "用法: $0 <name>[,<name>...] add|del|status"
+    echo "用法: $0 <name|pattern>[,...] add|del|status"
     echo "      $0 TV_Apple,TV_Android add   # 一次多台 (逗號分隔)"
+    echo "      $0 '*tv*' add                # 萬用字元, 不分大小寫 (引號必加)"
     echo "      $0 \"\" status                # 列出所有被封鎖 IP"
     exit 1
 }
@@ -52,29 +54,67 @@ usage() {
 
 # 依名字清單從 uci dhcp 查固定 IP, 結果存 RESULTS ("name ip" 每行一筆)
 # 查無 IP 的名字存 MISSING
+#
+# ★ 支援萬用字元 (2026-09-23 新增):
+#   名字含 * ? [ 時改走 glob 比對, 例如 `blockdev.sh '*tv*' add` 會命中
+#   所有 name 含 tv 的 static host。比對「不分大小寫」(TV_Apple / mytv 都中),
+#   作法是把兩邊都轉小寫再比, 因為 shell 的 case glob 本身區分大小寫。
+# ⚠️ 眉角:
+#   1. 在 shell 下 *tv* 會被自己展開成當前目錄的檔名 → 呼叫時務必加引號:
+#        blockdev.sh '*tv*' add      (對)
+#        blockdev.sh *tv* add        (錯, 可能變成檔名或原字串, 行為不可預期)
+#   2. 萬用字元一個都沒命中時, 該 pattern 計入 MISSING (與精確比對一致),
+#      全部沒命中仍會 exit 1, 不會靜默把「零台」當成功。
+#   3. 同一台可能被多個 pattern 命中 (如 '*tv*' 與 'TV_Apple' 併用),
+#      故收集後以 IP 去重, 避免 log 重複兩行。
 RESULTS=""
 MISSING=""
+
+# 有無萬用字元
+_has_glob() {
+    case "$1" in
+        *'*'*|*'?'*|*'['*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_tolower() { echo "$1" | tr 'A-Z' 'a-z'; }
+
 collect_ips() {
-    local want="$1"     # 要找的名字 (可多個, 空白分隔)
+    local want="$1"     # 要找的名字/樣式 (可多個, 空白分隔)
     [ -z "$want" ] && return
-    local found name ip n
+    local found n
     for n in $want; do
         found=""
-        find_one() {
-            local _name _ip
-            config_get _name "$1" name
-            config_get _ip  "$1" ip
-            [ "$_name" = "$n" ] && [ -n "$_ip" ] && found="$_ip"
-        }
+        if _has_glob "$n"; then
+            _pat=$(_tolower "$n")
+            find_one() {
+                local _name _ip _lname
+                config_get _name "$1" name
+                config_get _ip  "$1" ip
+                { [ -z "$_name" ] || [ -z "$_ip" ]; } && return
+                _lname=$(_tolower "$_name")
+                # shellcheck disable=SC2254  # 這裡就是要讓 $_pat 當 glob 展開
+                case "$_lname" in
+                    $_pat) RESULTS="$RESULTS
+$_name $_ip"; found=1 ;;
+                esac
+            }
+        else
+            find_one() {
+                local _name _ip
+                config_get _name "$1" name
+                config_get _ip  "$1" ip
+                [ "$_name" = "$n" ] && [ -n "$_ip" ] && { RESULTS="$RESULTS
+$_name $_ip"; found=1; }
+            }
+        fi
         config_load dhcp
         config_foreach find_one host
-        if [ -n "$found" ]; then
-            RESULTS="$RESULTS
-$n $found"
-        else
-            MISSING="$MISSING $n"
-        fi
+        [ -z "$found" ] && MISSING="$MISSING $n"
     done
+    # 依 IP 去重 (多個 pattern 命中同一台時)
+    RESULTS=$(echo "$RESULTS" | awk 'NF && !seen[$2]++')
 }
 
 # 確保 set 與 drop rule 存在 (冪等; 已存在不報錯)
