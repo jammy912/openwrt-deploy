@@ -1006,8 +1006,18 @@ main() {
         while IFS= read -r _lc_line; do
             [ -z "$_lc_line" ] && continue
             # 用 tab 拆成位置參數:$1=action $2.. =args
+            # ⚠️ 必須 set -f(關 glob):無引號展開會同時做 word splitting(這裡要的)
+            #    和 pathname expansion(這裡不要的)。arg 若含 * ? [
+            #    (例如 blockdev 的 '*TV*')會被當檔名樣式展開成 cwd 下的檔名,
+            #    參數整個位移 → 動作被擠掉而靜默失效。
+            #    實測 2026-09-23:cwd 有 myTVshow.mp4/OLD_TV_list.txt 時,
+            #      "blockdev<TAB>*TV*<TAB>del" 拆出來變成
+            #      $2=OLD_TV_list.txt $3=myTVshow.mp4,del 消失。
+            #    本腳本全程沒有 cd,cwd 由 cron 決定(/ 或 /root),不能假設乾淨。
             _OIFS="$IFS"; IFS="$(printf '\t')"
+            set -f
             set -- $_lc_line
+            set +f
             IFS="$_OIFS"
             _lc_action="$1"; shift
             [ -z "$_lc_action" ] && continue
