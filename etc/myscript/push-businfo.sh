@@ -257,6 +257,25 @@ fetch_bus_data() {
 display_bus_eta() {
     local bus_data="$1"
 
+    # ★ 先攔 TDX 的錯誤物件, 再判陣列。
+    #   限流時 TDX 回的是 {"message":"API rate limit exceeded"} — 這是「合法
+    #   JSON」, 所以通得過上游 fetch 的 `jq empty` 檢查, 只會在下面的
+    #   type=="array" 被擋掉而推出「資料格式錯誤」, 文案與真因無關, 會讓人
+    #   往解析 bug 的方向查。實測 2026-09-23 連續查詢即觸發(41 bytes 物件)。
+    #   ⚠️ 用 `// empty` 而非 `.message`: 對陣列取 .message 會讓 jq 報
+    #      "Cannot index array with string" 而非回空, 判斷會失準。
+    local api_msg
+    api_msg=$(echo "$bus_data" | jq -r 'if type=="object" then (.message // empty) else empty end' 2>/dev/null)
+    if [ -n "$api_msg" ]; then
+        case "$api_msg" in
+            *"rate limit"*|*"Rate Limit"*|*"rate Limit"*)
+                push_notify "$TARGET_ROUTE$DIRECTION_TEXT @$TARGET_STOP TDX 限流中(API rate limit), 本次略過" ;;
+            *)
+                push_notify "$TARGET_ROUTE$DIRECTION_TEXT @$TARGET_STOP TDX 回報錯誤: $api_msg" ;;
+        esac
+        return 1
+    fi
+
     # Check if bus_data is valid JSON array
     if ! echo "$bus_data" | jq -e 'type == "array"' >/dev/null 2>&1; then
         push_notify "$TARGET_ROUTE$DIRECTION_TEXT 資料格式錯誤 @$TARGET_STOP"
