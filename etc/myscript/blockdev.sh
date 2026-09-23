@@ -1,7 +1,7 @@
 #!/bin/sh
 # blockdev.sh - 依 DHCP static host 名字封鎖/解封裝置上網
 # 用法:
-#   blockdev.sh <name>[,<name>...] add|del|status
+#   blockdev.sh <name>[,<name>...] add|del|status|allow|block [分鐘]
 # 範例:
 #   blockdev.sh TV_Apple add                    # 封鎖單一裝置
 #   blockdev.sh TV_Apple,TV_Android add         # 一次封鎖多台 (逗號分隔)
@@ -10,6 +10,8 @@
 #   blockdev.sh '*tv*' add                      # 萬用字元: 名字含 tv 的裝置, 不分大小寫 (★引號必加)
 #   blockdev.sh TV_Apple status                 # 查狀態
 #   blockdev.sh "" status                       # 列出 set 內所有被封鎖的 IP
+#   blockdev.sh "*TV*" allow 60                 # 限時放行 60 分鐘, 到期自動鎖回
+#   blockdev.sh "*TV*" block 30                 # 限時封鎖 30 分鐘, 到期自動放開
 #
 # 原理:
 #   從 /etc/config/dhcp static host 依 name 查出固定 IP,
@@ -28,12 +30,55 @@
 LOG_TAG="blockdev"
 TABLE="inet fw4"
 SET_NAME="blocked"
+usage() {
+    echo "用法: $0 <name|pattern>[,...] <動作> [分鐘]"
+    echo "  動作: add/del = 永久; allow/block = 限時(帶分鐘數); status = 查詢"
+    echo "      $0 TV_Apple,TV_Android add   # 一次多台 (逗號分隔)"
+    echo "      $0 '*tv*' add                # 萬用字元, 不分大小寫 (單/雙引號皆可, 必加)"
+    echo "      $0 \"*tv*\" allow 60         # 限時放行 60 分鐘, 到期自動鎖回"
+    echo "      $0 \"*tv*\" block 30         # 限時封鎖 30 分鐘, 到期自動放開"
+    echo "      $0 \"\" status                # 列出所有被封鎖 IP"
+    exit 1
+}
 
-# 最後一個參數為動作, 其餘 (可多個, 空白分隔) 為裝置名稱
-ACTION=$(eval echo "\${$#}")
+
+# 參數配置: <name|pattern>... <動作> [分鐘]
+#   最後一個參數為動作; 但若最後一個是純數字, 它是「限時分鐘數」,
+#   動作則往前挪一位。
+#
+# ★ 限時動作 allow/block (2026-09-23 新增):
+#   blockdev.sh "*TV*" allow 60  → 立刻放行, 60 分鐘後自動鎖回
+#   blockdev.sh "*TV*" block 30  → 立刻封鎖, 30 分鐘後自動放開
+#
+#   ★ 為什麼另立動詞而不是沿用 `del 60`:
+#     `del 60` 看不出 60 是「解封多久」還是「多久之後才解封」, 語義有歧義。
+#     allow/block 是「限時」動作, add/del 是「永久」動作, 兩組並存互不干擾:
+#       add/del     → 改了就不動, 由 cron 或人工負責還原
+#       allow/block → 自帶計時器, 時間到自動回到反向狀態
+#   allow 不帶分鐘數 = 等同 del; block 不帶 = 等同 add(仍可用, 只是沒計時)。
+#
+# ⚠️ 眉角:
+#   1. 用 setsid 背景計時, **重開機/斷電就失效**(計時器只存在於 RAM),
+#      自動還原永遠不會發生, 裝置會停在當下狀態。要防這點請另外掛一行
+#      cron 當保險, 例如每天 02:00 固定 add 一次。
+#      已於實機確認 setsid 能跨 SSH 斷線存活
+#      (2026-09-23 於 .12: SSH 11:49:04 斷開, 背景任務 11:49:19 仍完成)。
+#   2. status 不接受分鐘數(唯讀動作, 沒有東西要還原)。
+#   3. 計時期間再下一次 allow/block 會「疊加」另一個計時器, 不會取消前一個。
+#      兩個計時器到期時都會執行, 以較晚者為最終狀態。要取消只能用
+#      add/del 手動覆蓋(計時器仍會跑, 但結果被後續動作蓋掉)。
+REVERT_MIN=""
+_last=$(eval echo "\${$#}")
+_nargs=$#
+case "$_last" in
+    ''|*[!0-9]*) ;;                       # 非純數字 → 沒有計時器
+    *) REVERT_MIN="$_last"; _nargs=$(( _nargs - 1 )) ;;
+esac
+[ "$_nargs" -lt 1 ] && usage
+ACTION=$(eval echo "\${$_nargs}")
 TARGETS=""
 i=1
-while [ $i -lt $# ]; do
+while [ $i -lt $_nargs ]; do
     TARGETS="$TARGETS $(eval echo "\${$i}")"
     i=$((i + 1))
 done
@@ -42,15 +87,30 @@ done
 TARGETS=$(echo "$TARGETS" | tr ',' ' ')
 TARGETS=$(echo $TARGETS)
 
-usage() {
-    echo "用法: $0 <name|pattern>[,...] add|del|status"
-    echo "      $0 TV_Apple,TV_Android add   # 一次多台 (逗號分隔)"
-    echo "      $0 '*tv*' add                # 萬用字元, 不分大小寫 (單/雙引號皆可, 必加)"
-    echo "      $0 \"\" status                # 列出所有被封鎖 IP"
-    exit 1
-}
 
 [ -z "$ACTION" ] && usage
+
+# --- allow/block 映射成實際的 nft 動作, 並記錄到期要反轉成什麼 ---
+# ★ 映射後 $ACTION 一律是 add/del/status, 下方 case 不必改。
+#   REVERT_ACT 存「到期時要下的限時動作」, 讓 log 與訊息講人話。
+REVERT_ACT=""
+case "$ACTION" in
+    allow) ACTION="del"; REVERT_ACT="block" ;;
+    block) ACTION="add"; REVERT_ACT="allow" ;;
+esac
+
+if [ -n "$REVERT_MIN" ]; then
+    if [ -z "$REVERT_ACT" ]; then
+        echo "❌ 只有 allow/block 支援限時, $ACTION 不行"
+        echo "   要限時放行 60 分鐘請用: $0 \"$TARGETS\" allow 60"
+        exit 1
+    fi
+    # 0 分鐘沒有意義; 設上限避免手誤打成 6000 之類掛著好幾天不放
+    if [ "$REVERT_MIN" -lt 1 ] || [ "$REVERT_MIN" -gt 1440 ]; then
+        echo "❌ 分鐘數須介於 1-1440(24 小時): $REVERT_MIN"
+        exit 1
+    fi
+fi
 
 # 依名字清單從 uci dhcp 查固定 IP, 結果存 RESULTS ("name ip" 每行一筆)
 # 查無 IP 的名字存 MISSING
@@ -188,6 +248,25 @@ case "$ACTION" in
         usage
         ;;
 esac
+
+# --- 排定到期自動還原 ---
+# ★ 必須放在主動作之後: 主動作失敗會在上面 exit 1, 走不到這裡,
+#   所以「放行失敗卻排了鎖回」不會發生。
+# ⚠️ setsid 讓計時器脫離本次 session(SSH 斷線仍存活, 2026-09-23 實測),
+#   但它只存在於 RAM — 重開機就沒了, 還原不會發生。
+# ⚠️ 還原指令刻意「不」再帶分鐘數, 否則會無限遞迴排下去。
+# ⚠️ 這裡用 "$TARGETS" 而非原始 $1: TARGETS 已把逗號正規化成空白,
+#   重新傳入時要整個當一個參數, 故加引號。萬用字元原樣保留,
+#   到期時才重新查一次 dhcp(期間若新增了 TV_xxx 也會一併處理)。
+if [ -n "$REVERT_MIN" ]; then
+    _secs=$(( REVERT_MIN * 60 ))
+    _until=$(date -d "@$(( $(date +%s) + _secs ))" '+%H:%M' 2>/dev/null) \
+        || _until="${REVERT_MIN} 分鐘後"
+    setsid sh -c "sleep $_secs; /etc/myscript/blockdev.sh \"$TARGETS\" $REVERT_ACT" \
+        >/dev/null 2>&1 &
+    logger -t $LOG_TAG "限時 ${REVERT_MIN} 分鐘, ${_until} 自動 $REVERT_ACT: $TARGETS"
+    echo "⏱  ${_until} 自動 ${REVERT_ACT}(限時 ${REVERT_MIN} 分鐘;重開機會失效)"
+fi
 
 # ★ 不可省略: add/del/status 三個分支的最後一句都是
 #   `[ -n "$MISSING" ] && echo "警告: ..."`。MISSING 為空(全部命中)時
