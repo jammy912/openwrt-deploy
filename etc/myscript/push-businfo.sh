@@ -431,19 +431,25 @@ main() {
     # ★ 快取的 token 可能在效期內就被 TDX 端撤銷(換金鑰、帳號異動)。
     #   沒有這段的話會拿著壞 token 一路失敗到 23 小時 TTL 到期為止,
     #   每次都只推「資料取得失敗」而查不出真因。
-    #   偵測到 401/Unauthorized 就清快取、強制重取一次, 只重試一次避免迴圈。
-    case "$bus_data" in
-        *Unauthorized*|*"401"*)
-            [ "$DEBUG" -eq 1 ] && echo "Debug: token 疑似失效, 清快取重取" >&2
-            rm -f "$TOKEN_CACHE"
-            access_token=$(get_access_token)
-            if [ -n "$access_token" ] && [ "$access_token" != "null" ]; then
-                bus_data=$(fetch_bus_data "$access_token")
-            fi
-            ;;
-    esac
+    #
+    # ⚠️ token 失效時 TDX 回的是「純文字 invalid token」(實測 2026-09-23,
+    #    14 bytes), 不是 JSON, 也不含 Unauthorized 或 401 字樣。所以:
+    #      (1) 比對字串要抓 "invalid token", 抓 401/Unauthorized 抓不到;
+    #      (2) 它會先被 fetch_bus_data() 的 `jq empty` 判定為非 JSON 而
+    #          return 1 + 回空字串 → 這裡拿不到內容可比對。
+    #    故改用「bus_data 為空且本次用的是快取 token」當觸發條件:
+    #    只要曾走快取路徑就值得清掉重試一次(重取成本僅一次 auth 呼叫)。
+    #    只重試一次, 避免 TDX 真的掛掉時無限迴圈。
+    if [ -z "$bus_data" ] && [ -f "$TOKEN_CACHE" ]; then
+        [ "$DEBUG" -eq 1 ] && echo "Debug: 取資料失敗且有 token 快取, 清掉重取一次" >&2
+        rm -f "$TOKEN_CACHE"
+        access_token=$(get_access_token)
+        if [ -n "$access_token" ] && [ "$access_token" != "null" ]; then
+            bus_data=$(fetch_bus_data "$access_token")
+        fi
+    fi
 
-    if [ $? -ne 0 ] || [ -z "$bus_data" ]; then
+    if [ -z "$bus_data" ]; then
         push_notify "$TARGET_ROUTE$DIRECTION_TEXT @$TARGET_STOP 資料取得失敗"
         exit 1
     fi
