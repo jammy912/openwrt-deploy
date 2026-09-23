@@ -7,7 +7,7 @@
 #   blockdev.sh TV_Apple,TV_Android add         # 一次封鎖多台 (逗號分隔)
 #   blockdev.sh "TV_Apple TV_Android" add       # 多台也可用空白分隔 (需引號)
 #   blockdev.sh TV_Apple,TV_Android del         # 一次解封多台
-#   blockdev.sh '*tv*' add                      # 萬用字元: 所有名字含 tv 的裝置 (★引號必加)
+#   blockdev.sh '*tv*' add                      # 萬用字元: 名字含 tv 的裝置, 不分大小寫 (★引號必加)
 #   blockdev.sh TV_Apple status                 # 查狀態
 #   blockdev.sh "" status                       # 列出 set 內所有被封鎖的 IP
 #
@@ -45,7 +45,7 @@ TARGETS=$(echo $TARGETS)
 usage() {
     echo "用法: $0 <name|pattern>[,...] add|del|status"
     echo "      $0 TV_Apple,TV_Android add   # 一次多台 (逗號分隔)"
-    echo "      $0 '*tv*' add                # 萬用字元, 不分大小寫 (引號必加)"
+    echo "      $0 '*tv*' add                # 萬用字元, 不分大小寫 (單/雙引號皆可, 必加)"
     echo "      $0 \"\" status                # 列出所有被封鎖 IP"
     exit 1
 }
@@ -60,8 +60,10 @@ usage() {
 #   所有 name 含 tv 的 static host。比對「不分大小寫」(TV_Apple / mytv 都中),
 #   作法是把兩邊都轉小寫再比, 因為 shell 的 case glob 本身區分大小寫。
 # ⚠️ 眉角:
-#   1. 在 shell 下 *tv* 會被自己展開成當前目錄的檔名 → 呼叫時務必加引號:
+#   1. 在 shell 下 *tv* 會被自己展開成當前目錄的檔名 → 呼叫時務必加引號。
+#      單引號雙引號皆可 (pattern 內沒有 $ 或反引號, 兩者傳入的字串相同):
 #        blockdev.sh '*tv*' add      (對)
+#        blockdev.sh "*tv*" add      (對)
 #        blockdev.sh *tv* add        (錯, 可能變成檔名或原字串, 行為不可預期)
 #   2. 萬用字元一個都沒命中時, 該 pattern 計入 MISSING (與精確比對一致),
 #      全部沒命中仍會 exit 1, 不會靜默把「零台」當成功。
