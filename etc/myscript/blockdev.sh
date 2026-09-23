@@ -188,3 +188,13 @@ case "$ACTION" in
         usage
         ;;
 esac
+
+# ★ 不可省略: add/del/status 三個分支的最後一句都是
+#   `[ -n "$MISSING" ] && echo "警告: ..."`。MISSING 為空(全部命中)時
+#   該測試回 false, 成為整支腳本的最後一個指令 → exit code = 1,
+#   變成「全部成功卻回失敗」。
+#   實測 2026-09-23 於 x60pro(.12): TV 四台全部命中仍 exit=1,
+#   精確比對 blockdev.sh TV_Apple status 同樣 exit=1(非萬用字元改動造成)。
+#   影響: LineCMD 的 sync-googleconfig.sh 用 if handler; then 推播✅ else ❌,
+#   會推出假的失敗警報。cron 直接呼叫則無感(crond 不看 exit code)。
+exit 0
