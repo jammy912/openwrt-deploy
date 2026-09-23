@@ -101,6 +101,40 @@ case "$ACTION" in
         /etc/myscript/blockdev.sh "$_names" "$_act"
         ;;
 
+    # --- 圖文選單專用: 六條完整指令字串當代號 (2026-09-23) ---
+    # ★ 為什麼長得像指令卻不是 RCE:
+    #   這裡是「精確字串比對」, 字串只當查表的 key 用。比對命中後執行的是
+    #   下面寫死的那一行, 跟 Sheet 傳來的內容無關。Sheet 改一個字元(空格、
+    #   引號、分鐘數)就對不上任何一條 → 掉進 *) 被忽略。
+    #   ⚠️ 嚴禁改成 eval "$ACTION" 或 sh -c "$ACTION" — 那才是 RCE,
+    #      等於任何能寫入 Sheet 的人都能在全機隊以 root 執行任意指令。
+    # ⚠️ 比對字串內的引號與空白必須與 Sheet 完全一致, 包括 .sh 副檔名。
+    #   Sheet 若寫成 /etc/myscript/blockdev(少 .sh)就不會命中。
+    '/etc/myscript/blockdev.sh "*TV*" allow 30')
+        logger -t "$TAG" "電視 放行 30 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" allow 30
+        ;;
+    '/etc/myscript/blockdev.sh "*TV*" allow 60')
+        logger -t "$TAG" "電視 放行 60 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" allow 60
+        ;;
+    '/etc/myscript/blockdev.sh "*TV*" allow 90')
+        logger -t "$TAG" "電視 放行 90 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" allow 90
+        ;;
+    '/etc/myscript/blockdev.sh "*TV*" block 30')
+        logger -t "$TAG" "電視 封鎖 30 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" block 30
+        ;;
+    '/etc/myscript/blockdev.sh "*TV*" block 60')
+        logger -t "$TAG" "電視 封鎖 60 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" block 60
+        ;;
+    '/etc/myscript/blockdev.sh "*TV*" block 90')
+        logger -t "$TAG" "電視 封鎖 90 分鐘"
+        /etc/myscript/blockdev.sh "*TV*" block 90
+        ;;
+
     *)
         logger -t "$TAG" "未知動作(不在白名單): '$ACTION' → 忽略"
         exit 1
