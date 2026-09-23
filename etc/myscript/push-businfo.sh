@@ -185,7 +185,35 @@ resolve_direction() {
     fi
 }
 
+# TDX token 快取
+# ★ TDX 官方規則: auth 端點「每個來源 IP 每分鐘最多 20 次」, 而 token 效期 1 天。
+#   原本每次執行都重取, 純屬浪費 —— 且早上 cron 是 20-30 6(連續 11 分鐘每分鐘
+#   一次), 若日後再加機器或改密集就會逼近上限。auth 一被限流, 整支直接推
+#   「驗證失敗」, 連公車資訊都拿不到。
+# ⚠️ TTL 設 23 小時而非 24: 提前 1 小時換發, 避免用到剛好在請求途中到期的 token。
+# ⚠️ 快取檔權限設 600 —— 裡面是可直接呼叫 TDX API 的憑證。
+TOKEN_CACHE="/tmp/.tdx_token.cache"
+TOKEN_TTL=82800        # 23 小時
+
 get_access_token() {
+    # --- 先讀快取 ---
+    if [ -f "$TOKEN_CACHE" ]; then
+        local cache_age
+        cache_age=$(( $(date +%s) - $(date -r "$TOKEN_CACHE" +%s 2>/dev/null || echo 0) ))
+        if [ "$cache_age" -lt "$TOKEN_TTL" ]; then
+            local cached
+            cached=$(cat "$TOKEN_CACHE" 2>/dev/null)
+            # ⚠️ 非空才採用: 空檔/半截檔會讓後續 API 全部 401, 那比重取一次糟得多。
+            if [ -n "$cached" ]; then
+                [ "$DEBUG" = "1" ] && echo "Debug: 使用快取 token (${cache_age}s 前取得)" >&2
+                echo "$cached"
+                return 0
+            fi
+            rm -f "$TOKEN_CACHE"    # 內容無效: 清掉當沒有, 往下重取
+        fi
+    fi
+
+    # --- 快取未命中: 跟 TDX 要 ---
     local response
     response=$(curl -s -X POST "$AUTH_URL" \
         -H "Content-Type: application/x-www-form-urlencoded" \
@@ -205,6 +233,13 @@ get_access_token() {
         echo "Authentication Error: Failed to obtain access token" >&2
         return 1
     fi
+
+    # --- 寫快取 ---
+    # ⚠️ 先寫暫存再 mv: 直接寫目標檔的話, 若此刻被中斷會留下半截 token,
+    #    下一輪讀到就是壞憑證(mv 在同一檔案系統內是原子操作)。
+    ( umask 077; echo "$token" > "${TOKEN_CACHE}.tmp" ) 2>/dev/null \
+        && mv "${TOKEN_CACHE}.tmp" "$TOKEN_CACHE" 2>/dev/null
+    [ "$DEBUG" = "1" ] && echo "Debug: 已向 TDX 取得新 token 並快取" >&2
 
     echo "$token"
 }
@@ -392,6 +427,21 @@ main() {
     # Fetch bus data
     local bus_data
     bus_data=$(fetch_bus_data "$access_token")
+
+    # ★ 快取的 token 可能在效期內就被 TDX 端撤銷(換金鑰、帳號異動)。
+    #   沒有這段的話會拿著壞 token 一路失敗到 23 小時 TTL 到期為止,
+    #   每次都只推「資料取得失敗」而查不出真因。
+    #   偵測到 401/Unauthorized 就清快取、強制重取一次, 只重試一次避免迴圈。
+    case "$bus_data" in
+        *Unauthorized*|*"401"*)
+            [ "$DEBUG" -eq 1 ] && echo "Debug: token 疑似失效, 清快取重取" >&2
+            rm -f "$TOKEN_CACHE"
+            access_token=$(get_access_token)
+            if [ -n "$access_token" ] && [ "$access_token" != "null" ]; then
+                bus_data=$(fetch_bus_data "$access_token")
+            fi
+            ;;
+    esac
 
     if [ $? -ne 0 ] || [ -z "$bus_data" ]; then
         push_notify "$TARGET_ROUTE$DIRECTION_TEXT @$TARGET_STOP 資料取得失敗"
