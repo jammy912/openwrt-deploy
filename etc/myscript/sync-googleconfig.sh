@@ -996,13 +996,25 @@ main() {
         # while|read subshell 吃掉變數)。option arg 與 list arg 都接受(可多筆)。
         # arg 本身不可含 tab(用作欄位分隔);引號用 sed 去除。
         _LC_TSV=/tmp/linecmd_actions.txt
+        # ★ 壓成 "cmdid<TAB>action<TAB>arg1<TAB>arg2..."
+        #   cmdid 固定放第一欄: arg 數量不固定, 放最後會跟 arg 混在一起分不出來。
+        #   Sheet 還沒加 E 欄(cmdid)時 c 會是空字串, 下面會退回用 action+arg 當 key。
         awk '
-            /^config linecmd/ { if(seen) print rec; rec=""; seen=1; next }
-            /^config /        { if(seen){print rec; seen=0}; next }
+            /^config linecmd/ { if(seen) print c "\t" rec; c=""; rec=""; seen=1; next }
+            /^config /        { if(seen){print c "\t" rec; seen=0}; next }
+            seen && /option cmdid/  { s=$0; sub(/^[[:space:]]*option cmdid[[:space:]]*/,"",s); c=s }
             seen && /option action/ { s=$0; sub(/^[[:space:]]*option action[[:space:]]*/,"",s); rec=s }
             seen && /(option|list) arg/ { s=$0; sub(/^[[:space:]]*(option|list) arg[[:space:]]*/,"",s); rec=rec "\t" s }
-            END { if(seen) print rec }
+            END { if(seen) print c "\t" rec }
         ' "$TMP_DECRYPTED" | sed "s/'//g" > "$_LC_TSV"
+
+        # LineCMD 去重記錄
+        # ⚠️ 刻意放 /tmp 而非 flash(使用者指定, 避免磨損): 代價是重開機後
+        #    記錄清空, 2 分鐘窗內的指令會重跑一次。多數 action 冪等可接受,
+        #    唯獨 reboot 會變成重開循環 —— 那個改在 linecmd-handler.sh 內
+        #    用 uptime<300s 擋掉, 不依賴本檔案。
+        _LC_DONE=/tmp/.linecmd_done
+        touch "$_LC_DONE" 2>/dev/null
         while IFS= read -r _lc_line; do
             [ -z "$_lc_line" ] && continue
             # 用 tab 拆成位置參數:$1=action $2.. =args
@@ -1019,10 +1031,32 @@ main() {
             set -- $_lc_line
             set +f
             IFS="$_OIFS"
+            _lc_cmdid="$1"; shift          # 第一欄固定是 cmdid(可能為空)
             _lc_action="$1"; shift
             [ -z "$_lc_action" ] && continue
             _lc_argdesc="$*"
+
+            # ★ 去重: Sheet 端改用時間窗過濾(不再靠 D 欄搶標記, 否則兩台
+            #   sync 差幾秒會互相擋掉), 所以同一筆在窗內會被下發好幾次,
+            #   必須在這裡擋掉重複執行。
+            # ⚠️ Sheet 尚未加 E 欄時 cmdid 為空 → 退回用 action+arg 當 key,
+            #   讓 GAS 與路由器可以不同步上線(否則空 key 會把所有指令
+            #   視為同一筆, 第二筆之後全被吃掉)。
+            if [ -n "$_lc_cmdid" ]; then
+                _lc_key="$_lc_cmdid"
+            else
+                _lc_key="noid:${_lc_action}:${_lc_argdesc}"
+            fi
+            if grep -qxF "$_lc_key" "$_LC_DONE" 2>/dev/null; then
+                log "LineCMD 已執行過, 略過: $_lc_action (key=$_lc_key)"
+                continue
+            fi
+
             log "🎮 LineCMD 執行: action='$_lc_action' args='$_lc_argdesc'"
+            # ★ 先記錄再執行: reboot 這類會中斷本行程的動作, 執行後就沒機會
+            #   回來寫記錄了。寧可「執行失敗但已記錄」(不會重試), 也不要
+            #   「執行成功但沒記錄」(重開後再跑一次)。
+            echo "$_lc_key" >> "$_LC_DONE"
             if /etc/myscript/linecmd-handler.sh "$_lc_action" "$@"; then
                 push_notify "LineCMD ✅ ${_lc_action}${_lc_argdesc:+ ($_lc_argdesc)}"
             else
@@ -1030,6 +1064,12 @@ main() {
             fi
         done < "$_LC_TSV"
         rm -f "$_LC_TSV"
+
+        # 修剪去重記錄, 只留最後 200 筆(每筆一行 UUID, 約 7KB)
+        if [ "$(wc -l < "$_LC_DONE" 2>/dev/null || echo 0)" -gt 200 ]; then
+            tail -n 200 "$_LC_DONE" > "${_LC_DONE}.tmp" 2>/dev/null \
+                && mv "${_LC_DONE}.tmp" "$_LC_DONE"
+        fi
     fi
 
     # 檢查各組件是否有變更

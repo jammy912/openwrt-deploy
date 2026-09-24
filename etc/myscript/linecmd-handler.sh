@@ -24,8 +24,25 @@ logger -t "$TAG" "收到動作: action='$ACTION' args='$*'"
 
 case "$ACTION" in
     reboot)
+        # ⚠️ 防重開循環(2026-09-24): Sheet 端用「時間窗」過濾而非 D 欄狀態
+        #    (D 欄是全域單一標記, 兩台 sync 差幾秒就會互相擋掉), 而 cmdid
+        #    去重記錄放 /tmp —— 重開就清空, 正好是 reboot 最需要記住的時候。
+        #    時序: 14:00:00 下指令 → 14:00:30 抓到並重開 → 14:01:20 開機完成
+        #          → 14:01:30 sync 再跑, age=1.5 分鐘仍在 2 分鐘窗內 → 又重開。
+        #    改用 uptime 判斷: 剛開機不到 5 分鐘就收到 reboot, 幾乎必然是
+        #    上一輪那筆還在窗內被重複抓到, 直接略過。
+        # ★ 代價: 開機後 5 分鐘內無法用 LINE 下 reboot, 需 SSH 手動執行。
+        #    (剛重開完又要重開通常代表更嚴重的問題, 本來就該手動介入)
+        _up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+        case "$_up" in
+            ''|*[!0-9]*) _up=999999 ;;   # 讀不到就當正常運行, 不要擋掉真的 reboot
+        esac
+        if [ "$_up" -lt 300 ]; then
+            logger -t "$TAG" "[略過] reboot: 開機才 ${_up}s, 判定為重開後重複抓到"
+            exit 0
+        fi
         # 延遲 5s 讓 sync 收尾(推播、釋放鎖)後再重開
-        logger -t "$TAG" "5s 後 reboot"
+        logger -t "$TAG" "5s 後 reboot (uptime=${_up}s)"
         ( sleep 5 && reboot ) &
         ;;
 
