@@ -999,13 +999,18 @@ main() {
         # ★ 壓成 "cmdid<TAB>action<TAB>arg1<TAB>arg2..."
         #   cmdid 固定放第一欄: arg 數量不固定, 放最後會跟 arg 混在一起分不出來。
         #   Sheet 還沒加 E 欄(cmdid)時 c 會是空字串, 下面會退回用 action+arg 當 key。
+        # ⚠️ 無 cmdid 時輸出哨兵 "-" 而非空字串:
+        #    IFS=tab 的 `set --` 會把「開頭的空欄位」整個吃掉, 導致 $1 變成
+        #    action、shift 後 action 為空 → 整筆靜默失效。Sheet 還沒加 E 欄
+        #    時這會讓「所有」指令都不執行(實測 2026-09-24 踩過)。
         awk '
-            /^config linecmd/ { if(seen) print c "\t" rec; c=""; rec=""; seen=1; next }
-            /^config /        { if(seen){print c "\t" rec; seen=0}; next }
+            function flush(){ print (c=="" ? "-" : c) "\t" rec }
+            /^config linecmd/ { if(seen) flush(); c=""; rec=""; seen=1; next }
+            /^config /        { if(seen){flush(); seen=0}; next }
             seen && /option cmdid/  { s=$0; sub(/^[[:space:]]*option cmdid[[:space:]]*/,"",s); c=s }
             seen && /option action/ { s=$0; sub(/^[[:space:]]*option action[[:space:]]*/,"",s); rec=s }
             seen && /(option|list) arg/ { s=$0; sub(/^[[:space:]]*(option|list) arg[[:space:]]*/,"",s); rec=rec "\t" s }
-            END { if(seen) print c "\t" rec }
+            END { if(seen) flush() }
         ' "$TMP_DECRYPTED" | sed "s/'//g" > "$_LC_TSV"
 
         # LineCMD 去重記錄
@@ -1042,7 +1047,7 @@ main() {
             # ⚠️ Sheet 尚未加 E 欄時 cmdid 為空 → 退回用 action+arg 當 key,
             #   讓 GAS 與路由器可以不同步上線(否則空 key 會把所有指令
             #   視為同一筆, 第二筆之後全被吃掉)。
-            if [ -n "$_lc_cmdid" ]; then
+            if [ -n "$_lc_cmdid" ] && [ "$_lc_cmdid" != "-" ]; then
                 _lc_key="$_lc_cmdid"
             else
                 _lc_key="noid:${_lc_action}:${_lc_argdesc}"
