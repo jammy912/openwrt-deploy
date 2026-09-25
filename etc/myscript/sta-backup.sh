@@ -90,10 +90,15 @@ mesh_ok() {
     command -v batctl >/dev/null 2>&1 || return 1
     _n=$(batctl n 2>/dev/null | grep -c ':')
     [ "$_n" -eq 0 ] 2>/dev/null && return 1
-    # 有鄰居, 再看有沒有人 wan_status=up (排除自己)
+    # 有鄰居, 再看有沒有人 wan_status=up
     command -v alfred >/dev/null 2>&1 || return 0   # 沒 alfred 就只看鄰居數
-    _me=$(cat /etc/myscript/.mesh_id 2>/dev/null)
-    _up=$(alfred -r 64 2>/dev/null | grep -o '"wan_status\\":\\"up\\"' | wc -l)
+    # ⚠️ alfred 的輸出是「JSON 字串裡再包一層 JSON」, 跳脫字元只有一個反斜線:
+    #      { "86:76:...", "{\"wan_status\":\"up\", \"priority\":90, ...}" }
+    #    原本寫成 '"wan_status\\":\\"up\\"'(單引號內 \\ = 兩個字面反斜線)
+    #    永遠比對不到 → _up 恆為 0 → mesh_ok() 恆回 false
+    #    → 只要 WAN 一斷就觸發 STA, 即使旁邊那台還有網路。
+    #    改用不含跳脫的關鍵片段比對, 避開反斜線數量的陷阱。
+    _up=$(alfred -r 64 2>/dev/null | grep -c 'wan_status[^,]*up')
     [ "$_up" -gt 0 ] 2>/dev/null && return 0
     return 1
 }
@@ -243,8 +248,14 @@ sta_on() {
     uci commit network
     uci commit firewall
 
-    log "🔌 啟用 STA 備援: radio=$_radio ssid=$_ssid → wifi reload"
-    wifi reload
+    # ⚠️ 不可用 `wifi reload` —— 那是全域指令, 會把「所有」radio 一起重啟。
+    #   實測 2026-09-25 於 MX4200(.9): 觸發後 SSH 與 Tailscale 同時斷, 只能
+    #   現場重開。該台 5G 上有 AP、2.4G 上有 AP+mesh, 全部重啟等於把管理路徑
+    #   一起砍掉, 而 STA 最快也要數十秒才可能連上 —— 中間完全失聯。
+    #   改用 `wifi up <radio>` 只動目標 radio, 另一個 radio 的 AP/mesh 不受影響,
+    #   管理路徑得以保留。
+    log "🔌 啟用 STA 備援: radio=$_radio ssid=$_ssid → wifi up $_radio"
+    wifi up "$_radio" 2>/dev/null || wifi reload
 
     # 等關聯 + DHCP。⚠️ 不能只 sleep 固定秒數就當成功 —— 連不上鄰居 AP 時
     #   wwan 介面仍存在但永遠沒有位址, 那時若直接宣告成功, auto-role 會把
@@ -285,6 +296,9 @@ sta_off_raw() {
         echo idle > "$STATE_F"
         return 0
     fi
+    # ⚠️ 必須在 delete 之前取得 radio —— 刪掉就查不到了, 後面只能退回
+    #    全域 wifi reload(那正是要避免的)。
+    _radio=$(uci -q get wireless.${STA_SECTION}.device 2>/dev/null)
     uci -q delete wireless.${STA_SECTION}
     uci -q delete network.wwan
     _zi=0
@@ -298,8 +312,14 @@ sta_off_raw() {
     uci commit wireless
     uci commit network
     uci commit firewall
-    log "🔌 關閉 STA 備援 → wifi reload"
-    wifi reload
+    # 同 sta_on: 只重啟目標 radio, 不要動到另一個 radio 上的 AP/mesh
+    if [ -n "$_radio" ]; then
+        log "🔌 關閉 STA 備援 → wifi up $_radio"
+        wifi up "$_radio" 2>/dev/null || wifi reload
+    else
+        log "🔌 關閉 STA 備援 → wifi reload (查不到原 radio)"
+        wifi reload
+    fi
     sleep 8
     /etc/init.d/firewall reload >/dev/null 2>&1
     echo idle > "$STATE_F"
@@ -378,6 +398,24 @@ ENABLE=$(_read "$ENABLE_F")
 if [ "$ENABLE" != "1" ]; then
     exit 0
 fi
+
+# ⚠️ 防重入: 本腳本由 auto-role.sh 用 `&` 背景呼叫, 而 sta_on() 內要等最多
+#   45 秒 DHCP。auto-role 每分鐘跑一次 —— 沒有鎖的話上一輪還在等 DHCP,
+#   下一輪又進來再做一次 uci set + wifi up, 兩邊互相打斷,
+#   結果是 radio 反覆重啟而永遠連不上。
+LOCK_D="/tmp/.sta_backup.lock"
+if ! mkdir "$LOCK_D" 2>/dev/null; then
+    # 鎖超過 5 分鐘視為殘留(前一輪被 kill 或斷電), 清掉重來
+    _age=$(( $(date +%s) - $(date -r "$LOCK_D" +%s 2>/dev/null || echo 0) ))
+    if [ "$_age" -gt 300 ]; then
+        log "清除殘留鎖 (${_age}s)"
+        rmdir "$LOCK_D" 2>/dev/null
+        mkdir "$LOCK_D" 2>/dev/null || exit 0
+    else
+        exit 0
+    fi
+fi
+trap 'rmdir "$LOCK_D" 2>/dev/null' EXIT INT TERM
 
 CUR_STATE=$(_read "$STATE_F"); [ -z "$CUR_STATE" ] && CUR_STATE=idle
 
