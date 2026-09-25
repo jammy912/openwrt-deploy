@@ -694,6 +694,7 @@ main() {
             /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
                 c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""; ftt=""; ftm=""
+                sbs=""; sbk=""; sbb=""; sbe=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -715,6 +716,15 @@ main() {
                     # ⚠️ 不可用 a[n] 只取最後一個 token —— "Phone Pad" 會只剩 Pad(靜默少監看一半),
                     #    比照 ch5g_main/upstream_dns 取 option 名稱之後的整段。
                     if ($i ~ /option ft_tracking_member/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ft_tracking_member[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); ftm=v }
+                    # STA 備援(鄰居 AP): WAN 斷且 batman 無鄰居時的最後手段。
+                    # ⚠️ ssid/key 必須「取整段」而非 a[n]: WiFi 名稱與密碼常含空白,
+                    #    用 a[n] 只會取到最後一個 token(例如 "My Home WiFi" 只剩 WiFi)。
+                    # ⚠️ 也不可像 ft_tracking_member 那樣把逗號分號轉空白 —— 那些字元
+                    #    在密碼裡是合法內容, 轉掉就連不上。只去除前後空白與外層引號。
+                    if ($i ~ /option sta_backup_ssid/)   { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_ssid[[:space:]]+/, "", v);   gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbs=v }
+                    if ($i ~ /option sta_backup_key/)    { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key[[:space:]]+/, "", v);    gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk=v }
+                    if ($i ~ /option sta_backup_band/)   { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbb=a[n] }
+                    if ($i ~ /option sta_backup_enable/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbe=a[n] }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -724,7 +734,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -828,6 +838,39 @@ main() {
                 FT_CHANGED=1
             fi
         done
+        # 更新 STA 備援旗標 (.sta_backup_*)
+        # 用途: WAN 斷且 batman 無鄰居時, 自動用 2.4G 連鄰居 AP 當最後手段。
+        # ★ 比照上面 ft_* 用「空值也要能寫」: 使用者把 Sheet 欄位清空(例如不再
+        #   想用備援)時, 旗標檔要能真的變回空, 不能停在舊值繼續帶著密碼。
+        # ⚠️ key 檔權限設 600 —— 那是鄰居的 WiFi 密碼。其餘三個無妨但一併照做。
+        # ⚠️ enable 預設 0(未填 = 不啟用): 這功能會自動改 wireless 設定,
+        #    必須明確開啟才生效, 不可因為 Sheet 漏填就自己跑起來。
+        case "$NEW_STA_ENABLE" in
+            TRUE|true|1|Y|y) NEW_STA_ENABLE=1 ;;
+            *)               NEW_STA_ENABLE=0 ;;
+        esac
+        case "$NEW_STA_BAND" in
+            2g|2G|2.4g|2.4G) NEW_STA_BAND=2g ;;
+            5g|5G)           NEW_STA_BAND=5g ;;
+            *)               NEW_STA_BAND=2g ;;   # 預設 2.4G(穿透好, 不佔主力 5G)
+        esac
+        for _pair in "sta_backup_ssid:$NEW_STA_SSID" "sta_backup_key:$NEW_STA_KEY" \
+                     "sta_backup_band:$NEW_STA_BAND" "sta_backup_enable:$NEW_STA_ENABLE"; do
+            _name="${_pair%%:*}"
+            _val="${_pair#*:}"
+            _f="/etc/myscript/.${_name}"
+            _cur=$(cat "$_f" 2>/dev/null)
+            if [ "$_val" != "$_cur" ]; then
+                ( umask 077; echo "$_val" > "$_f" )
+                # ⚠️ 不要把密碼寫進 log
+                if [ "$_name" = "sta_backup_key" ]; then
+                    log "🔧 ${_name}: 已更新 (${#_val} 字元, hostname=$MY_HOSTNAME)"
+                else
+                    log "🔧 ${_name}: [$_cur] → [$_val] (hostname=$MY_HOSTNAME)"
+                fi
+            fi
+        done
+
         # 旗標有變 -> 重啟 check-roam 常駐(它自己會依 ft_tracking_time=0 決定要不要跑)
         if [ "$FT_CHANGED" = "1" ]; then
             for _p in $(ps w | grep -E "/bin/sh /etc/myscript/check-roam\.sh|logread -f -e AP-STA" | grep -v grep | grep -v "ash -c" | awk '{print $1}'); do
