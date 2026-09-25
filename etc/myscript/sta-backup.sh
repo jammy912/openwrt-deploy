@@ -65,7 +65,14 @@ _cnt_get() {
 }
 
 # ---------- 判斷:本機 WAN 有沒有外網 ----------
+# ★ 由 auto-role.sh 呼叫時會帶 STA_WAN_OK(它剛算過, 最長花了 23 秒重試),
+#   直接沿用可省掉重複 ping, 也避免兩支腳本各自判斷而結論不一致。
+#   手動執行(status/on/off)時沒有這個變數, 就自己量。
 wan_ok() {
+    case "$STA_WAN_OK" in
+        1) return 0 ;;
+        0) return 1 ;;
+    esac
     _wif=$(uci -q get network.wan.device 2>/dev/null || echo wan)
     _wip=$(uci -q get network.wan.ipaddr 2>/dev/null)
     [ -z "$_wip" ] && _wip=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
@@ -215,7 +222,9 @@ show_status() {
 
 # ===================== main =====================
 case "$1" in
-    status) STA_VERBOSE=1; show_status; exit 0 ;;
+    # ⚠️ status 清掉 STA_WAN_OK: 手動查現況時要看「實際量測值」,
+    #    不能沿用呼叫端傳進來的快取, 否則顯示的 WAN 狀態可能是舊的。
+    status) STA_VERBOSE=1; unset STA_WAN_OK; show_status; exit 0 ;;
     on)     STA_VERBOSE=1; log "手動啟用"; sta_on; exit $? ;;
     off)    STA_VERBOSE=1; log "手動關閉"; sta_off; exit $? ;;
 esac

@@ -1407,3 +1407,24 @@ else
         fi
     fi
 fi
+
+# =====================================================================
+# STA 備援 (WAN 與 mesh 皆無出路時, 改用 2.4G 連上游 AP)
+# =====================================================================
+# ★ 掛在 auto-role 尾端而非另排 cron:
+#   本腳本每分鐘跑, 且上面已經算過 WAN 健康狀態(_wan_ok)與角色, 直接沿用
+#   可省掉 sta-backup.sh 自己再做一次最長 23 秒的 ping 重試, 也避免兩支
+#   腳本對「現在有沒有網路」各自判斷而打架。
+# ⚠️ _wan_ok 只在 NEW_ROLE=gateway 的分支內計算(見上方 ~line 157);
+#   角色是 client 時該變數不存在。但 client 本身就代表 WAN 連 IP 都沒有,
+#   等同無外網, 故此處顯式傳 0, 不可寫成 ${_wan_ok:-1} 之類的樂觀預設。
+# ⚠️ sta-backup.sh 內部仍有 enable!=1 就 exit 0 的總開關, 這裡無條件呼叫
+#   是安全的 —— 真正的閘門在那支腳本裡, 不在這行。
+if [ -x /etc/myscript/sta-backup.sh ]; then
+    if [ "$NEW_ROLE" = "gateway" ]; then
+        _sta_wan="${_wan_ok:-0}"
+    else
+        _sta_wan=0          # client = 連 WAN IP 都沒有
+    fi
+    STA_WAN_OK="$_sta_wan" /etc/myscript/sta-backup.sh >/dev/null 2>&1 &
+fi
