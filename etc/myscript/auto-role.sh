@@ -121,6 +121,28 @@ else
         HAS_WAN=1
     fi
 
+    # ★ STA 備援已啟用且真的拿到 IP → 等同有 WAN, 要當 gateway。
+    #   否則角色會是 client, 而 client 不會走下面的 ARP DAD 搶 192.168.1.1、
+    #   也不會開 DHCP server —— 等於連上了鄰居 AP 卻沒人幫 LAN 發 IP,
+    #   整個備援等於白做。
+    # ⚠️ 必須確認「拿到 IP」而不只是「介面存在」: sta 連不上鄰居 AP 時
+    #   wwan 介面仍在但沒位址, 那時當 gateway 只會讓全家指向一個不通的閘道。
+    # ⚠️ 刻意「不」在這裡直接改 LAN IP —— 讓既有的 ARP DAD(§下方 ~line 307)
+    #   去搶 .1。那段會比對 priority 並偵測第二個 MAC, 繞過它就是自己造
+    #   雙主搶 .1 的 IP 衝突。「batctl n 為 0」只代表我看不到鄰居,
+    #   不代表鄰居不存在(可能是網路分割)。
+# ⚠️ 時序: sta-backup.sh 是在「本腳本尾端」才被呼叫(背景執行), 所以 STA
+    #   剛啟用的那一輪這裡還看不到 wwan 位址, 要等下一分鐘才轉 gateway。
+    #   這是刻意接受的 —— 多一分鐘等於多一次「STA 真的穩定」的確認,
+    #   避免剛連上就搶 .1 結果連線又掉。
+    if [ "$HAS_WAN" = "0" ] && [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
+        _sta_ip=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+        if [ -n "$_sta_ip" ] && [ "$_sta_ip" != "0.0.0.0" ]; then
+            HAS_WAN=1
+            log "STA 備援生效 (wwan=$_sta_ip), 角色視同 gateway"
+        fi
+    fi
+
     # =====================
     # 2. 決定角色
     # =====================
