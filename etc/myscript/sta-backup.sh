@@ -108,6 +108,77 @@ pick_radio() {
     return 1
 }
 
+# ---------- policy routing ----------
+# ★ 為什麼不用主路由表: 見 sta_on() 內 defaultroute=0 的說明。鄰居網段極可能
+#   與本地 LAN 相同(192.168.1.0/24 是台灣最常見的預設), 路由重疊會讓回本地
+#   的封包被送去鄰居, 整台失聯。
+# ⚠️ 位址是 DHCP 給的, 每次續約都可能不同 —— 一律「執行時動態取得」,
+#   絕不可寫死。刪除時也不能用 `ip rule del from <ip>`(舊 IP 已不可知),
+#   故所有規則都掛固定 pref, 用 pref 精準刪除。
+STA_TABLE=99
+STA_PREF_SRC=990       # from <sta_ip>  → table 99
+STA_PREF_LAN=991       # from <lan_net> → table 99 (LAN 出去的流量)
+
+sta_rules_clear() {
+    # 反覆刪到沒有為止: 同一 pref 可能因重試而堆疊多筆
+    for _p in "$STA_PREF_SRC" "$STA_PREF_LAN"; do
+        while ip rule del pref "$_p" 2>/dev/null; do :; done
+    done
+    ip route flush table "$STA_TABLE" 2>/dev/null
+}
+
+sta_rules_apply() {
+    _ip=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+    _mask=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].mask' 2>/dev/null)
+    _dev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    _gw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+    [ -z "$_mask" ] && _mask=24
+
+    if [ -z "$_ip" ] || [ -z "$_dev" ] || [ -z "$_gw" ]; then
+        log "規則未套用: wwan 資訊不全 (ip=$_ip dev=$_dev gw=$_gw)"
+        return 1
+    fi
+
+    sta_rules_clear
+
+    # 上游網段(由實際位址推算, 不可假設是 /24 或 192.168.1.x)
+    _upnet=$(_net_of "$_ip" "$_mask")
+    _lan_ip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    _lan_cidr=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | head -1)
+    _lan_mask=$(echo "$_lan_cidr" | cut -d/ -f2)
+    _lannet=$(_net_of "$_lan_ip" "$_lan_mask")
+
+    # table 99: 走上游
+    ip route add "$_upnet" dev "$_dev" src "$_ip" table "$STA_TABLE" 2>/dev/null
+    ip route add default via "$_gw" dev "$_dev" table "$STA_TABLE" 2>/dev/null
+    # ★ 本地 LAN 必須「優先於」預設路由留在本機 —— 否則 LAN 內互連會被送上游
+    ip route add "$_lannet" dev br-lan src "$_lan_ip" table "$STA_TABLE" 2>/dev/null
+
+    ip rule add from "$_ip" table "$STA_TABLE" pref "$STA_PREF_SRC" 2>/dev/null
+    ip rule add from "$_lannet" table "$STA_TABLE" pref "$STA_PREF_LAN" 2>/dev/null
+
+    log "規則已套用: ip=$_ip dev=$_dev gw=$_gw upnet=$_upnet lannet=$_lannet table=$STA_TABLE"
+    [ "$_upnet" = "$_lannet" ] && \
+        log "⚠️ 上游與本地同網段($_upnet) —— 已用 policy routing 隔離, 但 LAN 內若有與上游相同的主機位址仍會有歧義"
+    return 0
+}
+
+# 由 IP + mask 算出網段(busybox 沒有 ipcalc 時自己算)
+_net_of() {
+    _a="$1"; _m="$2"
+    if command -v ipcalc.sh >/dev/null 2>&1; then
+        _n=$(ipcalc.sh "$_a/$_m" 2>/dev/null | sed -n 's/^NETWORK=//p')
+        [ -n "$_n" ] && { echo "$_n/$_m"; return; }
+    fi
+    # 退路: 只處理 /24 以內的常見情況
+    case "$_m" in
+        24) echo "$(echo "$_a" | cut -d. -f1-3).0/24" ;;
+        16) echo "$(echo "$_a" | cut -d. -f1-2).0.0/16" ;;
+        8)  echo "$(echo "$_a" | cut -d. -f1).0.0.0/8" ;;
+        *)  echo "$_a/$_m" ;;
+    esac
+}
+
 # ---------- 啟用 STA ----------
 sta_on() {
     _ssid=$(_read "$SSID_F")
@@ -141,11 +212,22 @@ sta_on() {
         uci set wireless.${STA_SECTION}.encryption='none'
     fi
 
-    # wwan 介面(DHCP client), metric 設高讓它輸給正常 WAN
+    # wwan 介面(DHCP client)
+    # ★ defaultroute=0 + peerdns=0: 絕對不可讓 DHCP 把路由寫進主表。
+    #   實測 2026-09-25 於 MX4200(.9): 鄰居網段與本地 LAN 同為 192.168.1.0/24,
+    #   且鄰居閘道也是 192.168.1.1 —— DHCP 寫入
+    #     default via 192.168.1.1 dev phy1-sta0
+    #     192.168.1.0/24 dev phy1-sta0 src 192.168.1.138
+    #   與本地的
+    #     192.168.1.0/24 dev br-lan   src 192.168.1.5
+    #   完全重疊, 回本地 LAN 的封包被送去鄰居 → SSH 立刻斷, 整台失聯。
+    #   改由本腳本把路由放進獨立 table(見 sta_rules_apply), 主表不受污染。
     uci -q delete network.wwan 2>/dev/null
     uci set network.wwan=interface
     uci set network.wwan.proto='dhcp'
     uci set network.wwan.metric='200'
+    uci set network.wwan.defaultroute='0'
+    uci set network.wwan.peerdns='0'
     # ⚠️ 必須放進 wan zone 才會做 NAT, 否則 LAN 出不去
     _zi=0
     while [ -n "$(uci -q get firewall.@zone[$_zi] 2>/dev/null)" ]; do
@@ -163,17 +245,43 @@ sta_on() {
 
     log "🔌 啟用 STA 備援: radio=$_radio ssid=$_ssid → wifi reload"
     wifi reload
-    sleep 10
+
+    # 等關聯 + DHCP。⚠️ 不能只 sleep 固定秒數就當成功 —— 連不上鄰居 AP 時
+    #   wwan 介面仍存在但永遠沒有位址, 那時若直接宣告成功, auto-role 會把
+    #   角色升成 gateway 並搶 192.168.1.1, 全家指向一個不通的閘道。
+    _got=0
+    _w=0
+    while [ "$_w" -lt 45 ]; do
+        sleep 5
+        _w=$(( _w + 5 ))
+        _chk=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+        [ -n "$_chk" ] && [ "$_chk" != "0.0.0.0" ] && { _got=1; break; }
+    done
+
+    if [ "$_got" = "0" ]; then
+        log "❌ ${_w}s 內未取得 IP(可能連不上 $_ssid 或密碼錯), 還原設定"
+        sta_off_raw
+        push_notify "STA備援啟用失敗: ${_w}s 內未取得 IP, 檢查 [$_ssid] 名稱/密碼/訊號"
+        return 1
+    fi
+
     /etc/init.d/firewall reload >/dev/null 2>&1
+    sta_rules_apply
 
     echo active > "$STATE_F"
-    push_notify "STA備援已啟用: 2.4G 連上游 AP [$_ssid] (WAN 與 mesh 皆無出路)"
+    _shownet=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+    push_notify "STA備援已啟用: 連上 [$_ssid] 取得 $_shownet (WAN 與 mesh 皆無出路)"
     return 0
 }
 
 # ---------- 關閉 STA 並還原 ----------
-sta_off() {
-    if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ]; then
+# sta_off_raw: 只做清理, 不推播 —— 給「啟用失敗要回滾」用,
+#              那種情況由呼叫端自己推更精確的訊息。
+sta_off_raw() {
+    sta_rules_clear
+    ifdown wwan 2>/dev/null
+    if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
+       && [ -z "$(uci -q get network.wwan 2>/dev/null)" ]; then
         echo idle > "$STATE_F"
         return 0
     fi
@@ -195,7 +303,19 @@ sta_off() {
     sleep 8
     /etc/init.d/firewall reload >/dev/null 2>&1
     echo idle > "$STATE_F"
-    push_notify "STA備援已關閉: WAN 或 mesh 已恢復, 2.4G 還原"
+    return 0
+}
+
+sta_off() {
+    # 已經是乾淨狀態就不做事, 也不推播
+    if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
+       && [ -z "$(uci -q get network.wwan 2>/dev/null)" ]; then
+        sta_rules_clear
+        echo idle > "$STATE_F"
+        return 0
+    fi
+    sta_off_raw
+    push_notify "STA備援已關閉: WAN 或 mesh 已恢復, 已還原"
     return 0
 }
 
@@ -218,6 +338,24 @@ show_status() {
     else
         echo "  STA 介面: 不存在"
     fi
+    echo "  wwan    : $(uci -q get network.wwan >/dev/null 2>&1 && echo '存在' || echo '不存在')"
+    _sip=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+    echo "  wwan IP : ${_sip:-(無)}"
+    echo "--- policy routing ---"
+    _r=$(ip rule show 2>/dev/null | grep -cE "^(${STA_PREF_SRC}|${STA_PREF_LAN}):")
+    echo "  ip rule : $_r 條 (pref $STA_PREF_SRC/$STA_PREF_LAN)"
+    ip rule show 2>/dev/null | grep -E "^(${STA_PREF_SRC}|${STA_PREF_LAN}):" | sed 's/^/    /'
+    echo "  table $STA_TABLE:"
+    ip route show table "$STA_TABLE" 2>/dev/null | sed 's/^/    /' || echo "    (空)"
+    echo "--- 主路由表健康檢查 ---"
+    # ★ 主表若出現兩筆相同網段 = 上游路由污染了主表, 那正是 2026-09-25
+    #   MX4200 失聯的成因。這裡當成告警指標。
+    _dup=$(ip route show 2>/dev/null | awk '$1 ~ /\// {print $1}' | sort | uniq -d | tr '\n' ' ')
+    if [ -n "$_dup" ]; then
+        echo "  ⚠️ 主表有重複網段: $_dup"
+    else
+        echo "  ✅ 主表無重複網段"
+    fi
 }
 
 # ===================== main =====================
@@ -227,6 +365,11 @@ case "$1" in
     status) STA_VERBOSE=1; unset STA_WAN_OK; show_status; exit 0 ;;
     on)     STA_VERBOSE=1; log "手動啟用"; sta_on; exit $? ;;
     off)    STA_VERBOSE=1; log "手動關閉"; sta_off; exit $? ;;
+    # 由 hotplug 呼叫: DHCP 續約可能換位址, 規則要跟著重建。
+    # ⚠️ 不可只在 sta_on() 套一次 —— 位址一變, 舊的 `from <ip>` 規則就失效,
+    #    流量會落回主表(而主表刻意沒有上游路由)→ 整條備援靜默失效。
+    rules-refresh) sta_rules_apply; exit $? ;;
+    rules-clear)   sta_rules_clear; exit 0 ;;
 esac
 
 # ★ 總開關: enable != 1 時「完全不碰任何設定」, 直接結束。
