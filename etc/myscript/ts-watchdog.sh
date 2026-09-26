@@ -281,6 +281,41 @@ if [ -n "$TS_IP" ] && ! ip addr show tailscale0 2>/dev/null | grep -q "inet $TS_
   fi
 fi
 
+# ---- 健檢 2.5:MagicDNS resolver 還活著嗎 ----
+# ★ 實測 2026-09-26 於 MX4200(WAN 斷線恢復後):
+#     tailscaled ✅ running / tailscale status ✅ 節點清單正常 / peer 互通 ✅
+#     但 `nslookup github.com 100.100.100.100` → connection timed out
+#   而 /etc/resolv.conf 被 tailscale 接管指向 100.100.100.100 ——
+#   結果是「ping IP 通但域名全解析不了」, sync-deploy 連兩次下載失敗。
+#   上面健檢 0/0.5/1/2 全部是路由與連通性層面, 沒有一項會發現它;
+#   watchdog.sh 也抓不到(它只 ping IP)。這個故障模式原本無人覆蓋。
+#
+# ⚠️ 必須放在健檢 3「之前」: 健檢 3 用 curl https://$PROBE_HOST 探出口,
+#   MagicDNS 壞掉時那個 curl 也會失敗 → 誤判成 exit node 異常 →
+#   走錯誤的修復路徑(重設/清除 exit node), 治不好還可能把設定弄亂。
+# ⚠️ 只在 resolv.conf 真的指向 100.100.100.100 時才檢查 —— 沒用 MagicDNS
+#   的機器(或已 fallback 到別的 DNS)不該被這段影響。
+if grep -q '^nameserver[[:space:]]\+100\.100\.100\.100' /etc/resolv.conf 2>/dev/null; then
+  if ! nslookup "$PROBE_HOST" 100.100.100.100 >/dev/null 2>&1; then
+    # 再確認一次: 避免單次逾時誤判(DNS 偶發丟包)
+    sleep 2
+    if ! nslookup "$PROBE_HOST" 100.100.100.100 >/dev/null 2>&1; then
+      log "FAIL: MagicDNS(100.100.100.100) 無回應但 resolv.conf 指向它 -> 重啟 tailscaled"
+      /etc/init.d/tailscale restart >/dev/null 2>&1
+      sleep 10
+      apply_exit
+      sleep 3
+      if nslookup "$PROBE_HOST" 100.100.100.100 >/dev/null 2>&1; then
+        log "RECOVERED: MagicDNS 已恢復"
+        notify "✅ Tailscale MagicDNS 自癒成功(100.100.100.100 已恢復解析)"
+      else
+        log "WARN: 重啟 tailscaled 後 MagicDNS 仍無回應"
+        notify_fail "⚠️ Tailscale MagicDNS(100.100.100.100)無回應, 重啟 tailscaled 後仍未恢復 —— 域名解析可能全失效"
+      fi
+    fi
+  fi
+fi
+
 # ---- 健檢 3:出口確實走 exit node 嗎 ----
 if check_egress; then
   remember_exit                              # 健康時記住當前 exit node IP(供日後 fallback 自動切回)
