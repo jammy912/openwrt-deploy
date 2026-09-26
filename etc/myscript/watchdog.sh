@@ -220,6 +220,39 @@ if [ -f "$HITRON_PAUSE_FILE" ]; then
     log "▶️ 冷卻期結束，恢復連網檢查"
 fi
 
+# === STA 備援進行中: 跳過連網檢查/重啟 ===
+# ★ 實測 2026-09-26 於 MX4200: ifdown wan 後
+#     22:49:02 WAN 斷
+#     22:54:26 watchdog 判定所有 DNS 不通, 拍快照
+#     22:58:58 reboot
+#   而 STA 備援需要「連續 5 分鐘判定孤島」才觸發, 再加最多 45 秒連線 ——
+#   watchdog 是 */7, 幾乎必然先重開, STA 永遠沒機會啟動完成。
+#   兩者都在處理「沒網路」, 但 watchdog 的手段(reboot)會直接消滅另一邊。
+# ⚠️ 只在 sta_backup_enable=1 時才跳過; 沒開這功能的機器行為完全不變。
+# ⚠️ 上限 20 分鐘: 避免 STA 一直連不上時 watchdog 被永久癱瘓 ——
+#   那會讓真正的斷網失去自癒能力。超過就恢復原本的檢查與重啟。
+_STA_EN=$(cat /etc/myscript/.sta_backup_enable 2>/dev/null)
+if [ "$_STA_EN" = "1" ]; then
+    _STA_STATE=$(cat /tmp/.sta_backup_state 2>/dev/null)
+    _STA_FAIL=$(cat /tmp/.sta_backup_failcnt 2>/dev/null)
+    case "$_STA_FAIL" in ''|*[!0-9]*) _STA_FAIL=0 ;; esac
+    # 正在累積失敗計數(備援即將啟動), 或已經啟用 → 讓它跑完
+    if [ "$_STA_STATE" = "active" ] || [ "$_STA_FAIL" -gt 0 ]; then
+        _STA_MARK=/tmp/.sta_backup_wd_since
+        [ -f "$_STA_MARK" ] || date +%s > "$_STA_MARK"
+        _since=$(cat "$_STA_MARK" 2>/dev/null)
+        case "$_since" in ''|*[!0-9]*) _since=$(date +%s) ;; esac
+        _elapsed=$(( $(date +%s) - _since ))
+        if [ "$_elapsed" -lt 1200 ]; then
+            log "⏸️ STA 備援進行中 (state=${_STA_STATE:-idle} fail=${_STA_FAIL} 已 ${_elapsed}s)，跳過連網檢查與重啟"
+            exit 0
+        fi
+        log "▶️ STA 備援已逾 ${_elapsed}s 仍未成功，恢復 watchdog 正常檢查"
+    else
+        rm -f /tmp/.sta_backup_wd_since 2>/dev/null
+    fi
+fi
+
 # 主邏輯
 # 檢查三個 IP
 check_ip "$IP1"
