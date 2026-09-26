@@ -50,7 +50,14 @@ FAILCNT_F="/tmp/.sta_backup_failcnt"
 OKCNT_F="/tmp/.sta_backup_okcnt"
 BAK_F="/tmp/.sta_backup_wireless.bak"
 
-FAIL_NEED=5      # 連續幾次判定孤島才啟用
+# ⚠️ 這裡的「次」不等於「分鐘」: 本腳本掛在 auto-role.sh 尾端, 而 auto-role
+#   前面有 WAN ping 重試(3 次、間隔 10 秒)、ARP DAD 探測等, 實測跑完一輪
+#   要 3 分鐘 —— cron 雖是每分鐘叫起, 但下一輪會被鎖擋掉。
+#   實測 2026-09-26 於 MX4200:
+#     23:13:41 fail=1 → 23:16:02 fail=2 → 23:19:02 fail=3 → 23:22:03 fail=4
+#     → 23:25:04 fail=5   共 11.5 分鐘, 而非設計的 5 分鐘。
+#   故 FAIL_NEED=2 實際約等於 6 分鐘, 對「WAN 真的斷了」仍夠保守。
+FAIL_NEED=2      # 連續幾次判定孤島才啟用(實測每次間隔約 3 分鐘)
 OK_NEED=3        # 連續幾次判定正常才還原
 STA_SECTION="sta_backup"   # uci wifi-iface 的 section 名(固定, 方便清理)
 
