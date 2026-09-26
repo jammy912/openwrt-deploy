@@ -153,6 +153,16 @@ sta_rules_apply() {
 
     sta_rules_clear
 
+    # ★ 把 DHCP 寫進「主表」的那兩筆搬走 —— 這是本功能的核心。
+    #   留著的話主表會有兩筆 192.168.1.0/24(br-lan 與 phy1-sta0)互搶,
+    #   回本地 LAN 的封包被送去上游 → SSH/Tailscale 同時斷, 整台失聯
+    #   (2026-09-25 於 MX4200 實際發生過, 只能現場重開)。
+    # ⚠️ 必須在「加 table 99 的規則之前」搬, 否則中間那段時間主表仍是髒的。
+    # ⚠️ default 那筆要指定 dev, 不可只 `ip route del default` ——
+    #   那會把 WAN 或 wg 的預設路由一起刪掉。
+    ip route del default via "$_gw" dev "$_dev" 2>/dev/null
+    ip route del "$(_net_of "$_ip" "$_mask")" dev "$_dev" 2>/dev/null
+
     # 上游網段(由實際位址推算, 不可假設是 /24 或 192.168.1.x)
     _upnet=$(_net_of "$_ip" "$_mask")
     _lan_ip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
@@ -172,6 +182,16 @@ sta_rules_apply() {
     log "規則已套用: ip=$_ip dev=$_dev gw=$_gw upnet=$_upnet lannet=$_lannet table=$STA_TABLE"
     [ "$_upnet" = "$_lannet" ] && \
         log "⚠️ 上游與本地同網段($_upnet) —— 已用 policy routing 隔離, 但 LAN 內若有與上游相同的主機位址仍會有歧義"
+
+    # ★ 驗證: 主表不可再有指向 STA 介面的路由, 否則等於沒搬(仍會失聯)。
+    #   搬不乾淨時寧可整個回滾, 也不要留在「連上了但把自己鎖在門外」的狀態。
+    _leftover=$(ip route show 2>/dev/null | grep -c " dev $_dev ")
+    if [ "$_leftover" -gt 0 ]; then
+        log "❌ 主表仍有 ${_leftover} 筆指向 $_dev 的路由, 搬移失敗:"
+        ip route show 2>/dev/null | grep " dev $_dev " | while read -r _l; do log "   主表殘留: $_l"; done
+        return 1
+    fi
+    log "✅ 主表已無 $_dev 路由, 隔離完成"
     return 0
 }
 
@@ -238,7 +258,16 @@ sta_on() {
     uci set network.wwan=interface
     uci set network.wwan.proto='dhcp'
     uci set network.wwan.metric='200'
-    uci set network.wwan.defaultroute='0'
+    # ⚠️ defaultroute 必須是 1(2026-09-27 修正):
+    #   原本設 0 想避免污染主表, 但那同時也讓 udhcpc 不去建那筆路由 ——
+    #   於是 `ifstatus wwan` 的 .route[] 是空陣列, sta_rules_apply() 取
+    #   @.route[0].nexthop 拿不到 gateway, 直接 return 1 不建任何規則。
+    #   實測 2026-09-26 於 MX4200: STA 成功連上 IOT 並拿到 192.168.1.249,
+    #   但監控全程 rule=0, LAN 完全出不去(tracert 回「目的地主機無法連線」)。
+    #   ★ 自己關掉主表路由, 又要求一定要有 gateway 才肯建替代規則 —— 自相矛盾。
+    #   改為讓 DHCP 正常建路由, 再由 hotplug(95-sta-backup)在 ifup 時
+    #   把它從主表搬進 table 99。代價是有數秒空窗期主表是髒的。
+    uci set network.wwan.defaultroute='1'
     uci set network.wwan.peerdns='0'
     # ⚠️ 必須放進 wan zone 才會做 NAT, 否則 LAN 出不去
     _zi=0
@@ -284,11 +313,21 @@ sta_on() {
     fi
 
     /etc/init.d/firewall reload >/dev/null 2>&1
-    sta_rules_apply
+
+    # ★ 必須檢查回傳值: 規則沒建成就等於「連上了但沒有出口」, 而且主表可能
+    #   還留著與本地 LAN 衝突的路由 —— 那正是 2026-09-25 整台失聯的狀態。
+    #   寧可回滾成「沒有備援」, 也不要停在「看似成功實則鎖死」。
+    if ! sta_rules_apply; then
+        log "❌ policy routing 建立失敗, 回滾 STA"
+        sta_off_raw
+        push_notify "STA備援啟用失敗: 已連上 [$_ssid] 但路由隔離失敗, 已回滾(避免失聯)"
+        return 1
+    fi
 
     echo active > "$STATE_F"
     _shownet=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-    push_notify "STA備援已啟用: 連上 [$_ssid] 取得 $_shownet (WAN 與 mesh 皆無出路)"
+    _via=$(ip route show table "$STA_TABLE" 2>/dev/null | awk '/^default/{print $3}')
+    push_notify "STA備援已啟用: 連上 [$_ssid] 取得 ${_shownet} (閘道 ${_via:-?}, WAN 與 mesh 皆無出路)"
     return 0
 }
 
