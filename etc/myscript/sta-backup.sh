@@ -298,10 +298,14 @@ sta_rules_apply() {
 
     # ★ 驗證: 主表不可再有指向 STA 介面的路由, 否則等於沒搬(仍會失聯)。
     #   搬不乾淨時寧可整個回滾, 也不要留在「連上了但把自己鎖在門外」的狀態。
-    _leftover=$(ip route show 2>/dev/null | grep -c " dev $_dev ")
+    # ⚠️ 必須排除 metric 300 —— 那兩筆是本函式「刻意」補進主表的
+    #   (供本機自身流量使用, 見上方說明)。不排除的話會自我矛盾:
+    #   剛補完就被判定為「搬移失敗」→ 回滾 STA → 10 分鐘後自動重開。
+    #   實測 2026-09-27 15:18:17 就是這樣連鎖觸發重開的。
+    _leftover=$(ip route show 2>/dev/null | grep " dev $_dev " | grep -vc 'metric 300')
     if [ "$_leftover" -gt 0 ]; then
-        log "❌ 主表仍有 ${_leftover} 筆指向 $_dev 的路由, 搬移失敗:"
-        ip route show 2>/dev/null | grep " dev $_dev " | while read -r _l; do log "   主表殘留: $_l"; done
+        log "❌ 主表仍有 ${_leftover} 筆指向 $_dev 的非預期路由, 搬移失敗:"
+        ip route show 2>/dev/null | grep " dev $_dev " | grep -v 'metric 300' | while read -r _l; do log "   主表殘留: $_l"; done
         return 1
     fi
     log "✅ 主表已無 $_dev 路由, 隔離完成"
