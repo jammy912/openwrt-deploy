@@ -200,16 +200,22 @@ sta_rules_apply() {
         log "❌ 位址衝突: 上游閘道($_gw) 與本機 LAN IP 相同, 封包會繞回自己"
         _sugg=$(echo "$_lan_self" | awk -F. '{printf "%s.%s.%s.%d", $1,$2,$3, ($4<200 ? $4+10 : $4-10)}')
         log "   解法: 把 Sheet 的 lan_gw_ip 從 $_lan_self 改成 $_sugg"
-        _cf="/tmp/.sta_conflict_notified"
+        # ⚠️ 不可用 push_notify —— 偵測到衝突的時機正是「唯一出口還沒建立」,
+        #   推播必然送不出去。實測 2026-09-27 使用者指出這點。
+        #   改用 queue_push 排隊, 等網路恢復(或下次開機)再補送。
+        _cf="/etc/myscript/.sta_conflict_notified"
         _now=$(date +%s); _prev=$(cat "$_cf" 2>/dev/null)
         case "$_prev" in ''|*[!0-9]*) _prev=0 ;; esac
         if [ $(( _now - _prev )) -ge 3600 ]; then
             echo "$_now" > "$_cf"
-            push_notify "STA備援卡住: 上游閘道 $_gw 與本機 LAN IP 相同。請把 Google Sheet 的 lan_gw_ip 從 $_lan_self 改為 $_sugg 後重試。"
+            command -v queue_push >/dev/null 2>&1 && \
+                queue_push "sta-backup-conflict" "gw-ip-collision" \
+                    "上游閘道 $_gw 與本機 LAN IP 相同, 請把 Sheet 的 lan_gw_ip 從 $_lan_self 改為 $_sugg" \
+                    >/dev/null 2>&1
         fi
         return 1
     fi
-    rm -f /tmp/.sta_conflict_notified 2>/dev/null
+    rm -f /etc/myscript/.sta_conflict_notified 2>/dev/null
 
     sta_rules_clear
 
