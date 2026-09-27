@@ -121,28 +121,6 @@ else
         HAS_WAN=1
     fi
 
-    # ★ STA 備援已啟用且真的拿到 IP → 等同有 WAN, 要當 gateway。
-    #   否則角色會是 client, 而 client 不會走下面的 ARP DAD 搶 192.168.1.1、
-    #   也不會開 DHCP server —— 等於連上了鄰居 AP 卻沒人幫 LAN 發 IP,
-    #   整個備援等於白做。
-    # ⚠️ 必須確認「拿到 IP」而不只是「介面存在」: sta 連不上鄰居 AP 時
-    #   wwan 介面仍在但沒位址, 那時當 gateway 只會讓全家指向一個不通的閘道。
-    # ⚠️ 刻意「不」在這裡直接改 LAN IP —— 讓既有的 ARP DAD(§下方 ~line 307)
-    #   去搶 .1。那段會比對 priority 並偵測第二個 MAC, 繞過它就是自己造
-    #   雙主搶 .1 的 IP 衝突。「batctl n 為 0」只代表我看不到鄰居,
-    #   不代表鄰居不存在(可能是網路分割)。
-# ⚠️ 時序: sta-backup.sh 是在「本腳本尾端」才被呼叫(背景執行), 所以 STA
-    #   剛啟用的那一輪這裡還看不到 wwan 位址, 要等下一分鐘才轉 gateway。
-    #   這是刻意接受的 —— 多一分鐘等於多一次「STA 真的穩定」的確認,
-    #   避免剛連上就搶 .1 結果連線又掉。
-    if [ "$HAS_WAN" = "0" ] && [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
-        _sta_ip=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-        if [ -n "$_sta_ip" ] && [ "$_sta_ip" != "0.0.0.0" ]; then
-            HAS_WAN=1
-            log "STA 備援生效 (wwan=$_sta_ip), 角色視同 gateway"
-        fi
-    fi
-
     # =====================
     # 2. 決定角色
     # =====================
@@ -479,10 +457,6 @@ dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CU
 # LAN IP 模式
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
-    # ⚠️ 這裡是「主 gw」分支(LAN_MODE=static), 固定用 192.168.1.1。
-    #   STA 備援時角色是 client, 不會走到這裡 —— 曾經在此加過「改用 .5」
-    #   的邏輯, 實測 2026-09-27 證實是死碼(client 時 LAN_MODE 非 static),
-    #   已移除。STA 情境的 LAN IP 由下方 else 分支(查 DHCP 靜態對應)處理。
     if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr='192.168.1.1'
@@ -523,51 +497,7 @@ else
     #    沒有 default route -> ping 8.8.8.8 回 "Network unreachable"。
     #    角色會變而 IP 不會變是常態(拔掉 WAN 就是這種), 故兩者必須解耦。
     CUR_LAN_GW=$(uci get network.lan.gateway 2>/dev/null)
-    # ★ STA 備援生效時, 絕不可把 gateway/DNS 指向 192.168.1.1(2026-09-27):
-    #   那個位址在 STA 情境下是「上游鄰居的閘道」, 位於 phy1-sta0 側,
-    #   br-lan 上根本沒有人 —— 指過去就是死路。
-    #   實測於 MX4200: LAN 裝置 tracert 1.1.1.1 完全通(走 table 99),
-    #   但 ping www.google.com 找不到主機 —— 因為 dnsmasq 的 upstream 被
-    #   設成 192.168.1.1, 而那筆查詢是「以本機身分」從 br-lan 送出去的。
-    #   同理 `ip route replace default via 192.168.1.1 dev br-lan` 也會讓
-    #   本機自身流量(ntp、推播、sync)全部走進死路。
-    #   → STA 生效時整段跳過, 出口與 DNS 由 sta-backup.sh 的 table 99 與
-    #     主表 metric 300 那筆負責。
-    _sta_live=0
-    if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
-        [ -n "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _sta_live=1
-    fi
-    if [ "$NEW_ROLE" = "client" ] && [ "$_sta_live" = "1" ]; then
-        # STA 備援供網中: 清掉指向 .1 的設定, 讓 sta-backup.sh 管出口
-        if [ -n "$CUR_LAN_GW" ]; then
-            uci delete network.lan.gateway 2>/dev/null
-            uci delete network.lan.dns 2>/dev/null
-            log "STA 備援中: 清除 LAN gateway/DNS(不可指向上游閘道 192.168.1.1)"
-            CHANGED=1
-        fi
-        ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
-
-        # ★ DHCP 發出去的閘道/DNS 必須指向「本機現在的 LAN IP」而非 .1。
-        #   STA 情境下 .1 是上游鄰居的閘道, LAN 裝置照著設就送錯地方。
-        #   實測 2026-09-27: 診斷快照顯示 dhcp_option 仍是 3,192.168.1.1
-        #   而本機 LAN 已是 192.168.1.5 —— client 拿到的閘道是死的。
-        # ⚠️ 這段原本寫在上面的 static 分支裡, 但 STA 時角色是 client、
-        #   LAN_MODE 非 static, 那整段是死碼從不執行(已移除)。
-        _my_lan=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
-        if [ -n "$_my_lan" ] && [ "$_my_lan" != "192.168.1.1" ]; then
-            _wo3="3,$_my_lan"; _wo6="6,$_my_lan"
-            _co=$(uci -q get dhcp.lan.dhcp_option 2>/dev/null | tr '\n' ' ' | awk '{$1=$1;print}')
-            if [ "$_co" != "$_wo3 $_wo6" ]; then
-                uci -q delete dhcp.lan.dhcp_option
-                uci add_list dhcp.lan.dhcp_option="$_wo3"
-                uci add_list dhcp.lan.dhcp_option="$_wo6"
-                uci commit dhcp
-                /etc/init.d/dnsmasq reload >/dev/null 2>&1
-                log "STA 備援中: DHCP 閘道/DNS 改指向 $_my_lan"
-                CHANGED=1
-            fi
-        fi
-    elif [ "$NEW_ROLE" = "client" ]; then
+    if [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
         if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
             uci set network.lan.gateway='192.168.1.1'
@@ -579,15 +509,6 @@ else
         # 設定寫進 uci 不等於路由表生效(NEED_RESTART_NET 只在 IP 也變時才會
         # 走熱切換那段)。★ 直接補一條, 冪等。
         ip route replace default via 192.168.1.1 dev br-lan 2>/dev/null
-        # ★ STA 結束後要把自訂的 dhcp_option 清掉, 否則 client 會一直被告知
-        #   閘道是備援期間的那個 IP。沒有這段的話 STA 一用過就永久殘留。
-        if [ -n "$(uci -q get dhcp.lan.dhcp_option 2>/dev/null)" ]; then
-            uci -q delete dhcp.lan.dhcp_option
-            uci commit dhcp
-            /etc/init.d/dnsmasq reload >/dev/null 2>&1
-            log "STA 已結束: 清除自訂 dhcp_option(回到預設閘道)"
-            CHANGED=1
-        fi
     else
         # 副gw 有 WAN，不設 gateway（走自己的 WAN）
         if [ -n "$CUR_LAN_GW" ]; then
@@ -1486,20 +1407,3 @@ else
         fi
     fi
 fi
-
-# =====================================================================
-# STA 備援: 由「獨立 cron」執行, 不從這裡呼叫
-# =====================================================================
-# ★ 原本掛在本腳本尾端(沿用已算好的 _wan_ok 省掉重複 ping), 但實測
-#   2026-09-27 於 MX4200 發現致命缺陷: WAN 斷線時本腳本前段會做
-#   ping 重試(最長 23 秒)、ARP DAD、網路重啟等耗時操作, 跑不到尾端
-#   這一行 —— 使用者拔線 10 分鐘, sta-backup.sh 一次都沒被執行
-#   (flash log 全空, 而該腳本在「判定無出路」時必定寫 log)。
-#   備援最需要生效的時刻, 正是它最不可能被呼叫的時刻。
-# → 改由 Sheet 的 crontab 段獨立排程:
-#       */1 * * * * /etc/myscript/sta-backup.sh
-#   兩者靠 sta-backup.sh 內的 mkdir 原子鎖互斥, 不會重複執行。
-# ⚠️ 本檔仍保留其他三段 STA 相關邏輯(它們是 auto-role 自己的職責):
-#   - HAS_WAN 判斷(~line 138): STA 生效時角色要升 gateway
-#   - LAN IP 改用靜態 IP(~line 490): 避開與上游閘道同 IP
-#   - gateway/DNS 不指向 .1(~line 586): 那在 STA 情境是死路
