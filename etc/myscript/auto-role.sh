@@ -479,67 +479,17 @@ dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CU
 # LAN IP 模式
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
-    # ★ STA 備援生效時, 主 gw 的 LAN IP 要避開上游閘道(2026-09-27):
-    #   實測 MX4200 連鄰居 AP 後拿到 192.168.1.249, 而該網段的閘道是
-    #   192.168.1.1 —— 與本機 LAN IP 完全相同。`default via 192.168.1.1`
-    #   會匹配到本地 br-lan, 封包繞回自己, 整個備援形同虛設
-    #   (STA 連上、拿到 IP、policy routing 都建了, 但 tracert 回
-    #    「目的地主機無法連線」)。
-    # ★ 解法: STA 模式下改用 192.168.1.5, 讓「自己」與「上游閘道」不同 IP。
-    #   DHCP 照常發, 但閘道改指 .5(見下方 dhcp_option 3)。
-    # ⚠️ 判斷條件用「wwan 真的有位址」而非只看 sta_backup 存在 ——
-    #   介面建了但沒連上時不該改 IP, 那會平白讓 LAN 失去 .1 閘道。
-    _sta_lan_ip="192.168.1.1"
-    if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
-        _wwip=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-        _wwgw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
-        if [ -n "$_wwip" ] && [ "$_wwgw" = "192.168.1.1" ]; then
-            # ★ 沿用副 gw 既有的取 IP 邏輯(查 DHCP static host), 不要寫死。
-            #   每台機器在 Sheet 的 dhcp 段都有自己的固定 IP, 直接用那個就好 ——
-            #   寫死 .5 的話多台同時進備援會互撞, 而且換機器就要改 code。
-            _stahost=$(cat /proc/sys/kernel/hostname 2>/dev/null)
-            if [ -n "$_stahost" ]; then
-                _staidx=$(uci show dhcp 2>/dev/null | grep -i "name='$_stahost'" | head -1 | sed "s/\.name=.*//")
-                [ -n "$_staidx" ] && _sta_lan_ip=$(uci get "${_staidx}.ip" 2>/dev/null)
-            fi
-            # 查不到就退回 .1 並放棄改 IP —— 寧可維持現狀, 也不要亂猜一個
-            # 可能撞到別人的位址。
-            if [ -z "$_sta_lan_ip" ] || [ "$_sta_lan_ip" = "192.168.1.1" ]; then
-                _sta_lan_ip="192.168.1.1"
-                log "⚠️ STA 備援: 查不到 $_stahost 的 DHCP 靜態 IP, 維持 .1(仍會與上游閘道衝突)"
-            else
-                log "STA 備援: LAN 改用自己的靜態 IP $_sta_lan_ip (避開上游閘道 $_wwgw)"
-            fi
-        fi
-    fi
-    if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "$_sta_lan_ip" ]; then
+    # ⚠️ 這裡是「主 gw」分支(LAN_MODE=static), 固定用 192.168.1.1。
+    #   STA 備援時角色是 client, 不會走到這裡 —— 曾經在此加過「改用 .5」
+    #   的邏輯, 實測 2026-09-27 證實是死碼(client 時 LAN_MODE 非 static),
+    #   已移除。STA 情境的 LAN IP 由下方 else 分支(查 DHCP 靜態對應)處理。
+    if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
         uci set network.lan.proto='static'
-        uci set network.lan.ipaddr="$_sta_lan_ip"
+        uci set network.lan.ipaddr='192.168.1.1'
         uci set network.lan.netmask='255.255.255.0'
-        log "LAN 改為 static $_sta_lan_ip"
+        log "LAN 改為 static 192.168.1.1"
         NEED_RESTART_NET=1
         CHANGED=1
-    fi
-    # DHCP 發出去的閘道/DNS 必須跟著 LAN IP 走, 否則 client 仍指向 .1
-    # (那是上游鄰居的閘道, 封包會送錯地方)。
-    _want_opt3="3,$_sta_lan_ip"
-    _want_opt6="6,$_sta_lan_ip"
-    _cur_opt=$(uci -q get dhcp.lan.dhcp_option 2>/dev/null)
-    if [ "$_sta_lan_ip" = "192.168.1.1" ]; then
-        # 常態: 清掉自訂 option, 讓 dnsmasq 用預設(自己的介面位址)
-        if [ -n "$_cur_opt" ]; then
-            uci -q delete dhcp.lan.dhcp_option
-            log "DHCP option 已清除(回到預設閘道 $_sta_lan_ip)"
-            CHANGED=1
-        fi
-    else
-        if [ "$_cur_opt" != "$_want_opt3 $_want_opt6" ]; then
-            uci -q delete dhcp.lan.dhcp_option
-            uci add_list dhcp.lan.dhcp_option="$_want_opt3"
-            uci add_list dhcp.lan.dhcp_option="$_want_opt6"
-            log "DHCP 閘道/DNS 改指向 $_sta_lan_ip (STA 備援模式)"
-            CHANGED=1
-        fi
     fi
 else
     # 非主 gateway / client: 用 hostname 查 DHCP 靜態對應
@@ -596,6 +546,27 @@ else
             CHANGED=1
         fi
         ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
+
+        # ★ DHCP 發出去的閘道/DNS 必須指向「本機現在的 LAN IP」而非 .1。
+        #   STA 情境下 .1 是上游鄰居的閘道, LAN 裝置照著設就送錯地方。
+        #   實測 2026-09-27: 診斷快照顯示 dhcp_option 仍是 3,192.168.1.1
+        #   而本機 LAN 已是 192.168.1.5 —— client 拿到的閘道是死的。
+        # ⚠️ 這段原本寫在上面的 static 分支裡, 但 STA 時角色是 client、
+        #   LAN_MODE 非 static, 那整段是死碼從不執行(已移除)。
+        _my_lan=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+        if [ -n "$_my_lan" ] && [ "$_my_lan" != "192.168.1.1" ]; then
+            _wo3="3,$_my_lan"; _wo6="6,$_my_lan"
+            _co=$(uci -q get dhcp.lan.dhcp_option 2>/dev/null | tr '\n' ' ' | awk '{$1=$1;print}')
+            if [ "$_co" != "$_wo3 $_wo6" ]; then
+                uci -q delete dhcp.lan.dhcp_option
+                uci add_list dhcp.lan.dhcp_option="$_wo3"
+                uci add_list dhcp.lan.dhcp_option="$_wo6"
+                uci commit dhcp
+                /etc/init.d/dnsmasq reload >/dev/null 2>&1
+                log "STA 備援中: DHCP 閘道/DNS 改指向 $_my_lan"
+                CHANGED=1
+            fi
+        fi
     elif [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
         if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
@@ -608,6 +579,15 @@ else
         # 設定寫進 uci 不等於路由表生效(NEED_RESTART_NET 只在 IP 也變時才會
         # 走熱切換那段)。★ 直接補一條, 冪等。
         ip route replace default via 192.168.1.1 dev br-lan 2>/dev/null
+        # ★ STA 結束後要把自訂的 dhcp_option 清掉, 否則 client 會一直被告知
+        #   閘道是備援期間的那個 IP。沒有這段的話 STA 一用過就永久殘留。
+        if [ -n "$(uci -q get dhcp.lan.dhcp_option 2>/dev/null)" ]; then
+            uci -q delete dhcp.lan.dhcp_option
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+            log "STA 已結束: 清除自訂 dhcp_option(回到預設閘道)"
+            CHANGED=1
+        fi
     else
         # 副gw 有 WAN，不設 gateway（走自己的 WAN）
         if [ -n "$CUR_LAN_GW" ]; then
