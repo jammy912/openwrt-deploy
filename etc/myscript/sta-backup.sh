@@ -189,31 +189,47 @@ sta_rules_apply() {
     #   `default via 192.168.1.1` 在核心眼中會匹配到本地 br-lan 那筆,
     #   封包繞回自己永遠出不去 —— policy routing 也解不了, 因為問題不在
     #   路由表選擇, 而在「同一個 IP 同時是自己和別人」。
-# ★ 解法: 改 Sheet 的 batmanmesh.lan_gw_ip 換掉本機位址(例如 .1 → .11),
-    #   auto-role.sh 讀到新值就會自動調整 LAN IP、DHCP option 3/6 與
-    #   default route —— 不必改網段, LAN 裝置的 IP 也不用重拿。
-    # ⚠️ 刻意「不」自動改: 那會在使用者不知情時動到全家的閘道位址。
-    #   改成偵測 + 推播明確指示, 由人決定何時改。
-    # ⚠️ 推播要去重(1 小時一次): 本腳本每分鐘跑, 不去重就是一天 1440 則。
+    # ★ 解法: 切換本機 LAN IP 到 Sheet 定義的 sta_lan_ip(預設 192.168.1.9)。
+    #   同網段但不同位址 —— LAN 裝置的 IP 不用重拿, 只需更新閘道。
+    #   平常維持 192.168.1.1 不變, 只有 STA 期間才切, 回復時由 sta_off 還原。
+    # ⚠️ 沒設 .sta_lan_ip 就拒絕啟用: 硬上會讓封包繞回自己, 而那個狀態
+    #   從外面完全看不出來(STA 連上、拿到 IP、路由都建了, 就是不通)。
+    # ⚠️ 通知用 queue_push 不可用 push_notify —— 偵測到衝突的時機正是
+    #   「唯一出口還沒建立」, 推播必然送不出去(2026-09-27 使用者指出)。
     _lan_self=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
     if [ -n "$_gw" ] && [ "$_gw" = "$_lan_self" ]; then
-        log "❌ 位址衝突: 上游閘道($_gw) 與本機 LAN IP 相同, 封包會繞回自己"
-        _sugg=$(echo "$_lan_self" | awk -F. '{printf "%s.%s.%s.%d", $1,$2,$3, ($4<200 ? $4+10 : $4-10)}')
-        log "   解法: 把 Sheet 的 lan_gw_ip 從 $_lan_self 改成 $_sugg"
-        # ⚠️ 不可用 push_notify —— 偵測到衝突的時機正是「唯一出口還沒建立」,
-        #   推播必然送不出去。實測 2026-09-27 使用者指出這點。
-        #   改用 queue_push 排隊, 等網路恢復(或下次開機)再補送。
-        _cf="/etc/myscript/.sta_conflict_notified"
-        _now=$(date +%s); _prev=$(cat "$_cf" 2>/dev/null)
-        case "$_prev" in ''|*[!0-9]*) _prev=0 ;; esac
-        if [ $(( _now - _prev )) -ge 3600 ]; then
-            echo "$_now" > "$_cf"
-            command -v queue_push >/dev/null 2>&1 && \
-                queue_push "sta-backup-conflict" "gw-ip-collision" \
-                    "上游閘道 $_gw 與本機 LAN IP 相同, 請把 Sheet 的 lan_gw_ip 從 $_lan_self 改為 $_sugg" \
-                    >/dev/null 2>&1
+        _sta_ip=$(cat /etc/myscript/.sta_lan_ip 2>/dev/null)
+        case "$_sta_ip" in ''|*[!0-9.]*) _sta_ip="" ;; esac
+        if [ -z "$_sta_ip" ] || [ "$_sta_ip" = "$_gw" ]; then
+            log "❌ 位址衝突: 上游閘道($_gw) 與本機 LAN IP 相同, 而 .sta_lan_ip 未設或同值"
+            log "   解法: 在 Sheet 的 sta_lan_ip 填一個同網段但不同的位址(例如 192.168.1.9)"
+            _cf="/etc/myscript/.sta_conflict_notified"
+            _now=$(date +%s); _prev=$(cat "$_cf" 2>/dev/null)
+            case "$_prev" in ''|*[!0-9]*) _prev=0 ;; esac
+            if [ $(( _now - _prev )) -ge 3600 ]; then
+                echo "$_now" > "$_cf"
+                command -v queue_push >/dev/null 2>&1 && \
+                    queue_push "sta-backup-conflict" "sta-lan-ip-unset" \
+                        "上游閘道 $_gw 與本機 LAN IP 相同, 但 Sheet 的 sta_lan_ip 未設定。請填一個同網段不同位址(例如 192.168.1.9)。" \
+                        >/dev/null 2>&1
+            fi
+            return 1
         fi
-        return 1
+        # 切換本機 LAN IP, 避開上游閘道
+        # ⚠️ 記下原值供 sta_off 還原 —— 放 flash, 因為 STA 期間可能重開。
+        [ -f /etc/myscript/.sta_lan_ip_prev ] || echo "$_lan_self" > /etc/myscript/.sta_lan_ip_prev
+        log "位址衝突($_gw): 本機 LAN $_lan_self → $_sta_ip (避開上游閘道)"
+        uci set network.lan.ipaddr="$_sta_ip"
+        uci commit network
+        ip addr del "$_lan_self/24" dev br-lan 2>/dev/null
+        ip addr add "$_sta_ip/24" dev br-lan 2>/dev/null
+        # DHCP 也要改發新閘道, 否則 client 仍指向舊位址(那已是上游鄰居)
+        uci -q delete dhcp.lan.dhcp_option
+        uci add_list dhcp.lan.dhcp_option="3,$_sta_ip"
+        uci add_list dhcp.lan.dhcp_option="6,$_sta_ip"
+        uci commit dhcp
+        /etc/init.d/dnsmasq reload >/dev/null 2>&1
+        _lan_self="$_sta_ip"
     fi
     rm -f /etc/myscript/.sta_conflict_notified 2>/dev/null
 
@@ -479,6 +495,31 @@ sta_on() {
 sta_off_raw() {
     sta_rules_clear
     ifdown wwan 2>/dev/null
+
+    # ★ 還原 STA 期間切換過的 LAN IP。
+    # ⚠️ 必須在這裡做而非交給 auto-role —— auto-role 的主 gw 分支寫死
+    #   192.168.1.1, 但本機當下可能是 client 角色(WAN 還沒回來), 那條
+    #   路徑不會執行, LAN IP 會一直停在 sta_lan_ip。
+    # ⚠️ .sta_lan_ip_prev 放 flash: STA 期間可能重開, 放 /tmp 會失去原值。
+    _prev_ip=$(cat /etc/myscript/.sta_lan_ip_prev 2>/dev/null)
+    case "$_prev_ip" in ''|*[!0-9.]*) _prev_ip="" ;; esac
+    if [ -n "$_prev_ip" ]; then
+        _now_ip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+        if [ "$_now_ip" != "$_prev_ip" ]; then
+            log "還原 LAN IP: $_now_ip → $_prev_ip"
+            uci set network.lan.ipaddr="$_prev_ip"
+            uci commit network
+            ip addr del "$_now_ip/24" dev br-lan 2>/dev/null
+            ip addr add "$_prev_ip/24" dev br-lan 2>/dev/null
+        fi
+        # DHCP option 一併清掉, 回到 dnsmasq 預設(發自己的介面位址)
+        if [ -n "$(uci -q get dhcp.lan.dhcp_option 2>/dev/null)" ]; then
+            uci -q delete dhcp.lan.dhcp_option
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+        fi
+        rm -f /etc/myscript/.sta_lan_ip_prev
+    fi
     if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
        && [ -z "$(uci -q get network.wwan 2>/dev/null)" ]; then
         echo idle > "$STATE_F"

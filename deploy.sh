@@ -257,13 +257,13 @@ fi
 [ ! -f /etc/myscript/.mesh_wireless ] && echo -n "Y" > /etc/myscript/.mesh_wireless
 [ ! -f /etc/myscript/.mesh_wired ]    && echo -n "Y" > /etc/myscript/.mesh_wired
 
-# 主 gw 的 LAN IP (首次部署寫預設，之後由 Google Sheet 的 lan_gw_ip 欄位覆蓋)
-# ★ auto-role.sh 用它取代原本散在各處的硬編碼 192.168.1.1 —— 要改網段時
-#   只需改 Sheet 一個欄位, 全機隊跟著換, 不必逐檔改 code 重新部署。
-# ⚠️ 必須有預設值: auto-role 每分鐘跑, 若此檔不存在又讀不到就會拿空字串
-#   去設 network.lan.ipaddr / 做 ARP DAD, 整台網路會壞掉。
-#   auto-role 內部也有 :-192.168.1.1 的退路, 這裡是第二道保險。
-[ ! -f /etc/myscript/.lan_gw_ip ] && echo -n "192.168.1.1" > /etc/myscript/.lan_gw_ip
+# STA 備援時要改用的 LAN IP (首次部署寫預設，之後由 Sheet 的 sta_lan_ip 覆蓋)
+# ★ 平常主 gw 維持 192.168.1.1 不變; 只有 STA 備援生效時才切到這個值 ——
+#   用來避開上游 AP 的閘道位址(飯店/鄰居常見就是 192.168.1.1, 撞到會讓
+#   封包繞回自己而完全出不去)。
+# ⚠️ 預設給 192.168.1.9: 與 .1 同網段但不衝突, LAN 裝置的 IP 不用重拿,
+#   只需更新閘道。不設此檔時 sta-backup.sh 會拒絕啟用並排隊通知。
+[ ! -f /etc/myscript/.sta_lan_ip ] && echo -n "192.168.1.9" > /etc/myscript/.sta_lan_ip
 
 # =====================
 # 1. 安裝必要套件

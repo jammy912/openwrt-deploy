@@ -149,7 +149,11 @@ if [ "$SATELLITE_MODE" = "0" ]; then
     fi
     if [ "$_active_role" = "client" ]; then
         SATELLITE_MODE=1
-        log "📡 自動偵測: client 角色，啟用衛星模式"
+        # ⚠️ 此處不可呼叫 log() —— 它定義在下方(~line 159), 這裡還不存在,
+        #   會直接 `log: not found` 讓整支腳本中斷(實測 2026-09-27 於 MX4200
+        #   轉成 client 角色時踩到; 平常角色不是 client 走不到這行故未暴露)。
+        #   先暫存訊息, 等 log() 定義後再輸出。
+        _pending_log="📡 自動偵測: client 角色，啟用衛星模式"
     fi
 fi
 
@@ -159,6 +163,9 @@ fi
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
+
+# 補送 log() 定義前暫存的訊息(見上方衛星模式偵測)
+[ -n "$_pending_log" ] && { log "$_pending_log"; _pending_log=""; }
 
 # =====================================================
 # 重建 /etc/firewall.user：掃描所有 wg* peer allowed_ips
@@ -725,9 +732,10 @@ main() {
                     if ($i ~ /option sta_backup_key/)    { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key[[:space:]]+/, "", v);    gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk=v }
                     if ($i ~ /option sta_backup_band/)   { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbb=a[n] }
                     if ($i ~ /option sta_backup_enable/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbe=a[n] }
-                    # ★ 主 gw 的 LAN IP(全機隊同值)。取代散在 auto-role.sh 的
-                    #   31 處硬編碼 192.168.1.1 —— 改網段時只要改 Sheet 一個值。
-                    if ($i ~ /option lan_gw_ip/)        { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); lgw=a[n] }
+                    # ★ STA 備援生效時, 主 gw 要改用的 LAN IP(全機隊同值)。
+                    #   平常維持 192.168.1.1 不變, 只有 STA 時才切到這個值 —— 用來避開
+                    #   上游 AP 的閘道位址(飯店/鄰居常見 192.168.1.1)。
+                    if ($i ~ /option sta_lan_ip/)        { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); lgw=a[n] }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -737,7 +745,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"' NEW_LAN_GW_IP='"'"'" lgw "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"' NEW_STA_LAN_IP='"'"'" lgw "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -882,14 +890,14 @@ main() {
         #   驗證失敗就「保留舊值」並記 log, 絕不寫入。
         # ⚠️ 空值視為「未設定」而非「清除」—— 與 ft_* 那組不同。那組空值有意義
         #   (代表預設行為), 但 LAN IP 沒有「空」這個合法狀態。
-        if [ -n "$NEW_LAN_GW_IP" ]; then
+        if [ -n "$NEW_STA_LAN_IP" ]; then
             _gwip_ok=0
-            case "$NEW_LAN_GW_IP" in
+            case "$NEW_STA_LAN_IP" in
                 *[!0-9.]*) ;;                       # 含非數字/點 → 不合法
                 *.*.*.*.*) ;;                       # 五段以上 → 不合法
                 *.*.*.*)
                     # 四段且每段 0-255
-                    _o1="${NEW_LAN_GW_IP%%.*}"; _r="${NEW_LAN_GW_IP#*.}"
+                    _o1="${NEW_STA_LAN_IP%%.*}"; _r="${NEW_STA_LAN_IP#*.}"
                     _o2="${_r%%.*}";            _r="${_r#*.}"
                     _o3="${_r%%.*}";            _o4="${_r##*.}"
                     _gwip_ok=1
@@ -901,13 +909,13 @@ main() {
                     ;;
             esac
             if [ "$_gwip_ok" = "1" ]; then
-                _cur_gwip=$(cat /etc/myscript/.lan_gw_ip 2>/dev/null)
-                if [ "$NEW_LAN_GW_IP" != "$_cur_gwip" ]; then
-                    echo "$NEW_LAN_GW_IP" > /etc/myscript/.lan_gw_ip
-                    log "🔧 lan_gw_ip: [$_cur_gwip] → [$NEW_LAN_GW_IP] (hostname=$MY_HOSTNAME)"
+                _cur_gwip=$(cat /etc/myscript/.sta_lan_ip 2>/dev/null)
+                if [ "$NEW_STA_LAN_IP" != "$_cur_gwip" ]; then
+                    echo "$NEW_STA_LAN_IP" > /etc/myscript/.sta_lan_ip
+                    log "🔧 sta_lan_ip: [$_cur_gwip] → [$NEW_STA_LAN_IP] (hostname=$MY_HOSTNAME)"
                 fi
             else
-                log "⚠️ lan_gw_ip 格式不合法, 保留舊值不寫入: [$NEW_LAN_GW_IP]"
+                log "⚠️ sta_lan_ip 格式不合法, 保留舊值不寫入: [$NEW_STA_LAN_IP]"
             fi
         fi
 

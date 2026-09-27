@@ -23,24 +23,6 @@ log() { logger -t "$LOG_TAG" "$1"; echo "[$LOG_TAG] $1"; }
 
 # 併發鎖 (防止 cron 重疊執行)
 LOCKFILE="/tmp/auto-role.lock"
-
-# =====================
-# 主 gw 的 LAN IP —— 由 Google Sheet 的 batmanmesh.lan_gw_ip 下發
-# =====================
-# ★ 取代原本散在本檔 31 處的硬編碼 192.168.1.1。要改網段時只需改 Sheet
-#   一個欄位, 全機隊跟著換, 不必逐檔改 code 再重新部署。
-#   用途涵蓋: ARP DAD 探測、主 gw 的 network.lan.ipaddr、client 的
-#   gateway/DNS、default route、DHCP option 3/6、VPN 回程路由。
-# ⚠️ 一定要有退路值。本腳本每分鐘跑, 若讀到空字串就會拿空值去設
-#   network.lan.ipaddr 或做 arping —— 整台網路會壞掉而且每分鐘重複一次。
-#   deploy.sh 也會在首次部署時寫入預設, 這裡是第二道保險。
-# ⚠️ 副 gw / client 取「自己的」IP 仍沿用原邏輯(查 DHCP static host),
-#   不受這個變數影響 —— 它只定義「主 gw 該用哪個位址」。
-GW_IP=$(cat /etc/myscript/.lan_gw_ip 2>/dev/null)
-case "$GW_IP" in
-    ''|*[!0-9.]*) GW_IP="192.168.1.1" ;;
-esac
-[ -z "$GW_IP" ] && GW_IP="192.168.1.1"
 if [ -f "$LOCKFILE" ]; then
     LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null)
     if kill -0 "$LOCK_PID" 2>/dev/null; then
@@ -327,24 +309,24 @@ if [ "$NEW_ROLE" = "gateway" ] && [ "$IS_PRIMARY" = "1" ] && command -v arping >
     CUR_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
     MY_BRLAN_MAC=$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-Z' 'a-z')
 
-    if [ "$CUR_IP" != $GW_IP ]; then
+    if [ "$CUR_IP" != "192.168.1.1" ]; then
         # --- 情境A: 自己還不是 .1,要搶 → 先依 priority 退避再探測 ---
         # 退避 = (100-pri)*0.3 秒: pri=99→0.3s, pri=66→10s, pri=33→20s。
         # 高 pri 幾乎不等先佔;低 pri 等完再探測,就會看到高 pri 已佔 → 讓位。
         _BACKOFF=$(awk "BEGIN{printf \"%.1f\", (100 - $MY_PRI) * 0.3}")
         [ "$(awk "BEGIN{print ($_BACKOFF > 0)}")" = "1" ] && sleep "$_BACKOFF"
-        ARP_OUT=$(arping -c 2 -w 2 -D -I br-lan "$GW_IP" 2>&1)
+        ARP_OUT=$(arping -c 2 -w 2 -D -I br-lan 192.168.1.1 2>&1)
         REMOTE_MAC=$(echo "$ARP_OUT" | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | tr 'A-Z' 'a-z' | grep -v "^${MY_BRLAN_MAC}$" | head -1)
         if [ -n "$REMOTE_MAC" ]; then
             IS_PRIMARY=0
-            log "ARP DAD: $GW_IP 已被 $REMOTE_MAC 佔用 (退避 ${_BACKOFF}s 後探測,我 pri=$MY_PRI),讓位為副 gw"
+            log "ARP DAD: 192.168.1.1 已被 $REMOTE_MAC 佔用 (退避 ${_BACKOFF}s 後探測,我 pri=$MY_PRI),讓位為副 gw"
         fi
     else
         # --- 情境B: 自己已是 .1 → 持續偵測有沒有第二台也佔 .1 ---
         # 一般 arping (非 -D) 從 .1 問 .1,收所有 reply 的 MAC。只有自己=正常;
         # 出現別的 MAC = 衝突。此時比 priority: 讀對方 priority(alfred/gwl)決定讓不讓。
         # 保守:偵測到衝突就讓位(priority 低者退),避免持續雙主。由高 pri 那台留守。
-        ARP_OUT=$(arping -c 3 -w 3 -I br-lan "$GW_IP" 2>&1)
+        ARP_OUT=$(arping -c 3 -w 3 -I br-lan 192.168.1.1 2>&1)
         OTHER_MAC=$(echo "$ARP_OUT" | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | tr 'A-Z' 'a-z' | grep -v "^${MY_BRLAN_MAC}$" | sort -u | head -1)
         if [ -n "$OTHER_MAC" ]; then
             # 有第二台佔 .1 → 衝突。決定誰讓位,★確定性只一台讓(不能兩台都讓=沒人當主)。
@@ -475,11 +457,11 @@ dbg "4.gw_mode=$WANT_GW DHCP=$DHCP_ACTION LAN=$LAN_MODE IP=$CUR_LAN_IP proto=$CU
 # LAN IP 模式
 NEED_RESTART_NET=0
 if [ "$LAN_MODE" = "static" ]; then
-    if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != $GW_IP ]; then
+    if [ "$CUR_LAN_PROTO" != "static" ] || [ "$CUR_LAN_IP" != "192.168.1.1" ]; then
         uci set network.lan.proto='static'
-        uci set network.lan.ipaddr="$GW_IP"
+        uci set network.lan.ipaddr='192.168.1.1'
         uci set network.lan.netmask='255.255.255.0'
-        log "LAN 改為 static $GW_IP"
+        log "LAN 改為 static 192.168.1.1"
         NEED_RESTART_NET=1
         CHANGED=1
     fi
@@ -498,7 +480,7 @@ else
         MAC_LAST=$(echo "$MY_BR_MAC" | awk -F: '{print $NF}')
         SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
     fi
-    if [ "$CUR_LAN_IP" = $GW_IP ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
+    if [ "$CUR_LAN_IP" = "192.168.1.1" ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr="$SELF_IP"
         uci set network.lan.netmask='255.255.255.0'
@@ -517,16 +499,16 @@ else
     CUR_LAN_GW=$(uci get network.lan.gateway 2>/dev/null)
     if [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
-        if [ "$CUR_LAN_GW" != $GW_IP ]; then
-            uci set network.lan.gateway="$GW_IP"
-            uci set network.lan.dns="$GW_IP"
-            log "client 角色: gateway/DNS 指向 $GW_IP"
+        if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
+            uci set network.lan.gateway='192.168.1.1'
+            uci set network.lan.dns='192.168.1.1'
+            log "client 角色: gateway/DNS 指向 192.168.1.1"
             NEED_RESTART_NET=1
             CHANGED=1
         fi
         # 設定寫進 uci 不等於路由表生效(NEED_RESTART_NET 只在 IP 也變時才會
         # 走熱切換那段)。★ 直接補一條, 冪等。
-        ip route replace default via "$GW_IP" dev br-lan 2>/dev/null
+        ip route replace default via 192.168.1.1 dev br-lan 2>/dev/null
     else
         # 副gw 有 WAN，不設 gateway（走自己的 WAN）
         if [ -n "$CUR_LAN_GW" ]; then
@@ -545,7 +527,7 @@ if [ "$NEED_FULL_RESTART_NET" = "1" ]; then
     /etc/init.d/network restart
     NEED_RESTART_NET=0
     for i in 1 2 3 4 5; do
-        ping -c1 -W2 "$GW_IP" >/dev/null 2>&1 && break
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
         sleep 2
     done
 fi
@@ -563,24 +545,24 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
             ip route replace default via "$NEW_GW" dev br-lan 2>/dev/null
         else
             # 主gw: 移除 br-lan default route，恢復 WAN route
-            ip route del default via "$GW_IP" dev br-lan 2>/dev/null
+            ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
             WAN_GW=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
             WAN_DEV=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
             [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ] && ip route replace default via "$WAN_GW" dev "$WAN_DEV" 2>/dev/null
             # 清除副gw 角色期間 wireguard.sh 把 endpoint host route 釘成 via br-lan 的殘留
-            # Why: 副gw default 走 $GW_IP dev br-lan，wg ifup 時 resolve endpoint
+            # Why: 副gw default 走 192.168.1.1 dev br-lan，wg ifup 時 resolve endpoint
             # 會釘 host route 跟著 default 方向；切回主gw 後 default 改走 wan，
             # 但 host route 仍指 br-lan 形成自迴圈，wg handshake 永遠失敗、reboot 才修。
-            ip route show | awk -v g="$GW_IP" '$0 ~ ("via " g " dev br-lan") && $1 != "default" {print $1}' \
+            ip route show | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
                 | while read _stale; do
-                    ip route del "$_stale" via "$GW_IP" dev br-lan 2>/dev/null \
+                    ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
                         && log "清除殘留 endpoint host route: $_stale"
                 done
         fi
         log "LAN IP 熱切換: $OLD_IP → ${NEW_IP}/${NEW_MASK:-255.255.255.0}"
         # ⚠️ 熱切換只換了介面上的 IP, 「已經綁在舊 IP 上的服務」不會自己跟上。
         #    實測 2026-09-09 (.4 從主gw 切回副gw): smbd 仍 LISTEN 在
-        #    $GW_IP:445, 而那位址已經不在本機 -> SMB 完全連不上,
+        #    192.168.1.1:445, 而那位址已經不在本機 -> SMB 完全連不上,
         #    且沒有任何錯誤訊息, 服務看起來還「在跑」。
         #    ★ samba 在啟動時解析 interface='lan' 的 IP 並綁定, IP 變更後
         #      必須重啟才會重綁。
@@ -598,7 +580,7 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     fi
     NEED_RESTART_NET=0
     for i in 1 2 3 4 5; do
-        ping -c1 -W2 "$GW_IP" >/dev/null 2>&1 && break
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
         sleep 2
     done
 fi
@@ -663,13 +645,13 @@ if [ "$DHCP_ACTION" = "server" ]; then
     # client: DHCP 發出的 gateway/DNS 指向主 GW
     if [ "$NEW_ROLE" = "client" ]; then
         CUR_GW_OPT=$(uci get dhcp.lan.dhcp_option 2>/dev/null)
-        if ! echo "$CUR_GW_OPT" | grep -q "3,$GW_IP"; then
+        if ! echo "$CUR_GW_OPT" | grep -q '3,192.168.1.1'; then
             uci delete dhcp.lan.dhcp_option 2>/dev/null
-            uci add_list dhcp.lan.dhcp_option="3,$GW_IP"
-            uci add_list dhcp.lan.dhcp_option="6,$GW_IP"
+            uci add_list dhcp.lan.dhcp_option='3,192.168.1.1'
+            uci add_list dhcp.lan.dhcp_option='6,192.168.1.1'
             uci commit dhcp
             /etc/init.d/dnsmasq restart
-            log "DHCP: gateway/DNS 指向 "$GW_IP" (client)"
+            log "DHCP: gateway/DNS 指向 192.168.1.1 (client)"
             CHANGED=1
         fi
     elif [ "$IS_PRIMARY" = "1" ]; then
@@ -771,8 +753,8 @@ if [ "$LAN_MODE" != "static" ]; then
     # 從自己的 WG 設定取得所有 VPN 子網，路由到 .1
     for addr in $(uci show network | grep 'wg.*\.addresses=' | cut -d"'" -f2); do
         subnet=$(echo "$addr" | cut -d/ -f1 | sed 's/\.[0-9]*$/.0/')
-        ip route add "$subnet/24" via "$GW_IP" 2>/dev/null && \
-            log "VPN 路由: $subnet/24 via "$GW_IP""
+        ip route add "$subnet/24" via 192.168.1.1 2>/dev/null && \
+            log "VPN 路由: $subnet/24 via 192.168.1.1"
     done
 fi
 
@@ -872,7 +854,7 @@ if [ -n "$WANT_WIRED" ] && [ -n "$WIRE_DEV" ]; then
             log "batmesh_wire 未被 netifd 載入，強制 network restart"
             /etc/init.d/network restart
             for i in 1 2 3 4 5; do
-                ping -c1 -W2 "$GW_IP" >/dev/null 2>&1 && break
+                ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
                 sleep 2
             done
         fi
@@ -1074,7 +1056,7 @@ if [ "$NEED_RESTART_NET" = "1" ]; then
     log "重啟網路 (mesh 介面變更)..."
     /etc/init.d/network restart
     for i in 1 2 3 4 5; do
-        ping -c1 -W2 "$GW_IP" >/dev/null 2>&1 && break
+        ping -c1 -W2 192.168.1.1 >/dev/null 2>&1 && break
         sleep 2
     done
     # network restart 後主 GW 需重啟 WG/PBR (否則 VPN 斷線)
@@ -1339,7 +1321,7 @@ if [ "$GW_TYPE" = "主gw" ]; then
         add_fixup "default route 原走 ${CUR_DEF_DEV:-無} 已改 via $WAN_GW dev $WAN_DEV"
     fi
     # 主 gw: 清除副gw 期間 wg ifup 把 endpoint host route 釘到 br-lan 的殘留
-    # Why: 副gw default 走 $GW_IP dev br-lan,wg ifup resolve endpoint 時
+    # Why: 副gw default 走 192.168.1.1 dev br-lan,wg ifup resolve endpoint 時
     # 會跟著 default 釘 host route。即使 default 後來修回 wan,host route 仍指
     # br-lan 自迴圈 → 連外 wg handshake 永久失敗、network restart 無效、要 reboot 才修。
     # 這裡每輪主gw 都掃一次 (不依賴角色切換),確保 wg ifup 之後也能清。
@@ -1347,9 +1329,9 @@ if [ "$GW_TYPE" = "主gw" ]; then
     #    (原本寫 FIXUP=1 其實一直是無效的)。★ 故把清掉的路由寫進暫存檔再讀回。
     _stale_f="/tmp/.auto-role.stale.$$"
     : > "$_stale_f"
-    ip route show 2>/dev/null | awk -v g="$GW_IP" '$0 ~ ("via " g " dev br-lan") && $1 != "default" {print $1}' \
+    ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
         | while read _stale; do
-            ip route del "$_stale" via "$GW_IP" dev br-lan 2>/dev/null \
+            ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
                 && { log "fixup: 清除殘留 endpoint host route: $_stale"; echo "$_stale" >> "$_stale_f"; }
         done
     if [ -s "$_stale_f" ]; then
