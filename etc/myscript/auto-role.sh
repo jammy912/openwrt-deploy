@@ -511,7 +511,31 @@ else
     #    沒有 default route -> ping 8.8.8.8 回 "Network unreachable"。
     #    角色會變而 IP 不會變是常態(拔掉 WAN 就是這種), 故兩者必須解耦。
     CUR_LAN_GW=$(uci get network.lan.gateway 2>/dev/null)
-    if [ "$NEW_ROLE" = "client" ]; then
+    # ★ 第三處 STA 保護: gateway/DNS 與 default route。
+    #   實測 2026-09-27 21:17-21:23 於 MX4200 —— LAN IP 與 dhcp_option 兩處
+    #   保護都生效了(lan=.9 t99=3 穩定 6 分鐘), 但這段仍把
+    #     ip route replace default via 192.168.1.1 dev br-lan
+    #   補回主表, 而它 metric 0 比 sta-backup 補的 metric 300 優先 ——
+    #   核心選 br-lan 那筆, 封包送去「上游鄰居的閘道」而非 STA 介面。
+    #   證據: ip route get 1.1.1.1 → via 192.168.1.1 dev br-lan (死路),
+    #         但 ping -I phy1-sta0 1.1.1.1 → 通(走 ip rule 990 進 table 99)。
+    _sta_live3=0
+    if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
+        [ -n "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _sta_live3=1
+    fi
+    if [ "$NEW_ROLE" = "client" ] && [ "$_sta_live3" = "1" ]; then
+        # STA 供網中: 出口由 sta-backup.sh 的 table 99 + 主表 metric 300 負責。
+        # 這裡不但不能補 br-lan 那條, 還要主動清掉(可能是本輪之前留下的)。
+        if [ -n "$CUR_LAN_GW" ]; then
+            uci delete network.lan.gateway 2>/dev/null
+            uci delete network.lan.dns 2>/dev/null
+            uci commit network
+            log "STA 供網中: 清除 LAN gateway/DNS(指向上游鄰居是死路)"
+            CHANGED=1
+        fi
+        ip route del default via 192.168.1.1 dev br-lan 2>/dev/null \
+            && log "STA 供網中: 移除 default via 192.168.1.1 dev br-lan(會蓋過 STA 出口)"
+    elif [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
         if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
             uci set network.lan.gateway='192.168.1.1'
