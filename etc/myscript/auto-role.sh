@@ -551,13 +551,31 @@ else
         _sta_dev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
         _sta_gw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
         if [ -n "$_sta_dev" ] && [ -n "$_sta_gw" ]; then
-            # (1) 清掉指向 br-lan 的 endpoint host route, 讓 wg 下次 resolve 時
-            #     跟著正確的 default(已是 STA)重釘。
+            # (1) 清掉「釘錯方向」的 endpoint host route, 讓 wg 下次 resolve 時
+            #     跟著正確的 default(已是 STA)重釘。兩種形態都要清:
+            #       - via 192.168.1.1 dev br-lan (副gw 期間釘的)
+            #       - dev wg2 之類 (0.0.0.0/0 的 wg 先起來時釘的, 見 ~line 1435
+            #         的 2026-09-27 真兇紀錄)
             ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
                 | while read -r _stale; do
                     ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
                         && log "STA: 清除指向 br-lan 的 endpoint host route $_stale"
                 done
+            for _ep in $(uci -q show network 2>/dev/null \
+                         | sed -n 's/^network\.@wireguard_[^[]*\[[0-9]*\]\.endpoint_host=.\(.*\).$/\1/p' \
+                         | sort -u); do
+                case "$_ep" in
+                    *[!0-9.]*) _epip=$(nslookup "$_ep" 2>/dev/null \
+                                       | awk '/^Address/ && $NF ~ /^[0-9.]+$/ {print $NF}' | tail -1) ;;
+                    *) _epip="$_ep" ;;
+                esac
+                [ -n "$_epip" ] || continue
+                _epdev=$(ip route show "$_epip" 2>/dev/null | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')
+                case "$_epdev" in
+                    wg*) ip route del "$_epip" dev "$_epdev" 2>/dev/null \
+                             && log "STA: 清除釘往 wg 的 endpoint host route $_epip dev $_epdev" ;;
+                esac
+            done
             # (2) 補 pbr_wan 的 default, 讓被 rule 導進去的 wg 封包有路可走。
             #     ⚠️ 用 replace 而非 add —— WAN 恢復時 PBR 會自己覆寫回去。
             if [ "$(ip route show table pbr_wan 2>/dev/null | grep -c '^default')" -eq 0 ]; then
@@ -1428,11 +1446,43 @@ if [ "$GW_TYPE" = "主gw" ]; then
     #    (原本寫 FIXUP=1 其實一直是無效的)。★ 故把清掉的路由寫進暫存檔再讀回。
     _stale_f="/tmp/.auto-role.stale.$$"
     : > "$_stale_f"
+    # (a) 原形態: 副gw 期間釘成 via 192.168.1.1 dev br-lan
     ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
         | while read _stale; do
             ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
                 && { log "fixup: 清除殘留 endpoint host route: $_stale"; echo "$_stale" >> "$_stale_f"; }
         done
+    # (b) ⚠️ 真兇紀錄 2026-09-27 (MX4200): endpoint host route 被釘成 dev wg2。
+    #     wg2 的 peer 是 allowed_ips=0.0.0.0/0 + route_allowed_ips=1, 開機時序上
+    #     它先起來, wireguard.sh resolve 其他 wg 的 endpoint 時就跟著當下的
+    #     default(已被 wg2 的 0.0.0.0/0 佔住)釘成 dev wg2 —— 握手封包被丟進
+    #     wg2 隧道, wg0/wg3/wg_900 全部 handshake=0, 連 Headscale(161.33.19.207)
+    #     都 no route to host 害 tailscale 登出。
+    #     ★ metric 對這種殘留無效: /32 比 default 具體, 核心先比 prefix 長度才比
+    #       metric。2026-09-07 的結論「wg2/wg3/wg4 有 metric 所以安全」只對
+    #       default 成立, 不涵蓋 /32。
+    #     ★ 判定式: endpoint 必須經實體出口(wan/sta/br-lan)才到得了, host route
+    #       指向任何 wg 介面必然是迴圈 —— 不比對特定形態, 直接用這個不變條件。
+    for _ep in $(uci -q show network 2>/dev/null \
+                 | sed -n 's/^network\.@wireguard_[^[]*\[[0-9]*\]\.endpoint_host=.\(.*\).$/\1/p' \
+                 | sort -u); do
+        # endpoint 可能是網域名(如 wg3 的 duckdns), 要先解析成 IP
+        case "$_ep" in
+            *[!0-9.]*) _epip=$(nslookup "$_ep" 2>/dev/null \
+                               | awk '/^Address/ && $NF ~ /^[0-9.]+$/ {print $NF}' | tail -1) ;;
+            *) _epip="$_ep" ;;
+        esac
+        [ -n "$_epip" ] || continue
+        # 只看主表裡「這個 IP 的 host route 落在 wg 介面」的情況
+        _epdev=$(ip route show "$_epip" 2>/dev/null | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')
+        case "$_epdev" in
+            wg*)
+                ip route del "$_epip" dev "$_epdev" 2>/dev/null \
+                    && { log "fixup: 清除釘往 wg 的 endpoint host route: $_epip dev $_epdev"
+                         echo "$_epip($_epdev)" >> "$_stale_f"; }
+                ;;
+        esac
+    done
     if [ -s "$_stale_f" ]; then
         _stale_n=$(wc -l < "$_stale_f" | tr -d ' ')
         _stale_list=$(head -3 "$_stale_f" | tr '\n' ' ' | sed 's/ $//')
