@@ -257,6 +257,14 @@ fi
 [ ! -f /etc/myscript/.mesh_wireless ] && echo -n "Y" > /etc/myscript/.mesh_wireless
 [ ! -f /etc/myscript/.mesh_wired ]    && echo -n "Y" > /etc/myscript/.mesh_wired
 
+# 主 gw 的 LAN IP (首次部署寫預設，之後由 Google Sheet 的 lan_gw_ip 欄位覆蓋)
+# ★ auto-role.sh 用它取代原本散在各處的硬編碼 192.168.1.1 —— 要改網段時
+#   只需改 Sheet 一個欄位, 全機隊跟著換, 不必逐檔改 code 重新部署。
+# ⚠️ 必須有預設值: auto-role 每分鐘跑, 若此檔不存在又讀不到就會拿空字串
+#   去設 network.lan.ipaddr / 做 ARP DAD, 整台網路會壞掉。
+#   auto-role 內部也有 :-192.168.1.1 的退路, 這裡是第二道保險。
+[ ! -f /etc/myscript/.lan_gw_ip ] && echo -n "192.168.1.1" > /etc/myscript/.lan_gw_ip
+
 # =====================
 # 1. 安裝必要套件
 # =====================

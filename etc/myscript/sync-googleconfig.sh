@@ -694,7 +694,7 @@ main() {
             /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
                 c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""; ftt=""; ftm=""
-                sbs=""; sbk=""; sbb=""; sbe=""
+                sbs=""; sbk=""; sbb=""; sbe=""; lgw=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -725,6 +725,9 @@ main() {
                     if ($i ~ /option sta_backup_key/)    { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key[[:space:]]+/, "", v);    gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk=v }
                     if ($i ~ /option sta_backup_band/)   { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbb=a[n] }
                     if ($i ~ /option sta_backup_enable/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbe=a[n] }
+                    # ★ 主 gw 的 LAN IP(全機隊同值)。取代散在 auto-role.sh 的
+                    #   31 處硬編碼 192.168.1.1 —— 改網段時只要改 Sheet 一個值。
+                    if ($i ~ /option lan_gw_ip/)        { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); lgw=a[n] }
                     # upstream_dns* 可能含多個 IP (空白/逗號/分號分隔),全部保留
                     # 取第 3 欄以後整段 (去掉 option <name> 前綴與前後引號)
                     if ($i ~ /option upstream_dns1/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+upstream_dns1[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); d1=v }
@@ -734,7 +737,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"' NEW_LAN_GW_IP='"'"'" lgw "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -870,6 +873,43 @@ main() {
                 fi
             fi
         done
+
+        # 更新主 gw LAN IP 定義 (.lan_gw_ip)
+        # ★ 全機隊同值。取代原本散在 auto-role.sh 的 31 處硬編碼 192.168.1.1 ——
+        #   要改網段時只需改 Sheet 一個欄位, 不必逐檔改 code 再重新部署。
+        # ⚠️ 必須驗證格式: 這個值會被寫進 network.lan.ipaddr 並用於 ARP DAD 探測,
+        #   填錯(空白、打錯字、含空格)會讓全機隊的主 gw 位址錯亂, 比不改更糟。
+        #   驗證失敗就「保留舊值」並記 log, 絕不寫入。
+        # ⚠️ 空值視為「未設定」而非「清除」—— 與 ft_* 那組不同。那組空值有意義
+        #   (代表預設行為), 但 LAN IP 沒有「空」這個合法狀態。
+        if [ -n "$NEW_LAN_GW_IP" ]; then
+            _gwip_ok=0
+            case "$NEW_LAN_GW_IP" in
+                *[!0-9.]*) ;;                       # 含非數字/點 → 不合法
+                *.*.*.*.*) ;;                       # 五段以上 → 不合法
+                *.*.*.*)
+                    # 四段且每段 0-255
+                    _o1="${NEW_LAN_GW_IP%%.*}"; _r="${NEW_LAN_GW_IP#*.}"
+                    _o2="${_r%%.*}";            _r="${_r#*.}"
+                    _o3="${_r%%.*}";            _o4="${_r##*.}"
+                    _gwip_ok=1
+                    for _o in "$_o1" "$_o2" "$_o3" "$_o4"; do
+                        case "$_o" in ''|*[!0-9]*) _gwip_ok=0 ;; *) [ "$_o" -gt 255 ] && _gwip_ok=0 ;; esac
+                    done
+                    # 最後一碼不可為 0 或 255(網路位址/廣播位址)
+                    { [ "$_o4" = "0" ] || [ "$_o4" = "255" ]; } && _gwip_ok=0
+                    ;;
+            esac
+            if [ "$_gwip_ok" = "1" ]; then
+                _cur_gwip=$(cat /etc/myscript/.lan_gw_ip 2>/dev/null)
+                if [ "$NEW_LAN_GW_IP" != "$_cur_gwip" ]; then
+                    echo "$NEW_LAN_GW_IP" > /etc/myscript/.lan_gw_ip
+                    log "🔧 lan_gw_ip: [$_cur_gwip] → [$NEW_LAN_GW_IP] (hostname=$MY_HOSTNAME)"
+                fi
+            else
+                log "⚠️ lan_gw_ip 格式不合法, 保留舊值不寫入: [$NEW_LAN_GW_IP]"
+            fi
+        fi
 
         # 旗標有變 -> 重啟 check-roam 常駐(它自己會依 ft_tracking_time=0 決定要不要跑)
         if [ "$FT_CHANGED" = "1" ]; then
