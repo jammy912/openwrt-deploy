@@ -480,7 +480,21 @@ else
         MAC_LAST=$(echo "$MY_BR_MAC" | awk -F: '{print $NF}')
         SELF_IP="192.168.1.$((0x${MAC_LAST:-c8} % 53 + 200))"
     fi
-    if [ "$CUR_LAN_IP" = "192.168.1.1" ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
+    # ★ STA 備援供網中時, LAN IP 由 sta-backup.sh 掌管, 本段必須讓開。
+    #   實測 2026-09-27 於 MX4200:
+    #     20:09:17 sta-backup 正確切到 .9, DHCP option 也發 .9, STA 供網成功
+    #     20:10:24 auto-role 下一輪把 LAN 改成 .5(查 DHCP static host)、
+    #              DHCP option 改回 .1 → table 99 的本地路由 src 對不上,
+    #              從 3 筆掉到 2 筆 → ping 不通, 整個備援被自己人破壞。
+    # ⚠️ 判斷要看「wwan 真的有位址」而非只看 sta_backup 存在 —— 介面建了
+    #   但沒連上時不該讓開, 那時本機仍需要正常的 client IP。
+    _sta_live=0
+    if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
+        [ -n "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _sta_live=1
+    fi
+    if [ "$_sta_live" = "1" ]; then
+        log "STA 備援供網中: LAN IP 交由 sta-backup.sh 管理, 本輪不變更 (現為 $CUR_LAN_IP)"
+    elif [ "$CUR_LAN_IP" = "192.168.1.1" ] || [ "$CUR_LAN_IP" != "$SELF_IP" ]; then
         uci set network.lan.proto='static'
         uci set network.lan.ipaddr="$SELF_IP"
         uci set network.lan.netmask='255.255.255.0'
@@ -644,8 +658,17 @@ if [ "$DHCP_ACTION" = "server" ]; then
     fi
     # client: DHCP 發出的 gateway/DNS 指向主 GW
     if [ "$NEW_ROLE" = "client" ]; then
+        # ★ 同上: STA 備援供網中時 dhcp_option 由 sta-backup.sh 掌管。
+        #   硬改回 192.168.1.1 會讓 LAN 裝置指向「上游鄰居的閘道」——
+        #   那不在本機 br-lan 上, 封包送出去就沒了(2026-09-27 實測)。
+        _sta_live2=0
+        if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
+            [ -n "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _sta_live2=1
+        fi
         CUR_GW_OPT=$(uci get dhcp.lan.dhcp_option 2>/dev/null)
-        if ! echo "$CUR_GW_OPT" | grep -q '3,192.168.1.1'; then
+        if [ "$_sta_live2" = "1" ]; then
+            :   # STA 供網中, 不動 dhcp_option
+        elif ! echo "$CUR_GW_OPT" | grep -q '3,192.168.1.1'; then
             uci delete dhcp.lan.dhcp_option 2>/dev/null
             uci add_list dhcp.lan.dhcp_option='3,192.168.1.1'
             uci add_list dhcp.lan.dhcp_option='6,192.168.1.1'
