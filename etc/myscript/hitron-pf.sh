@@ -27,7 +27,7 @@ LOG=/tmp/hitron-pf.log
 
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 cleanup() {
-    [ -f "$CK" ] && curl -s -b "$CK" -X POST "$HITRON/goform/logout" -d "data=byebye" -o /dev/null 2>/dev/null
+    [ -f "$CK" ] && curl -s --connect-timeout 10 --max-time 30 -b "$CK" -X POST "$HITRON/goform/logout" -d "data=byebye" -o /dev/null 2>/dev/null
     rm -f "$CK"
 }
 trap cleanup EXIT
@@ -53,15 +53,15 @@ if [ -n "$APPLY_FROM" ]; then
     log "[INFO] 規則來源: $APPLY_FROM"
 else
     # 登入 Hitron 抓現有規則
-    curl -s -c "$CK" "$HITRON/login.html" -o /dev/null || { log "[ERROR] GET login.html 失敗"; exit 1; }
-    RESP=$(curl -s -b "$CK" -c "$CK" -X POST "$HITRON/goform/login" \
+    curl -s --connect-timeout 10 --max-time 30 -c "$CK" "$HITRON/login.html" -o /dev/null || { log "[ERROR] GET login.html 失敗"; exit 1; }
+    RESP=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" -c "$CK" -X POST "$HITRON/goform/login" \
         -d "usr=$USER&pwd=$PASS&preSession=")
     if [ "$RESP" != "success" ]; then
         log "[ERROR] 登入失敗: $RESP"
         exit 1
     fi
     log "[INFO] 登入成功"
-    RULES=$(curl -s -b "$CK" "$HITRON/data/getForwardingRules.asp")
+    RULES=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" "$HITRON/data/getForwardingRules.asp")
     log "[INFO] 規則來源: Hitron 現有"
 fi
 
@@ -109,8 +109,8 @@ fi
 
 # --apply-from 模式需要先登入 (上面只有預設模式登過)
 if [ -n "$APPLY_FROM" ]; then
-    curl -s -c "$CK" "$HITRON/login.html" -o /dev/null || { log "[ERROR] GET login.html 失敗"; exit 1; }
-    RESP=$(curl -s -b "$CK" -c "$CK" -X POST "$HITRON/goform/login" \
+    curl -s --connect-timeout 10 --max-time 30 -c "$CK" "$HITRON/login.html" -o /dev/null || { log "[ERROR] GET login.html 失敗"; exit 1; }
+    RESP=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" -c "$CK" -X POST "$HITRON/goform/login" \
         -d "usr=$USER&pwd=$PASS&preSession=")
     if [ "$RESP" != "success" ]; then
         log "[ERROR] 登入失敗: $RESP"
@@ -122,12 +122,12 @@ fi
 # 取 CSRF + POST PfwCollection
 TS=$(date +%s%N 2>/dev/null | cut -c1-13)
 [ -z "$TS" ] && TS=$(date +%s)000
-TOKEN=$(curl -s -b "$CK" "$HITRON/data/getCsrf.asp?_=$TS" | grep -oE '[A-Za-z0-9]{20,}' | head -1)
+TOKEN=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" "$HITRON/data/getCsrf.asp?_=$TS" | grep -oE '[A-Za-z0-9]{20,}' | head -1)
 if [ -z "$TOKEN" ]; then
     log "[ERROR] 取 CSRF token 失敗"
     exit 1
 fi
-RESP=$(curl -s -b "$CK" -X POST "$HITRON/goform/PfwCollection" \
+RESP=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" -X POST "$HITRON/goform/PfwCollection" \
     --data-urlencode "model=$NEW" \
     --data-urlencode "CsrfToken=$TOKEN" \
     -d "CsrfTokenFlag=0")
@@ -136,8 +136,8 @@ log "[INFO] PfwCollection 回應: ${RESP:-<空>}"
 # Firewall apply
 TS=$(date +%s%N 2>/dev/null | cut -c1-13)
 [ -z "$TS" ] && TS=$(date +%s)000
-TOKEN=$(curl -s -b "$CK" "$HITRON/data/getCsrf.asp?_=$TS" | grep -oE '[A-Za-z0-9]{20,}' | head -1)
-RESP=$(curl -s -b "$CK" -X POST "$HITRON/goform/Firewall" \
+TOKEN=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" "$HITRON/data/getCsrf.asp?_=$TS" | grep -oE '[A-Za-z0-9]{20,}' | head -1)
+RESP=$(curl -s --connect-timeout 10 --max-time 30 -b "$CK" -X POST "$HITRON/goform/Firewall" \
     --data-urlencode 'model={"rulesOnOff":"Enabled","privateLan":"192.168.168.1","subMask":"255.255.255.0","forwardingRuleStatus":"1"}' \
     --data-urlencode "CsrfToken=$TOKEN" \
     -d "CsrfTokenFlag=0")
