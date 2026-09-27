@@ -175,6 +175,21 @@ sta_rules_apply() {
         return 1
     fi
 
+    # ★ 死結偵測: 上游閘道與本機 LAN IP 相同 —— 無解, 必須拒絕。
+    #   實測 2026-09-27 於 MX4200: 自己是 192.168.1.1, 而鄰居 AP 的閘道
+    #   也是 192.168.1.1(192.168.1.0/24 是台灣最常見的預設)。
+    #   `default via 192.168.1.1` 在核心眼中會匹配到本地 br-lan 那筆,
+    #   封包繞回自己永遠出不去 —— policy routing 也解不了, 因為問題不在
+    #   路由表選擇, 而在「同一個 IP 同時是自己和別人」。
+    # ⚠️ 這種情況只能改網段(自家或上游其一), 不能靠腳本繞過。
+    #   明確拒絕並推播, 好過靜默失敗讓人以為備援生效了。
+    _lan_self=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    if [ -n "$_gw" ] && [ "$_gw" = "$_lan_self" ]; then
+        log "❌ 死結: 上游閘道($_gw) 與本機 LAN IP 相同, 封包會繞回自己"
+        log "   解法: 把自家 LAN 或上游 AP 其中之一改成不同網段"
+        return 1
+    fi
+
     sta_rules_clear
 
     # ★ 把 DHCP 寫進「主表」的那兩筆搬走 —— 這是本功能的核心。
@@ -194,14 +209,39 @@ sta_rules_apply() {
     _lan_mask=$(echo "$_lan_cidr" | cut -d/ -f2)
     _lannet=$(_net_of "$_lan_ip" "$_lan_mask")
 
-    # table 99: 走上游
-    ip route add "$_upnet" dev "$_dev" src "$_ip" table "$STA_TABLE" 2>/dev/null
-    ip route add default via "$_gw" dev "$_dev" table "$STA_TABLE" 2>/dev/null
-    # ★ 本地 LAN 必須「優先於」預設路由留在本機 —— 否則 LAN 內互連會被送上游
-    ip route add "$_lannet" dev br-lan src "$_lan_ip" table "$STA_TABLE" 2>/dev/null
+    # table 99 的路由
+    # ⚠️ 上游與本地「同網段」時(192.168.1.0/24 是台灣最常見的預設, 實測鄰居
+    #    與自家都是), 兩筆 ip route add 的目的網段完全相同 —— 第二筆會因
+    #    「路由已存在」而失敗, 且錯誤被 2>/dev/null 吞掉, 完全無聲。
+    #    實測 2026-09-27 於 MX4200: t99 只有 2 筆而非預期的 3 筆。
+    # ★ 順序也很關鍵: 原本先加「走上游」那筆, 同網段時它會佔住位置,
+    #    結果 LAN 內互連(例如連 NAS)全被送去鄰居。
+    #    改為「本地 LAN 先寫、且同網段時不再寫上游」——
+    #    本地優先是對的: 自家 LAN 的封包不該出門。
+    #    非同網段時兩筆都要, 上游網段用於 STA 自己與閘道溝通。
+    ip route replace "$_lannet" dev br-lan src "$_lan_ip" table "$STA_TABLE" 2>/dev/null
+    if [ "$_upnet" != "$_lannet" ]; then
+        ip route replace "$_upnet" dev "$_dev" src "$_ip" table "$STA_TABLE" 2>/dev/null
+    else
+        # 同網段: 用 /32 主機路由單獨指出閘道, 才不會被上面那筆本地路由蓋掉。
+        # 沒有這筆的話 default via $_gw 找不到出介面 → 整個 table 99 形同虛設。
+        ip route replace "$_gw" dev "$_dev" src "$_ip" table "$STA_TABLE" 2>/dev/null
+    fi
+    ip route replace default via "$_gw" dev "$_dev" table "$STA_TABLE" 2>/dev/null
 
     ip rule add from "$_ip" table "$STA_TABLE" pref "$STA_PREF_SRC" 2>/dev/null
     ip rule add from "$_lannet" table "$STA_TABLE" pref "$STA_PREF_LAN" 2>/dev/null
+
+    # ★ 驗證 table 99 真的有 default —— 少了它整個備援等於沒出口,
+    #   而 ip route add 失敗是被 2>/dev/null 吞掉的無聲錯誤。
+    if ! ip route show table "$STA_TABLE" 2>/dev/null | grep -q '^default'; then
+        log "❌ table $STA_TABLE 沒有 default route, 規則建立失敗:"
+        ip route show table "$STA_TABLE" 2>/dev/null | while read -r _l; do log "   t99: $_l"; done
+        return 1
+    fi
+    _t99n=$(ip route show table "$STA_TABLE" 2>/dev/null | wc -l)
+    log "table $STA_TABLE 共 ${_t99n} 筆:"
+    ip route show table "$STA_TABLE" 2>/dev/null | while read -r _l; do log "   t99: $_l"; done
 
     log "規則已套用: ip=$_ip dev=$_dev gw=$_gw upnet=$_upnet lannet=$_lannet table=$STA_TABLE"
     [ "$_upnet" = "$_lannet" ] && \
@@ -343,8 +383,14 @@ sta_on() {
     #   寧可回滾成「沒有備援」, 也不要停在「看似成功實則鎖死」。
     if ! sta_rules_apply; then
         log "❌ policy routing 建立失敗, 回滾 STA"
+        _gwchk=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+        _lanchk=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
         sta_off_raw
-        push_notify "STA備援啟用失敗: 已連上 [$_ssid] 但路由隔離失敗, 已回滾(避免失聯)"
+        if [ -n "$_gwchk" ] && [ "$_gwchk" = "$_lanchk" ]; then
+            push_notify "STA備援無法使用: 上游 [$_ssid] 的閘道($_gwchk)與本機 LAN IP 相同, 網段衝突無解。需把自家 LAN 或上游其一改網段。"
+        else
+            push_notify "STA備援啟用失敗: 已連上 [$_ssid] 但路由隔離失敗, 已回滾(避免失聯)"
+        fi
         return 1
     fi
 
