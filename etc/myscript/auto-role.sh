@@ -573,7 +573,30 @@ else
     #    沒有 default route -> ping 8.8.8.8 回 "Network unreachable"。
     #    角色會變而 IP 不會變是常態(拔掉 WAN 就是這種), 故兩者必須解耦。
     CUR_LAN_GW=$(uci get network.lan.gateway 2>/dev/null)
-    if [ "$NEW_ROLE" = "client" ]; then
+    # ★ STA 備援生效時, 絕不可把 gateway/DNS 指向 192.168.1.1(2026-09-27):
+    #   那個位址在 STA 情境下是「上游鄰居的閘道」, 位於 phy1-sta0 側,
+    #   br-lan 上根本沒有人 —— 指過去就是死路。
+    #   實測於 MX4200: LAN 裝置 tracert 1.1.1.1 完全通(走 table 99),
+    #   但 ping www.google.com 找不到主機 —— 因為 dnsmasq 的 upstream 被
+    #   設成 192.168.1.1, 而那筆查詢是「以本機身分」從 br-lan 送出去的。
+    #   同理 `ip route replace default via 192.168.1.1 dev br-lan` 也會讓
+    #   本機自身流量(ntp、推播、sync)全部走進死路。
+    #   → STA 生效時整段跳過, 出口與 DNS 由 sta-backup.sh 的 table 99 與
+    #     主表 metric 300 那筆負責。
+    _sta_live=0
+    if [ -n "$(uci -q get wireless.sta_backup 2>/dev/null)" ]; then
+        [ -n "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)" ] && _sta_live=1
+    fi
+    if [ "$NEW_ROLE" = "client" ] && [ "$_sta_live" = "1" ]; then
+        # STA 備援供網中: 清掉指向 .1 的設定, 讓 sta-backup.sh 管出口
+        if [ -n "$CUR_LAN_GW" ]; then
+            uci delete network.lan.gateway 2>/dev/null
+            uci delete network.lan.dns 2>/dev/null
+            log "STA 備援中: 清除 LAN gateway/DNS(不可指向上游閘道 192.168.1.1)"
+            CHANGED=1
+        fi
+        ip route del default via 192.168.1.1 dev br-lan 2>/dev/null
+    elif [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
         if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then
             uci set network.lan.gateway='192.168.1.1'

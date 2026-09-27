@@ -200,6 +200,21 @@ sta_rules_apply() {
     # ⚠️ default 那筆要指定 dev, 不可只 `ip route del default` ——
     #   那會把 WAN 或 wg 的預設路由一起刪掉。
     ip route del default via "$_gw" dev "$_dev" 2>/dev/null
+
+    # ★ 還要清掉 auto-role 在「角色降 client」時加的那筆:
+    #     default via 192.168.1.1 dev br-lan proto static
+    #   它指向「主 gw」, 但 STA 備援的情境下自己就是唯一出口, 而 192.168.1.1
+    #   在 br-lan 側根本沒有人 —— 本機自己發出的封包(dnsmasq 查 upstream、
+    #   ntp、推播)會走主表(ip rule 32766)命中這筆, 送進死路。
+    #   實測 2026-09-27 於 MX4200: LAN 裝置 tracert 1.1.1.1 完全通(走
+    #   table 99), 但 ping www.google.com 找不到主機 —— 只有 DNS 不通,
+    #   因為那是 dnsmasq「以本機身分」發出的查詢。
+    # ⚠️ 必須指定 dev br-lan, 不可只 `ip route del default` —— 會誤刪 wg 的。
+    _lan_gw_route=$(ip route show default dev br-lan 2>/dev/null | head -1)
+    if [ -n "$_lan_gw_route" ]; then
+        ip route del default dev br-lan 2>/dev/null \
+            && log "已移除 client 遺留的 default via br-lan(否則本機自身流量走死路)"
+    fi
     ip route del "$(_net_of "$_ip" "$_mask")" dev "$_dev" 2>/dev/null
 
     # 上游網段(由實際位址推算, 不可假設是 /24 或 192.168.1.x)
@@ -228,6 +243,17 @@ sta_rules_apply() {
         ip route replace "$_gw" dev "$_dev" src "$_ip" table "$STA_TABLE" 2>/dev/null
     fi
     ip route replace default via "$_gw" dev "$_dev" table "$STA_TABLE" 2>/dev/null
+
+    # ★ 主表也要有一筆走 STA 的 default —— 否則「本機自己」發出的封包無路可走。
+    #   ip rule 的 990/991 只涵蓋 from <sta_ip> 與 from <lan_net>, 但本機
+    #   程序(dnsmasq 查 upstream、ntp、push_notify)在「還沒決定來源位址」時
+    #   查的是主表(rule 32766 from all lookup main)。主表沒有 default
+    #   就直接 unreachable, 連來源位址都選不出來。
+    # ⚠️ metric 設高(300): 真正的 WAN 恢復時它的 default(metric 0)會優先,
+    #   不會被這筆蓋住; sta_rules_clear 也會把它清掉。
+    # ⚠️ 這筆刻意「不」放 table 99 —— 它的作用對象就是主表的使用者。
+    ip route replace default via "$_gw" dev "$_dev" metric 300 2>/dev/null \
+        && log "主表已補 default via $_gw dev $_dev metric 300(供本機自身流量)"
 
     ip rule add from "$_ip" table "$STA_TABLE" pref "$STA_PREF_SRC" 2>/dev/null
     ip rule add from "$_lannet" table "$STA_TABLE" pref "$STA_PREF_LAN" 2>/dev/null
