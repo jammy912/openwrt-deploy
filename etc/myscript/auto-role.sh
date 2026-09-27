@@ -568,16 +568,23 @@ else
             #     需要主動 ifup。⚠️ 用旗標檔限制只做一次 —— wg 若因上游
             #     環境(飯店 NAT、對端不可達)本來就連不上, 每分鐘 ifup 會
             #     無止盡重建 tunnel 且吃掉 CPU。
+            # ★ 只處理「client 端」介面(peer 有設 endpoint_host 的)。本機的
+            #   wg1/wg2/wg4/wg5 是 server 端, peer endpoint 是 (none)、
+            #   handshake 恆為 0(等對方連進來), 對它們 ifup 毫無意義, 只會
+            #   白白重建 tunnel 踢掉既有 client。實測基準(2026-09-27 WAN
+            #   正常): wg0/wg3/wg_900 有 handshake, 其餘四支全 0。
+            #   uci 格式是 network.@wireguard_wg0[0].endpoint_host=...
             _wgflag=/tmp/.sta_wg_kicked
             if [ ! -f "$_wgflag" ]; then
                 _kicked=""
-                for _w in wg0 wg1 wg2 wg3 wg4 wg5 wg_900; do
-                    [ -n "$(uci -q get network.$_w 2>/dev/null)" ] || continue
+                for _w in $(uci -q show network 2>/dev/null \
+                            | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
+                            | sort -u); do
                     [ "$(ifstatus $_w 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] && continue
                     ifup "$_w" 2>/dev/null && _kicked="$_kicked $_w"
                 done
                 touch "$_wgflag"
-                [ -n "$_kicked" ] && log "STA: 重新拉起 wg 介面:$_kicked"
+                [ -n "$_kicked" ] && log "STA: 重新拉起 wg client 介面:$_kicked"
             fi
         fi
     elif [ "$NEW_ROLE" = "client" ]; then
