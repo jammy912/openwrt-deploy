@@ -1,0 +1,24 @@
+#!/bin/sh
+# STA 備援: wwan 介面起落時重建/清除 policy routing 規則
+#
+# ★ 為什麼需要這支: wwan 的位址是鄰居 AP 的 DHCP 給的, 每次續約都可能不同。
+#   sta-backup.sh 的規則是 `ip rule add from <實際位址>`, 位址一換舊規則就
+#   失效, 流量會落回主表 —— 而主表刻意沒有上游路由(defaultroute=0),
+#   結果是備援靜默失效, 沒有任何錯誤訊息。
+# ⚠️ 只處理 wwan, 其他介面一律放行, 不可漏掉這個判斷。
+
+[ "$INTERFACE" = "wwan" ] || exit 0
+[ -x /etc/myscript/sta-backup.sh ] || exit 0
+
+case "$ACTION" in
+    ifup)
+        logger -t sta-backup "hotplug: wwan ifup → 重建 policy routing"
+        /etc/myscript/sta-backup.sh rules-refresh >/dev/null 2>&1
+        ;;
+    ifdown)
+        logger -t sta-backup "hotplug: wwan ifdown → 清除 policy routing"
+        /etc/myscript/sta-backup.sh rules-clear >/dev/null 2>&1
+        ;;
+esac
+
+exit 0
