@@ -337,13 +337,27 @@ sta_rules_apply() {
     #   (供本機自身流量使用, 見上方說明)。不排除的話會自我矛盾:
     #   剛補完就被判定為「搬移失敗」→ 回滾 STA → 10 分鐘後自動重開。
     #   實測 2026-09-27 15:18:17 就是這樣連鎖觸發重開的。
-    _leftover=$(ip route show 2>/dev/null | grep " dev $_dev " | grep -vc 'metric 300')
+    # ⚠️ 只檢查「會搶走整片流量」的路由 —— default 與整段網段(含 /24 等)。
+    #   不可把所有指向該介面的路由都當殘留:
+    #     * metric 300 是本函式刻意補進主表的(供本機自身流量)
+    #     * PBR 的 CustRule 會把特定主機 /32 指向當前出口, WAN 斷線期間
+    #       自然會指到 phy1-sta0 —— 那是 pbr 的正常行為, 不是我們的殘留。
+    #   實測 2026-09-27 21:31: 主表有
+    #     180.177.189.12 via 192.168.1.1 dev phy1-sta0 proto static metric 200
+    #     211.72.195.28  via 192.168.1.1 dev phy1-sta0 proto static metric 200
+    #   被誤判為搬移失敗 → sta_rules_apply 一直 return 1 → sta_off 走不到
+    #   → STA 拆不掉, t99/rule/metric300 全部殘留。
+    _leftover=$(ip route show 2>/dev/null | grep " dev $_dev " \
+        | grep -v 'metric 300' \
+        | grep -cE '^default |^[0-9.]+/[0-9]+ ')
     if [ "$_leftover" -gt 0 ]; then
-        log "❌ 主表仍有 ${_leftover} 筆指向 $_dev 的非預期路由, 搬移失敗:"
-        ip route show 2>/dev/null | grep " dev $_dev " | grep -v 'metric 300' | while read -r _l; do log "   主表殘留: $_l"; done
+        log "❌ 主表仍有 ${_leftover} 筆會搶走流量的 $_dev 路由, 搬移失敗:"
+        ip route show 2>/dev/null | grep " dev $_dev " | grep -v 'metric 300' \
+            | grep -E '^default |^[0-9.]+/[0-9]+ ' \
+            | while read -r _l; do log "   主表殘留: $_l"; done
         return 1
     fi
-    log "✅ 主表已無 $_dev 路由, 隔離完成"
+    log "✅ 主表已無會搶流量的 $_dev 路由, 隔離完成"
     return 0
 }
 
