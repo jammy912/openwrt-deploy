@@ -548,8 +548,22 @@ else
         #       仍把 wg 的來源埠(51600/51663/51699/51820)導進去 → 進了空表。
         # ⚠️ 代價: wg 流量會經過上游 AP(鄰居/飯店)。使用者已確認接受 ——
         #   那是「沒有 VPN」與「VPN 經過別人網路」之間的取捨。
+        # ⚠️ 2026-09-27 實測: 只靠 .route[0].nexthop 會在 STA 剛起來那輪取不到
+        #   (udhcpc 還沒把 route 填進 ifstatus), 結果整個 (1)(2)(3) 區塊被無聲
+        #   跳過 —— log 裡什麼都沒有, 很難查。改成三重來源 + 取不到時記 log。
         _sta_dev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
         _sta_gw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+        # 來源 2: sta-backup.sh 切換時已把 default 放進主表 (metric 300)
+        [ -z "$_sta_gw" ] && [ -n "$_sta_dev" ] \
+            && _sta_gw=$(ip route show default dev "$_sta_dev" 2>/dev/null \
+                         | awk '/via/ {for(i=1;i<NF;i++) if($i=="via") print $(i+1); exit}')
+        # 來源 3: table 99 的 default (policy routing 那份)
+        [ -z "$_sta_gw" ] \
+            && _sta_gw=$(ip route show table 99 2>/dev/null \
+                         | awk '/^default .*via/ {for(i=1;i<NF;i++) if($i=="via") print $(i+1); exit}')
+        if [ -z "$_sta_dev" ] || [ -z "$_sta_gw" ]; then
+            log "STA: 尚未取得出口資訊 (dev=${_sta_dev:-無} gw=${_sta_gw:-無}), 本輪跳過 wg/PBR 修正, 等下一輪"
+        fi
         if [ -n "$_sta_dev" ] && [ -n "$_sta_gw" ]; then
             # (1) 清掉「釘錯方向」的 endpoint host route, 讓 wg 下次 resolve 時
             #     跟著正確的 default(已是 STA)重釘。兩種形態都要清:
@@ -592,17 +606,42 @@ else
             #   白白重建 tunnel 踢掉既有 client。實測基準(2026-09-27 WAN
             #   正常): wg0/wg3/wg_900 有 handshake, 其餘四支全 0。
             #   uci 格式是 network.@wireguard_wg0[0].endpoint_host=...
-            _wgflag=/tmp/.sta_wg_kicked
-            if [ ! -f "$_wgflag" ]; then
+            # ⚠️ 2026-09-27 實測: 原本「touch 旗標 = 只做一次」有缺陷 —— STA 剛
+            #   起來那輪路由還沒收斂(pbr_wan 空、endpoint 還指向 dev wg2),
+            #   ifup 出去也握不到手, 但旗標已經蓋下去, 之後永遠不再嘗試。
+            #   改成「握到手才封印」: 只要還有 client 端介面沒 handshake 就繼續
+            #   重試, 上限 RETRY_MAX 輪(每輪 cron 一分鐘)避免上游環境本來就
+            #   連不上時無止盡重建 tunnel 吃 CPU。
+            _wgflag=/tmp/.sta_wg_kicked          # 內容 = 已嘗試輪數
+            _wgretry_max=5
+            _wgtried=$(cat "$_wgflag" 2>/dev/null)
+            case "$_wgtried" in ''|*[!0-9]*) _wgtried=0 ;; esac
+            # 有任何一支 client 端介面握到手就算成功, 不再動它
+            _wg_ok=0
+            for _w in $(uci -q show network 2>/dev/null \
+                        | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
+                        | sort -u); do
+                _hs=$(wg show "$_w" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+                [ -n "$_hs" ] && [ "$_hs" != "0" ] && { _wg_ok=1; break; }
+            done
+            if [ "$_wg_ok" = "1" ]; then
+                [ "$_wgtried" != "done" ] && log "STA: wg 已握手, 停止重試"
+                echo "done" > "$_wgflag"
+            elif [ "$_wgtried" -lt "$_wgretry_max" ]; then
                 _kicked=""
                 for _w in $(uci -q show network 2>/dev/null \
                             | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
                             | sort -u); do
-                    [ "$(ifstatus $_w 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] && continue
+                    # up=true 但 handshake=0 也要重拉 —— 介面活著不代表通
                     ifup "$_w" 2>/dev/null && _kicked="$_kicked $_w"
                 done
-                touch "$_wgflag"
-                [ -n "$_kicked" ] && log "STA: 重新拉起 wg client 介面:$_kicked"
+                _wgtried=$((_wgtried + 1))
+                echo "$_wgtried" > "$_wgflag"
+                [ -n "$_kicked" ] && log "STA: 重拉 wg client 介面 (第 $_wgtried/$_wgretry_max 輪):$_kicked"
+            else
+                [ "$_wgtried" = "$_wgretry_max" ] \
+                    && { log "STA: wg 重試 $_wgretry_max 輪仍未握手, 放棄(上游可能擋 UDP 或對端不可達)"
+                         echo "gaveup" > "$_wgflag"; }
             fi
         fi
     elif [ "$NEW_ROLE" = "client" ]; then
