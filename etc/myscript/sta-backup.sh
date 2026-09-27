@@ -161,6 +161,14 @@ sta_rules_clear() {
         while ip rule del pref "$_p" 2>/dev/null; do :; done
     done
     ip route flush table "$STA_TABLE" 2>/dev/null
+    # ★ 主表裡那兩筆 metric 300 也要清 —— 它們指向 STA 介面, STA 拆掉後
+    #   會變成殘留的死路由, 讓本機以為還有出口。
+    #   用 metric 300 精準比對, 不會誤刪 WAN(metric 0)或 wg 的路由。
+    ip route show default 2>/dev/null | grep -q 'metric 300' \
+        && ip route del default metric 300 2>/dev/null
+    ip route show 2>/dev/null | awk '/metric 300/ && !/^default/ {print $1}' | while read -r _n; do
+        [ -n "$_n" ] && ip route del "$_n" metric 300 2>/dev/null
+    done
 }
 
 sta_rules_apply() {
@@ -252,8 +260,23 @@ sta_rules_apply() {
     # ⚠️ metric 設高(300): 真正的 WAN 恢復時它的 default(metric 0)會優先,
     #   不會被這筆蓋住; sta_rules_clear 也會把它清掉。
     # ⚠️ 這筆刻意「不」放 table 99 —— 它的作用對象就是主表的使用者。
+    # ⚠️ 必須先在主表加 /32 主機路由指出閘道的出介面, 否則下一行會失敗:
+    #   主表此時只剩 `192.168.1.0/24 dev br-lan`, 核心認為 192.168.1.1 在
+    #   br-lan 上而非 phy1-sta0, 於是拒絕建立 `default via 192.168.1.1
+    #   dev phy1-sta0`(錯誤被 2>/dev/null 吞掉, 完全無聲)。
+    #   實測 2026-09-27: 監控顯示 defrt=0 —— 主表 default 被刪光卻沒補回來,
+    #   本機所有對外流量回 "Network unreachable"。
+    ip route replace "$_gw" dev "$_dev" src "$_ip" metric 300 2>/dev/null
     ip route replace default via "$_gw" dev "$_dev" metric 300 2>/dev/null \
         && log "主表已補 default via $_gw dev $_dev metric 300(供本機自身流量)"
+
+    # ★ 驗證主表真的有 default —— 沒有的話本機完全出不去, 必須回報失敗
+    #   讓上層回滾, 不要停在「看似成功實則斷網」的狀態。
+    if [ "$(ip route show default 2>/dev/null | wc -l)" -eq 0 ]; then
+        log "❌ 主表沒有任何 default route, 本機將完全無法對外"
+        ip route show 2>/dev/null | head -6 | while read -r _l; do log "   主表: $_l"; done
+        return 1
+    fi
 
     ip rule add from "$_ip" table "$STA_TABLE" pref "$STA_PREF_SRC" 2>/dev/null
     ip rule add from "$_lannet" table "$STA_TABLE" pref "$STA_PREF_LAN" 2>/dev/null
