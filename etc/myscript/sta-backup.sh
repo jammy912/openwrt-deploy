@@ -46,6 +46,14 @@ BAND_F="$CFG_DIR/.sta_backup_band"
 ENABLE_F="$CFG_DIR/.sta_backup_enable"
 
 STATE_F="/tmp/.sta_backup_state"       # active / idle
+# ★ 自動解套計時器(落 flash, 跨重開有效):
+#   記錄「失去所有出路」的起始時間。超過 STUCK_LIMIT 仍沒救回 → 重開機。
+#   為什麼需要: STA 備援可能把自己卡在「連上了但判斷函式看不到、或路由只
+#   建了一半」的中間態 —— 那時人在外面完全進不去, 只能等。重開至少能回到
+#   乾淨狀態讓 WAN/mesh 重新協商。
+# ⚠️ 必須放 flash: 放 /tmp 的話重開就歸零, 永遠累積不到門檻, 等於沒有保險。
+STUCK_F="/etc/myscript/.sta_backup_stuck_since"
+STUCK_LIMIT=600                        # 10 分鐘
 FAILCNT_F="/tmp/.sta_backup_failcnt"
 OKCNT_F="/tmp/.sta_backup_okcnt"
 BAK_F="/tmp/.sta_backup_wireless.bak"
@@ -61,7 +69,23 @@ FAIL_NEED=2      # 連續幾次判定孤島才啟用(實測每次間隔約 3 分
 OK_NEED=3        # 連續幾次判定正常才還原
 STA_SECTION="sta_backup"   # uci wifi-iface 的 section 名(固定, 方便清理)
 
-log() { logger -t "$TAG" "$1"; [ -n "$STA_VERBOSE" ] && echo "$1"; }
+# ★ log 必須同時落 flash —— 這功能的故障場景就是「機器失聯/重開」,
+#   而 /tmp 與 syslog ring buffer 都會在重開後消失, 正好在最需要證據時沒了。
+#   實測 2026-09-26 連兩次測試失敗都因此只能靠推測(第三次靠使用者手動
+#   貼 /tmp/statest.log 才定位)。
+# ⚠️ 只在「真的有事發生」時寫, 不是每輪都寫 —— 否則每分鐘磨 flash。
+#   平常判斷無出路只累積計數不寫檔(見主流程), 寫的是狀態轉換與錯誤。
+# ⚠️ 自行截斷到 400 行, 避免無限長大。
+STA_FLOG="/etc/myscript/.sta_backup.log"
+log() {
+    logger -t "$TAG" "$1"
+    [ -n "$STA_VERBOSE" ] && echo "$1"
+    echo "$(date '+%m-%d %H:%M:%S') $1" >> "$STA_FLOG" 2>/dev/null
+    # 超過 500 行才修剪, 攤提寫入成本
+    if [ "$(wc -l < "$STA_FLOG" 2>/dev/null || echo 0)" -gt 500 ]; then
+        tail -n 400 "$STA_FLOG" > "${STA_FLOG}.tmp" 2>/dev/null && mv "${STA_FLOG}.tmp" "$STA_FLOG"
+    fi
+}
 
 _read() { cat "$1" 2>/dev/null; }
 
@@ -465,22 +489,69 @@ trap 'rmdir "$LOCK_D" 2>/dev/null' EXIT INT TERM
 
 CUR_STATE=$(_read "$STATE_F"); [ -z "$CUR_STATE" ] && CUR_STATE=idle
 
+# ---------- STA 自己算不算「有出路」 ----------
+# ★ 沒有這個判斷的話, STA 成功接管後 wan_ok() 仍回 false(它只看 network.wan),
+#   系統以為備援還沒生效 → fail 持續累加。
+#   實測 2026-09-27 於 MX4200: 00:17:21 已 st=active wwan=192.168.1.249,
+#   但 fail 仍從 1 一路累加到 5, 每輪都在重複嘗試, 連線因此不穩。
+# ⚠️ 不能只看「wwan 有 IP」—— 拿到 IP 不代表真的出得去(上游可能也斷了)。
+#   要實際從 STA 介面打出去驗證。
+sta_ok() {
+    [ "$(_read "$STATE_F")" = "active" ] || return 1
+    _sdev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    [ -z "$_sdev" ] && return 1
+    ping -c 1 -W 3 -I "$_sdev" 1.1.1.1 >/dev/null 2>&1 && return 0
+    ping -c 1 -W 3 -I "$_sdev" 8.8.8.8 >/dev/null 2>&1 && return 0
+    return 1
+}
+
 if wan_ok || mesh_ok; then
-    # 有出路 —— 累積正常計數
+    # WAN 或 mesh 恢復 —— 累積正常計數, 準備還原 STA
     echo 0 > "$FAILCNT_F"
+    rm -f "$STUCK_F" 2>/dev/null
     _ok=$(( $(_cnt_get "$OKCNT_F") + 1 ))
     echo "$_ok" > "$OKCNT_F"
     if [ "$CUR_STATE" = "active" ] && [ "$_ok" -ge "$OK_NEED" ]; then
-        log "連續 ${_ok} 次判定有出路, 還原 STA"
+        log "連續 ${_ok} 次判定 WAN/mesh 有出路, 還原 STA"
         sta_off
         echo 0 > "$OKCNT_F"
     fi
+elif sta_ok; then
+    # ★ WAN/mesh 仍斷, 但 STA 備援正在正常供網 —— 這是「備援生效中」的
+    #   正常狀態, 不該繼續累積失敗計數重複嘗試。
+    echo 0 > "$FAILCNT_F"
+    rm -f "$STUCK_F" 2>/dev/null
+    _prev=$(_read "$STUCK_F.notified" 2>/dev/null)
+    if [ "$_prev" != "1" ]; then
+        log "STA 備援供網中(WAN/mesh 仍斷), 維持現狀"
+        echo 1 > "$STUCK_F.notified" 2>/dev/null
+    fi
 else
-    # 無出路 —— 累積失敗計數
+    # 完全沒有出路(WAN 斷、mesh 斷、STA 也不通或還沒啟用)
+    rm -f "$STUCK_F.notified" 2>/dev/null
     echo 0 > "$OKCNT_F"
+
+    # ★ 卡死自動解套: 記錄「完全沒出路」的起始時間, 超過門檻就重開。
+    #   為什麼需要: STA 可能卡在「連上了但路由只建一半」之類的中間態,
+    #   人在外面完全進不去。重開至少能回到乾淨狀態重新協商。
+    _now=$(date +%s)
+    _since=$(_read "$STUCK_F")
+    case "$_since" in ''|*[!0-9]*) _since="$_now"; echo "$_now" > "$STUCK_F" ;; esac
+    _stuck=$(( _now - _since ))
+    if [ "$_stuck" -ge "$STUCK_LIMIT" ]; then
+        log "❌ 已 ${_stuck}s 完全無出路(WAN/mesh/STA 皆不通), 重開機自動解套"
+        push_notify "STA備援: 已 $(( _stuck / 60 )) 分鐘完全無網路, 自動重開機解套"
+        rm -f "$STUCK_F"
+        # 先還原設定再重開, 避免開機後又卡在同一個壞狀態
+        sta_off_raw
+        sync
+        ( sleep 5 && reboot ) &
+        exit 0
+    fi
+
     _fail=$(( $(_cnt_get "$FAILCNT_F") + 1 ))
     echo "$_fail" > "$FAILCNT_F"
-    log "判定無出路 (${_fail}/${FAIL_NEED})"
+    log "判定無出路 (${_fail}/${FAIL_NEED}, 已卡 ${_stuck}s/${STUCK_LIMIT}s)"
     if [ "$CUR_STATE" != "active" ] && [ "$_fail" -ge "$FAIL_NEED" ]; then
         log "連續 ${_fail} 次判定孤島, 啟用 STA 備援"
         sta_on
