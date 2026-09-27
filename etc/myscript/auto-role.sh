@@ -1281,7 +1281,18 @@ fi
 # 只有主gw需要自己拉 IPv6 上游;副gw/client透過 mesh 從主gw 拿 RA,
 # 自己拉 wan6 在 rename device + MAC clone 架構下會引發 netifd flap
 # (ubus error: Invalid argument, 10+/sec)
-if [ -n "$(uci -q get network.wan6)" ]; then
+# ⚠️ 2026-09-28 實測: STA 備援供網期間不能碰這段。角色切換(gateway->client)
+#   會讓 _wan6_want 變 1 -> 跑 uci commit network -> netifd 重新載入整份
+#   network 設定 -> 所有 wireguard 介面(連 wg1/wg2/wg4/wg5)全部被重啟。
+#   log 佐證(第四輪 STA 測試):
+#     00:12:26 auto-role: 角色切換: gateway -> client
+#     00:12:26 netifd: Interface 'wg1'/'wg2'/'wg4'/'wg5' is now down
+#     00:12:28 auto-role: wan6: disabled   ← wg 全倒在這行之前,
+#                                            真正動手的是上面的 uci commit
+#   WAN 都斷了, 調 wan6 沒意義, 代價卻是打掉所有 VPN —— 直接跳過。
+if [ "$(cat /tmp/.sta_backup_state 2>/dev/null)" = "active" ]; then
+    log "STA 備援供網中: 跳過 wan6 管理(uci commit network 會重啟全部 wg)"
+elif [ -n "$(uci -q get network.wan6)" ]; then
     _wan6_disabled=$(uci -q get network.wan6.disabled)
     if [ "$GW_TYPE" = "主gw" ]; then
         _wan6_want="0"
