@@ -535,6 +535,51 @@ else
         fi
         ip route del default via 192.168.1.1 dev br-lan 2>/dev/null \
             && log "STA 供網中: 移除 default via 192.168.1.1 dev br-lan(會蓋過 STA 出口)"
+
+        # ★ 讓 WireGuard 能走 STA 出去(2026-09-27 實測補強)
+        #   問題: STA 供網時 wg 全部 up=false、handshake 0 個。兩個原因 ——
+        #   (1) wg ifup 時 resolve endpoint 會「跟著當下的 default 方向」釘一條
+        #       host route。STA 剛起來那瞬間 default 還是 via br-lan, 於是釘成
+        #         180.177.189.12 via 192.168.1.1 dev br-lan proto static
+        #       而 192.168.1.1 在 br-lan 側是上游鄰居、不是本機能到的下一跳 →
+        #       handshake 封包送不出去(這段邏輯原本只在「切回主 gw」時清, 見
+        #       下方 ~line 594 的相同處理)。
+        #   (2) pbr_wan 表被 PBR 在 WAN 斷線時清空, 但 rule 29992-29995
+        #       仍把 wg 的來源埠(51600/51663/51699/51820)導進去 → 進了空表。
+        # ⚠️ 代價: wg 流量會經過上游 AP(鄰居/飯店)。使用者已確認接受 ——
+        #   那是「沒有 VPN」與「VPN 經過別人網路」之間的取捨。
+        _sta_dev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        _sta_gw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+        if [ -n "$_sta_dev" ] && [ -n "$_sta_gw" ]; then
+            # (1) 清掉指向 br-lan 的 endpoint host route, 讓 wg 下次 resolve 時
+            #     跟著正確的 default(已是 STA)重釘。
+            ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
+                | while read -r _stale; do
+                    ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
+                        && log "STA: 清除指向 br-lan 的 endpoint host route $_stale"
+                done
+            # (2) 補 pbr_wan 的 default, 讓被 rule 導進去的 wg 封包有路可走。
+            #     ⚠️ 用 replace 而非 add —— WAN 恢復時 PBR 會自己覆寫回去。
+            if [ "$(ip route show table pbr_wan 2>/dev/null | grep -c '^default')" -eq 0 ]; then
+                ip route replace default via "$_sta_gw" dev "$_sta_dev" table pbr_wan 2>/dev/null \
+                    && log "STA: pbr_wan 補 default via $_sta_gw dev $_sta_dev(原本是空表)"
+            fi
+            # (3) 路由修好後 wg 不會自己起來(WAN 斷時已被 netifd 標成 down),
+            #     需要主動 ifup。⚠️ 用旗標檔限制只做一次 —— wg 若因上游
+            #     環境(飯店 NAT、對端不可達)本來就連不上, 每分鐘 ifup 會
+            #     無止盡重建 tunnel 且吃掉 CPU。
+            _wgflag=/tmp/.sta_wg_kicked
+            if [ ! -f "$_wgflag" ]; then
+                _kicked=""
+                for _w in wg0 wg1 wg2 wg3 wg4 wg5 wg_900; do
+                    [ -n "$(uci -q get network.$_w 2>/dev/null)" ] || continue
+                    [ "$(ifstatus $_w 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] && continue
+                    ifup "$_w" 2>/dev/null && _kicked="$_kicked $_w"
+                done
+                touch "$_wgflag"
+                [ -n "$_kicked" ] && log "STA: 重新拉起 wg 介面:$_kicked"
+            fi
+        fi
     elif [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
         if [ "$CUR_LAN_GW" != "192.168.1.1" ]; then

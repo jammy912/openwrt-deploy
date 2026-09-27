@@ -533,6 +533,8 @@ sta_off_raw() {
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
         fi
         rm -f /etc/myscript/.sta_lan_ip_prev
+        # ★ 清掉 auto-role 的 wg 重拉旗標, 否則下次 STA 啟用時不會再 ifup
+        rm -f /tmp/.sta_wg_kicked
     fi
     if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
        && [ -z "$(uci -q get network.wwan 2>/dev/null)" ]; then
