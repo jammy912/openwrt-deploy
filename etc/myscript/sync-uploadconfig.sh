@@ -95,10 +95,14 @@ main() {
             }
         }
         /^config wireguard_wg[0-9]/ {
-            # wireguard peer 區塊 (wireguard_wg0, wireguard_wg1...)
-            # 但不是 wireguard_wg_ (如 wireguard_wg_tw)
+            # wireguard peer 區塊 (wireguard_wg0, wireguard_wg1, wireguard_wg8ts...)
+            # 但不是 wireguard_wg_ (如 wireguard_wg_900, 那些由 Sheet 的 Network 段直接下發)
+            # ⚠️ 2026-09-27: 原本寫 /^wireguard_wg[0-9]+$/ 有 $ 錨點, 要求全是數字,
+            #   把 wireguard_wg8ts 擋掉了 —— 但上面介面那段的 /^wg[0-9]/ 沒有錨點,
+            #   wg8ts 的「介面」有備份、「peer」沒有, 還原時會得到沒有 peer 的空介面。
+            #   改成與介面端一致的 /^wireguard_wg[0-9]/。
             type = $2
-            if (type ~ /^wireguard_wg[0-9]+$/) {
+            if (type ~ /^wireguard_wg[0-9]/) {
                 printing = 1
                 print
                 next
