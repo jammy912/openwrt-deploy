@@ -1508,22 +1508,18 @@ else
 fi
 
 # =====================================================================
-# STA 備援 (WAN 與 mesh 皆無出路時, 改用 2.4G 連上游 AP)
+# STA 備援: 由「獨立 cron」執行, 不從這裡呼叫
 # =====================================================================
-# ★ 掛在 auto-role 尾端而非另排 cron:
-#   本腳本每分鐘跑, 且上面已經算過 WAN 健康狀態(_wan_ok)與角色, 直接沿用
-#   可省掉 sta-backup.sh 自己再做一次最長 23 秒的 ping 重試, 也避免兩支
-#   腳本對「現在有沒有網路」各自判斷而打架。
-# ⚠️ _wan_ok 只在 NEW_ROLE=gateway 的分支內計算(見上方 ~line 157);
-#   角色是 client 時該變數不存在。但 client 本身就代表 WAN 連 IP 都沒有,
-#   等同無外網, 故此處顯式傳 0, 不可寫成 ${_wan_ok:-1} 之類的樂觀預設。
-# ⚠️ sta-backup.sh 內部仍有 enable!=1 就 exit 0 的總開關, 這裡無條件呼叫
-#   是安全的 —— 真正的閘門在那支腳本裡, 不在這行。
-if [ -x /etc/myscript/sta-backup.sh ]; then
-    if [ "$NEW_ROLE" = "gateway" ]; then
-        _sta_wan="${_wan_ok:-0}"
-    else
-        _sta_wan=0          # client = 連 WAN IP 都沒有
-    fi
-    STA_WAN_OK="$_sta_wan" /etc/myscript/sta-backup.sh >/dev/null 2>&1 &
-fi
+# ★ 原本掛在本腳本尾端(沿用已算好的 _wan_ok 省掉重複 ping), 但實測
+#   2026-09-27 於 MX4200 發現致命缺陷: WAN 斷線時本腳本前段會做
+#   ping 重試(最長 23 秒)、ARP DAD、網路重啟等耗時操作, 跑不到尾端
+#   這一行 —— 使用者拔線 10 分鐘, sta-backup.sh 一次都沒被執行
+#   (flash log 全空, 而該腳本在「判定無出路」時必定寫 log)。
+#   備援最需要生效的時刻, 正是它最不可能被呼叫的時刻。
+# → 改由 Sheet 的 crontab 段獨立排程:
+#       */1 * * * * /etc/myscript/sta-backup.sh
+#   兩者靠 sta-backup.sh 內的 mkdir 原子鎖互斥, 不會重複執行。
+# ⚠️ 本檔仍保留其他三段 STA 相關邏輯(它們是 auto-role 自己的職責):
+#   - HAS_WAN 判斷(~line 138): STA 生效時角色要升 gateway
+#   - LAN IP 改用靜態 IP(~line 490): 避開與上游閘道同 IP
+#   - gateway/DNS 不指向 .1(~line 586): 那在 STA 情境是死路
