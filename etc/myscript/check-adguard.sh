@@ -476,6 +476,31 @@ fi
 #   3) 最終仍失敗前診斷: AGH 本體 / upstream 連不連得到,把原因寫進訊息
 if [ "$KIND" != "NONE" ] && ! verify_dnsmasq_retry 2 "2 3"; then
     log "⚠️ dnsmasq 端到端驗證失敗 (KIND=$KIND target=$TARGET),restart dnsmasq"
+    # ★ restart 前先修 /etc/hosts 權限(2026-09-28)
+    #   真兇: dnsmasq 跑在 ujail 裡以非 root 讀 /etc/hosts, 該檔若是 600 就
+    #   「failed to load names from /etc/hosts: Permission denied」而**完全不綁
+    #   53 埠** —— 這時 restart 是無效的(權限沒修, 重啟一樣失敗), 只會堆疊出
+    #   一堆卡住的 /etc/init.d/dnsmasq restart 行程。
+    #   實測 2026-09-28 於 MX4200: /etc/hosts 是 600, netstat 完全沒有 :53,
+    #   nslookup 127.0.0.1 回 Connection refused, 同時有 4 個堆疊的 restart。
+    #   chmod 644 + restart 後立刻恢復。
+    #   ⚠️ 成因未知(已排除: busybox sed -i 與 >> 都保留原權限、umask 077 下實測
+    #     也不改、sta-backup.sh 與 sync-googleconfig.sh 都沒碰這個檔)。
+    #     mtime 不會被 chmod 更新, 所以無法用 mtime 回推何時變的。
+    #     這是自癒防呆而非根治 —— 推播是下次再發生時抓真兇的機會。
+    #   ⚠️ 判斷法的兩個地雷(2026-09-28 實測):
+    #     1. busybox 沒有 `stat` —— `stat -c '%a'` 回 "ash: stat: not found",
+    #        拿它比對權限的條件永遠不成立。
+    #     2. 本腳本以 root 跑, `[ -r file ]` 對 600 的檔案**仍為真**(root 無視
+    #        權限位), 所以不能用 -r 判斷「別人讀不讀得到」。
+    #     ★ 改用 `ls -l` 取第 8 個字元(others 的 r 位): 是 'r' 才算 dnsmasq
+    #       (ujail 內非 root)讀得到。
+    if [ -f /etc/hosts ] && [ "$(ls -l /etc/hosts 2>/dev/null | cut -c8)" != "r" ]; then
+        _hp=$(ls -l /etc/hosts 2>/dev/null | cut -c1-10)
+        chmod 644 /etc/hosts 2>/dev/null
+        log "🔧 /etc/hosts 權限異常($_hp), 已改為 644 —— dnsmasq 在 ujail 讀不到會完全不綁 53"
+        push_notify "dns-fix: /etc/hosts 權限異常($_hp)已修為 644。dnsmasq 因此不綁 53 埠, DNS 全掛。成因未明, 請回報此訊息時間供追查。"
+    fi
     /etc/init.d/dnsmasq restart
     if verify_dnsmasq_retry 3 "2 3 5"; then
         log "✅ dnsmasq restart 後恢復"
