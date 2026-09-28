@@ -227,7 +227,24 @@ sta_rules_apply() {
         uci -q delete dhcp.lan.dhcp_option
         uci add_list dhcp.lan.dhcp_option="3,$_sta_ip"
         uci add_list dhcp.lan.dhcp_option="6,$_sta_ip"
+        # ★ 2026-09-28 真兇: 只改 IPv4 不夠。br-lan 的 ULA(fdff:...::1)是寫死的,
+        #   不會跟著 IPv4 從 .1 改成 .9, odhcpd 仍把它當 IPv6 DNS 發給 client。
+        #   Windows 優先用 IPv6 DNS -> 查詢送到 ULA -> dnsmasq 雖然有在聽, 但
+        #   STA 期間只有 IPv4 出口, IPv6 上游是斷的 -> 全部逾時。
+        #   症狀: ping 1.1.1.1 通、但瀏覽器完全上不了網; ipconfig/all 會看到
+        #     DNS 伺服器: fdff:fe7f:9ad6::1     <- 排在 IPv4 前面
+        #                 192.168.1.9
+        #   解法: STA 期間停掉 RA/DHCPv6, client 只拿 IPv4 DNS。
+        _ra_prev=$(uci -q get dhcp.lan.ra)
+        if [ -n "$_ra_prev" ] && [ "$_ra_prev" != "disabled" ]; then
+            echo "$_ra_prev" > /etc/myscript/.sta_ra_prev
+            echo "$(uci -q get dhcp.lan.dhcpv6)" > /etc/myscript/.sta_dhcpv6_prev
+            uci set dhcp.lan.ra='disabled'
+            uci set dhcp.lan.dhcpv6='disabled'
+            log "STA: 停用 IPv6 RA/DHCPv6(ULA 不隨 LAN IP 改, 會讓 client 拿到查不通的 IPv6 DNS)"
+        fi
         uci commit dhcp
+        /etc/init.d/odhcpd restart >/dev/null 2>&1
         /etc/init.d/dnsmasq reload >/dev/null 2>&1
         _lan_self="$_sta_ip"
     fi
@@ -531,6 +548,18 @@ sta_off_raw() {
             uci -q delete dhcp.lan.dhcp_option
             uci commit dhcp
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
+        fi
+        # ★ 還原 IPv6 RA/DHCPv6(STA 期間停掉的, 見 ~line 230)
+        #   ⚠️ 不能包在上面那個 dhcp_option 判斷裡 —— 若 option 已先被清掉,
+        #   RA 就永遠還原不了, client 從此拿不到 IPv6。
+        if [ -f /etc/myscript/.sta_ra_prev ]; then
+            uci set dhcp.lan.ra="$(cat /etc/myscript/.sta_ra_prev)"
+            _dh6=$(cat /etc/myscript/.sta_dhcpv6_prev 2>/dev/null)
+            [ -n "$_dh6" ] && uci set dhcp.lan.dhcpv6="$_dh6"
+            rm -f /etc/myscript/.sta_ra_prev /etc/myscript/.sta_dhcpv6_prev
+            uci commit dhcp
+            /etc/init.d/odhcpd restart >/dev/null 2>&1
+            log "STA 拆除: 已還原 IPv6 RA/DHCPv6"
         fi
         rm -f /etc/myscript/.sta_lan_ip_prev
         # ★ 還原 STA 期間被停掉的 wg / PBR / DBR(2026-09-28)
