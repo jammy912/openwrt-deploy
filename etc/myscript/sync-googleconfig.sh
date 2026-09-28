@@ -701,7 +701,8 @@ main() {
             /^config batmanmesh/ {
                 h=""; p=""; wl=""; wr=""; gw=""; ra=""; d1=""; d2=""; d3=""; d4=""
                 c5m=""; c5s=""; c5x=""; c2g=""; h2g=""; h5g=""; ftt=""; ftm=""
-                sbs=""; sbk=""; sbb=""; sbe=""; lgw=""
+                sbs1=""; sbk1=""; sbb1=""; sbs2=""; sbk2=""; sbb2=""
+                sbs3=""; sbk3=""; sbb3=""; sbe=""; lgw=""
                 for (i=1; i<=NF; i++) {
                     if ($i ~ /option hostname/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); h=a[n] }
                     if ($i ~ /option priority/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); p=a[n] }
@@ -724,14 +725,32 @@ main() {
                     #    比照 ch5g_main/upstream_dns 取 option 名稱之後的整段。
                     if ($i ~ /option ft_tracking_member/) { v=$i; sub(/^[[:space:]]*option[[:space:]]+ft_tracking_member[[:space:]]+/, "", v); gsub(/'"'"'/, "", v); gsub(/[,;]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); ftm=v }
                     # STA 備援(鄰居 AP): WAN 斷且 batman 無鄰居時的最後手段。
+                    # 三組候選, 依 1→2→3 順序嘗試(見 sta-backup.sh 的 sta_on)。
                     # ⚠️ ssid/key 必須「取整段」而非 a[n]: WiFi 名稱與密碼常含空白,
                     #    用 a[n] 只會取到最後一個 token(例如 "My Home WiFi" 只剩 WiFi)。
                     # ⚠️ 也不可像 ft_tracking_member 那樣把逗號分號轉空白 —— 那些字元
                     #    在密碼裡是合法內容, 轉掉就連不上。只去除前後空白與外層引號。
-                    if ($i ~ /option sta_backup_ssid/)   { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_ssid[[:space:]]+/, "", v);   gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbs=v }
-                    if ($i ~ /option sta_backup_key/)    { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key[[:space:]]+/, "", v);    gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk=v }
-                    if ($i ~ /option sta_backup_band/)   { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbb=a[n] }
-                    if ($i ~ /option sta_backup_enable/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbe=a[n] }
+                    # ★ 比對式必須帶編號且以 [[:space:]] 收尾(2026-09-28 修正):
+                    #   原本寫 /option sta_backup_ssid/ 無錨點, ssid1/2/3 三行全部 match,
+                    #   而 sub() 要剝的前綴是 "sta_backup_ssid" 緊接空白 —— 對
+                    #   "sta_backup_ssid3 Optus" 剝不掉(ssid 後面是 3 不是空白),
+                    #   於是整行原始文字被當成 SSID 存進旗標檔, 且最後 match 的
+                    #   ssid3 覆蓋掉前兩組。實測 2026-09-28 於 x60pro:
+                    #     .sta_backup_ssid 內容 = "option sta_backup_ssid3 Optus"
+                    #   而 enable=1 —— 真的斷線時必然連不上。band 當時沒壞純屬巧合
+                    #   (它用 a[n] 取最後一個 token, 剛好等於值)。
+                    if ($i ~ /option sta_backup_ssid1[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_ssid1[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbs1=v }
+                    if ($i ~ /option sta_backup_ssid2[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_ssid2[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbs2=v }
+                    if ($i ~ /option sta_backup_ssid3[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_ssid3[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbs3=v }
+                    if ($i ~ /option sta_backup_key1[[:space:]]/)   { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key1[[:space:]]+/, "", v);   gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk1=v }
+                    if ($i ~ /option sta_backup_key2[[:space:]]/)   { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key2[[:space:]]+/, "", v);   gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk2=v }
+                    if ($i ~ /option sta_backup_key3[[:space:]]/)   { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_key3[[:space:]]+/, "", v);   gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbk3=v }
+                    if ($i ~ /option sta_backup_band1[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_band1[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbb1=v }
+                    if ($i ~ /option sta_backup_band2[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_band2[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbb2=v }
+                    if ($i ~ /option sta_backup_band3[[:space:]]/)  { v=$i; sub(/^[[:space:]]*option[[:space:]]+sta_backup_band3[[:space:]]+/, "", v);  gsub(/'"'"'/, "", v); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); sbb3=v }
+                    # ⚠️ enable 也要帶 [[:space:]] 錨點: 若日後 Sheet 加了
+                    #    sta_backup_enableX 欄位, 無錨點會被誤 match 成同一個值。
+                    if ($i ~ /option sta_backup_enable[[:space:]]/) { n=split($i, a, " "); gsub(/'"'"'/, "", a[n]); sbe=a[n] }
                     # ★ STA 備援生效時, 主 gw 要改用的 LAN IP(全機隊同值)。
                     #   平常維持 192.168.1.1 不變, 只有 STA 時才切到這個值 —— 用來避開
                     #   上游 AP 的閘道位址(飯店/鄰居常見 192.168.1.1)。
@@ -745,7 +764,7 @@ main() {
                 }
                 if (tolower(h) == tolower(host)) {
                     # DNS 欄位可能含空白 (多 IP),用單引號包起來供 eval 安全取值
-                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID='"'"'" sbs "'"'"' NEW_STA_KEY='"'"'" sbk "'"'"' NEW_STA_BAND='"'"'" sbb "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"' NEW_STA_LAN_IP='"'"'" lgw "'"'"'"; exit
+                    print "NEW_PRI=" p " NEW_WIRELESS=" wl " NEW_WIRED=" wr " NEW_GWMODE=" gw " NEW_RUNAGH=" ra "  NEW_DNS1='"'"'" d1 "'"'"' NEW_DNS2='"'"'" d2 "'"'"' NEW_DNS3='"'"'" d3 "'"'"' NEW_DNS4='"'"'" d4 "'"'"' NEW_CH5G_MAIN='"'"'" c5m "'"'"' NEW_CH5G_SUB='"'"'" c5s "'"'"' NEW_CH5G_MESH='"'"'" c5x "'"'"' NEW_CH2G='"'"'" c2g "'"'"' NEW_HT2G='"'"'" h2g "'"'"' NEW_HT5G='"'"'" h5g "'"'"' NEW_FT_TRACKING_TIME='"'"'" ftt "'"'"' NEW_FT_TRACKING_MEMBER='"'"'" ftm "'"'"' NEW_STA_SSID1='"'"'" sbs1 "'"'"' NEW_STA_KEY1='"'"'" sbk1 "'"'"' NEW_STA_BAND1='"'"'" sbb1 "'"'"' NEW_STA_SSID2='"'"'" sbs2 "'"'"' NEW_STA_KEY2='"'"'" sbk2 "'"'"' NEW_STA_BAND2='"'"'" sbb2 "'"'"' NEW_STA_SSID3='"'"'" sbs3 "'"'"' NEW_STA_KEY3='"'"'" sbk3 "'"'"' NEW_STA_BAND3='"'"'" sbb3 "'"'"' NEW_STA_ENABLE='"'"'" sbe "'"'"' NEW_STA_LAN_IP='"'"'" lgw "'"'"'"; exit
                 }
             }
         ' "$TMP_DECRYPTED")
@@ -860,19 +879,80 @@ main() {
             TRUE|true|1|Y|y) NEW_STA_ENABLE=1 ;;
             *)               NEW_STA_ENABLE=0 ;;
         esac
-        case "$NEW_STA_BAND" in
-            2g|2G|2.4g|2.4G) NEW_STA_BAND=2g ;;
-            5g|5G)           NEW_STA_BAND=5g ;;
-            *)               NEW_STA_BAND=2g ;;   # 預設 2.4G(穿透好, 不佔主力 5G)
+        # band 正規化(三組各自處理)。
+        # ⚠️ 不可靜默 fallback: 原本 *) 一律變 2g, 使用者填 "5"(想連 5G)會被
+        #    默默改成 2g, 然後在飯店裡掃不到目標 AP —— 那是最難查的一種錯。
+        #    改為「非法值記 log 並視為 2g」, 至少 logread 查得到。
+        # ⚠️ log 必須導到 stderr: 本函式的 stdout 就是回傳值(被 $() 取用),
+        #    log 寫 stdout 會讓警告訊息整串被當成 band 值寫進旗標檔。
+        #    實測 2026-09-28: .sta_backup_ap 第二行變成 "2g" 第三行是整串中文 log。
+        # ★ auto = 由 sta-backup.sh 掃描決定在哪個 band(兩個 radio 都掃)。
+        #   比手填可靠: 手填錯 band 會掃不到目標 AP, 而掃描本來就要做。
+        _norm_band() {
+            case "$1" in
+                2g|2G|2.4g|2.4G) echo 2g ;;
+                5g|5G)           echo 5g ;;
+                auto|AUTO|Auto)  echo auto ;;
+                "")              echo 2g ;;      # 未填 = 預設 2.4G(穿透好, 不佔主力 5G)
+                *)               log "⚠️ sta_backup_band 值不合法, 當成 2g: [$1]" >&2; echo 2g ;;
+            esac
+        }
+        NEW_STA_BAND1=$(_norm_band "$NEW_STA_BAND1")
+        NEW_STA_BAND2=$(_norm_band "$NEW_STA_BAND2")
+        NEW_STA_BAND3=$(_norm_band "$NEW_STA_BAND3")
+
+        # ★ 三組候選寫成單一清單檔 .sta_backup_ap(2026-09-28)
+        #   格式: 每行一組, 以 TAB 分三欄 —— band<TAB>ssid<TAB>key
+        #   為什麼用 TAB 而不是 / 或 ; 或空白:
+        #     WiFi 密碼與 SSID 裡 / ; , : 空白 全都是合法字元, 任何一個當分隔符
+        #     都可能在密碼中間出現 → 靜默解析錯位 → 連不上(而且是 WAN 全斷、
+        #     人在外面時才發作)。TAB 是 Sheet 欄位內容不可能含有的字元。
+        #   ⚠️ 只寫「有 ssid 的組」: 空組留著會讓 sta_on() 白跑一輪掃描。
+        #   ⚠️ 權限 600 —— 整個檔案都是鄰居/飯店的 WiFi 密碼。
+        _ap_new=""
+        for _n in 1 2 3; do
+            eval "_s=\$NEW_STA_SSID$_n; _k=\$NEW_STA_KEY$_n; _b=\$NEW_STA_BAND$_n"
+            [ -n "$_s" ] || continue
+            _ap_new="${_ap_new}${_b}	${_s}	${_k}
+"
+        done
+        _ap_f="/etc/myscript/.sta_backup_ap"
+        _ap_cur=$(cat "$_ap_f" 2>/dev/null)
+        if [ "$_ap_new" != "$_ap_cur" ]; then
+            # ⚠️ umask 只影響「新建」的檔案 —— 檔案已存在時權限不會改, 故一律
+            #    再 chmod 一次。這個檔整份都是 WiFi 密碼, 不可留 644。
+            ( umask 077; printf '%s' "$_ap_new" > "$_ap_f" )
+            chmod 600 "$_ap_f" 2>/dev/null
+            # ⚠️ 不要把密碼寫進 log —— 只記組數與 SSID 名稱
+            _ap_names=$(printf '%s' "$_ap_new" | awk -F'\t' 'NF>=2 {printf "%s[%s] ", $1, $2}')
+            log "🔧 sta_backup_ap: 已更新 $(printf '%s' "$_ap_new" | grep -c . ) 組 → ${_ap_names:-(空)} (hostname=$MY_HOSTNAME)"
+        fi
+
+        # ★ 同時維持舊的三個單組旗標 = 第 1 組的值。
+        #   為什麼保留: sta-backup.sh 若尚未更新(部署有時差), 讀舊旗標仍能運作;
+        #   status 輸出與其他腳本的引用也不會一次全斷。
+        NEW_STA_SSID="$NEW_STA_SSID1"
+        NEW_STA_KEY="$NEW_STA_KEY1"
+        # ⚠️ 舊旗標不可寫 auto —— 舊版 pick_radio() 只認 2g/5g, 收到 auto 會
+        #    「找不到 radio」而整個啟用失敗。降級成 2g(舊版的預設)。
+        case "$NEW_STA_BAND1" in
+            auto) NEW_STA_BAND=2g ;;
+            *)    NEW_STA_BAND="$NEW_STA_BAND1" ;;
         esac
-        for _pair in "sta_backup_ssid:$NEW_STA_SSID" "sta_backup_key:$NEW_STA_KEY" \
-                     "sta_backup_band:$NEW_STA_BAND" "sta_backup_enable:$NEW_STA_ENABLE"; do
-            _name="${_pair%%:*}"
-            _val="${_pair#*:}"
+        # ⚠️ 迴圈分隔符改用 TAB 而非 ':' —— SSID/密碼含冒號會被 ${_pair%%:*}
+        #    切錯(例如密碼 "a:b" 會變成 name=sta_backup_key 值=a)。
+        printf '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
+            "sta_backup_ssid"   "$NEW_STA_SSID" \
+            "sta_backup_key"    "$NEW_STA_KEY" \
+            "sta_backup_band"   "$NEW_STA_BAND" \
+            "sta_backup_enable" "$NEW_STA_ENABLE" \
+        | while IFS="$(printf '\t')" read -r _name _val; do
             _f="/etc/myscript/.${_name}"
             _cur=$(cat "$_f" 2>/dev/null)
             if [ "$_val" != "$_cur" ]; then
                 ( umask 077; echo "$_val" > "$_f" )
+                # ⚠️ 同上: umask 對已存在的檔案無效, key 檔必須明確 chmod。
+                [ "$_name" = "sta_backup_key" ] && chmod 600 "$_f" 2>/dev/null
                 # ⚠️ 不要把密碼寫進 log
                 if [ "$_name" = "sta_backup_key" ]; then
                     log "🔧 ${_name}: 已更新 (${#_val} 字元, hostname=$MY_HOSTNAME)"

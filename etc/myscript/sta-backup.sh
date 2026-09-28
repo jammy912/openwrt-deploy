@@ -8,10 +8,15 @@
 #   sta-backup.sh off        # 手動強制關閉並還原
 #
 # 設定來源 (Sheet 的 config batmanmesh → sync-googleconfig.sh 落檔):
+#   /etc/myscript/.sta_backup_ap      ★ 候選清單, 每行 band<TAB>ssid<TAB>key (600)
+#                                       來自 Sheet 的 sta_backup_{ssid,key,band}{1,2,3}
+#                                       依行序 1→2→3 試, 第一個連上的就用
+#                                       band 可填 2g / 5g / auto(auto=掃描決定)
+#   /etc/myscript/.sta_backup_enable  1=啟用自動判斷, 0=完全不動作(預設)
+#   -- 以下為舊的單組旗標, 僅在 .sta_backup_ap 不存在時當退路(向後相容) --
 #   /etc/myscript/.sta_backup_ssid    上游 AP 名稱
 #   /etc/myscript/.sta_backup_key     密碼 (600)
 #   /etc/myscript/.sta_backup_band    2g / 5g (預設 2g)
-#   /etc/myscript/.sta_backup_enable  1=啟用自動判斷, 0=完全不動作(預設)
 #
 # 觸發條件 (三者同時成立, 且連續 FAIL_NEED 次):
 #   1. WAN 沒有 IP, 或有 IP 但 ping 不通
@@ -44,6 +49,13 @@ SSID_F="$CFG_DIR/.sta_backup_ssid"
 KEY_F="$CFG_DIR/.sta_backup_key"
 BAND_F="$CFG_DIR/.sta_backup_band"
 ENABLE_F="$CFG_DIR/.sta_backup_enable"
+# ★ 多組候選清單(2026-09-28): 每行一組, TAB 分三欄 band<TAB>ssid<TAB>key
+#   由 sync-googleconfig.sh 從 Sheet 的 sta_backup_{ssid,key,band}{1,2,3} 落檔。
+#   依行序 1→2→3 嘗試, 第一個「掃到得且連得上」的就用。
+#   ⚠️ 用 TAB 而非 / ; , : 空白 —— 那些字元在 WiFi 密碼與 SSID 裡都合法,
+#     當分隔符會靜默解析錯位, 而且只在真的斷線(人在外面)時才發作。
+#   ⚠️ 不存在或空 = 退回讀舊的三個單組旗標(部署時差 / 舊 Sheet 相容)。
+AP_F="$CFG_DIR/.sta_backup_ap"
 
 STATE_F="/tmp/.sta_backup_state"       # active / idle
 # ★ 自動解套計時器(落 flash, 跨重開有效):
@@ -135,11 +147,73 @@ mesh_ok() {
 }
 
 # ---------- 取得要用的 radio ----------
+# 用法: pick_radio [band]   band 省略時讀舊旗標 .sta_backup_band(預設 2g)
 pick_radio() {
-    _want=$(_read "$BAND_F"); [ -z "$_want" ] && _want=2g
+    _want="$1"
+    [ -z "$_want" ] && _want=$(_read "$BAND_F")
+    [ -z "$_want" ] && _want=2g
     for _r in radio0 radio1 radio2 radio3; do
         _b=$(uci -q get wireless.$_r.band 2>/dev/null)
         [ "$_b" = "$_want" ] && { echo "$_r"; return 0; }
+    done
+    return 1
+}
+
+# ---------- 候選清單 ----------
+# 輸出: 每行 band<TAB>ssid<TAB>key
+# 優先讀 AP_F; 沒有就用舊的三個單組旗標組一行出來(向後相容)。
+ap_list() {
+    if [ -s "$AP_F" ]; then
+        # 只輸出至少有 ssid(第 2 欄非空)的行
+        awk -F'\t' 'NF>=2 && $2 != "" {print}' "$AP_F" 2>/dev/null
+        return 0
+    fi
+    _ls=$(_read "$SSID_F")
+    [ -n "$_ls" ] || return 0
+    _lb=$(_read "$BAND_F"); [ -z "$_lb" ] && _lb=2g
+    printf '%s\t%s\t%s\n' "$_lb" "$_ls" "$(_read "$KEY_F")"
+}
+
+# ---------- 掃描: 目標 SSID 在不在 ----------
+# 用法: scan_find <ssid> <band>   band=auto 時兩個 radio 都掃
+# 輸出: 掃到的話印出該 radio 名稱並 return 0; 沒掃到 return 1
+# ★ 為什麼一定要先掃: sta_try_one() 連不上時要等 45 秒 timeout 才回滾。三組
+#   候選若都硬試就是 135 秒全家沒網。掃描成本實測便宜得多 ——
+#   2026-09-28 於 x60pro: phy0(2.4G) 2 秒掃到 61 個 SSID, phy1(5G) 5 秒。
+# ⚠️ 但「掃不到」絕不等於「不存在」: 同一次實測 phy1-ap0 掃到 0 個 SSID
+#   (正在當 AP 用的 radio 掃描結果可能不含所有頻道)。若只信掃描結果,
+#   5G 的候選會永遠不被嘗試 —— 故 sta_on() 必須保留「盲試」第二段。
+scan_find() {
+    _sf_ssid="$1"; _sf_band="$2"
+    [ -n "$_sf_ssid" ] || return 1
+    command -v iwinfo >/dev/null 2>&1 || return 1
+    case "$_sf_band" in
+        auto) _sf_bands="2g 5g" ;;
+        *)    _sf_bands="$_sf_band" ;;
+    esac
+    for _sf_b in $_sf_bands; do
+        _sf_r=$(pick_radio "$_sf_b") || continue
+        # radio 上任一個既有 iface 的 device 名稱都可拿來掃。
+        # ★ 用 ubus 取(實測 2026-09-28 於 x60pro: radio0→phy0-ap0, radio1→phy1-ap0)。
+        # ⚠️ 不要試圖從 `iwinfo` 無參數輸出反查 radio —— 它只印 "PHY name: phy0",
+        #   完全沒有 radioN 字樣, 任何比對 radioN 的 awk 都永遠不會 match。
+        _sf_dev=$(ubus call network.wireless status 2>/dev/null \
+            | jsonfilter -e "@[\"$_sf_r\"].interfaces[0].ifname" 2>/dev/null)
+        # fallback: 由 radioN 推 phyN, 取該 phy 第一個介面
+        if [ -z "$_sf_dev" ]; then
+            _sf_phy="phy${_sf_r#radio}"
+            _sf_dev=$(iwinfo 2>/dev/null | awk -v p="$_sf_phy" '
+                $2 == "ESSID:" { dev=$1 }
+                /PHY name:/ && $NF == p { print dev; exit }')
+        fi
+        [ -z "$_sf_dev" ] && continue
+        # ⚠️ 精準比對整個 ESSID 欄位, 不可用 grep 子字串 —— "IOT" 會誤中 "IOT-5G"
+        if iwinfo "$_sf_dev" scan 2>/dev/null \
+           | sed -n 's/^[[:space:]]*ESSID:[[:space:]]*"\(.*\)"$/\1/p' \
+           | grep -qxF "$_sf_ssid"; then
+            echo "$_sf_r"
+            return 0
+        fi
     done
     return 1
 }
@@ -418,14 +492,23 @@ _net_of() {
 }
 
 # ---------- 啟用 STA ----------
-sta_on() {
-    _ssid=$(_read "$SSID_F")
-    _key=$(_read "$KEY_F")
+# ---------- 嘗試單一組候選 ----------
+# 用法: sta_try_one <band> <ssid> <key> [radio]
+#   radio 省略時由 band 決定(band=auto 且沒給 radio 視為錯誤 —— 呼叫端
+#   應該已用 scan_find 決定好 radio)。
+# 回傳: 0=成功(已連上且路由建好), 1=失敗(已自行回滾)
+sta_try_one() {
+    _band="$1"; _ssid="$2"; _key="$3"; _radio="$4"
     if [ -z "$_ssid" ]; then
-        log "❌ 無法啟用: .sta_backup_ssid 是空的"
+        log "❌ 無法啟用: SSID 是空的"
         return 1
     fi
-    _radio=$(pick_radio) || { log "❌ 找不到 band=$(_read "$BAND_F") 的 radio"; return 1; }
+    if [ -z "$_radio" ]; then
+        case "$_band" in
+            auto) log "❌ band=auto 但未指定 radio(掃描未命中), 跳過 [$_ssid]"; return 1 ;;
+        esac
+        _radio=$(pick_radio "$_band") || { log "❌ 找不到 band=$_band 的 radio"; return 1; }
+    fi
 
     # 已經在了就不重複做
     if [ -n "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ]; then
@@ -523,7 +606,9 @@ sta_on() {
     if [ "$_got" = "0" ]; then
         log "❌ ${_w}s 內未取得 IP(可能連不上 $_ssid 或密碼錯), 還原設定"
         sta_off_raw
-        push_notify "STA備援啟用失敗: ${_w}s 內未取得 IP, 檢查 [$_ssid] 名稱/密碼/訊號"
+        # ⚠️ 不在這裡推播 —— 多組候選時每組失敗各推一次會連發三則。
+        #   把原因記進 $STA_FAILMSG, 由 sta_on() 在「全部都失敗」時推一則。
+        STA_FAILMSG="${_w}s 內未取得 IP, 檢查 [$_ssid] 名稱/密碼/訊號"
         return 1
     fi
 
@@ -537,10 +622,11 @@ sta_on() {
         _gwchk=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
         _lanchk=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
         sta_off_raw
+        # ⚠️ 同上: 原因留給 sta_on() 統一推播, 避免多組候選連發。
         if [ -n "$_gwchk" ] && [ "$_gwchk" = "$_lanchk" ]; then
-            push_notify "STA備援無法使用: 上游 [$_ssid] 的閘道($_gwchk)與本機 LAN IP 相同, 網段衝突無解。需把自家 LAN 或上游其一改網段。"
+            STA_FAILMSG="上游 [$_ssid] 的閘道($_gwchk)與本機 LAN IP 相同, 網段衝突無解。需把自家 LAN 或上游其一改網段。"
         else
-            push_notify "STA備援啟用失敗: 已連上 [$_ssid] 但路由隔離失敗, 已回滾(避免失聯)"
+            STA_FAILMSG="已連上 [$_ssid] 但路由隔離失敗, 已回滾(避免失聯)"
         fi
         return 1
     fi
@@ -550,6 +636,84 @@ sta_on() {
     _via=$(ip route show table "$STA_TABLE" 2>/dev/null | awk '/^default/{print $3}')
     push_notify "STA備援已啟用: 連上 [$_ssid] 取得 ${_shownet} (閘道 ${_via:-?}, WAN 與 mesh 皆無出路)"
     return 0
+}
+
+# ---------- 啟用 STA(依序試多組候選) ----------
+# ★ 依 .sta_backup_ap 的行序 1→2→3 嘗試, 第一個成功的就停(使用者自己排優先權)。
+# ★ 兩段式: 先「只試掃到的」, 全都沒掃到才「盲試」沒掃到的那些。
+#   為什麼分兩段: iwinfo scan 對正在當 AP 用的 radio 可能掃不全(頻道受限),
+#   「掃不到」不等於「不存在」。若只信掃描結果, 會在 AP 其實在場時完全不試。
+#   但也不能無條件盲試每一組 —— 每組失敗要 45 秒, 三組就是 135 秒全家沒網。
+#   折衷: 掃到的優先(快且準), 沒掃到的當退路(慢但不放棄)。
+sta_on() {
+    # 已經在了就不重複做(在進迴圈前先檔掉, 省掉掃描)
+    if [ -n "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ]; then
+        log "STA 介面已存在, 不重複建立"
+        return 0
+    fi
+
+    _list=$(ap_list)
+    if [ -z "$_list" ]; then
+        log "❌ 無法啟用: 候選清單是空的(.sta_backup_ap 與 .sta_backup_ssid 都沒有值)"
+        return 1
+    fi
+    _total=$(printf '%s\n' "$_list" | grep -c .)
+    log "STA 候選共 $_total 組, 開始掃描"
+
+    STA_FAILMSG=""
+    _tried=0
+    _unscanned=""
+
+    # ── 第一段: 掃到的才試 ──
+    _i=0
+    while IFS='	' read -r _b _s _k; do
+        [ -n "$_s" ] || continue
+        _i=$(( _i + 1 ))
+        [ -z "$_b" ] && _b=2g
+        if _r=$(scan_find "$_s" "$_b"); then
+            log "組$_i [$_s] band=$_b: 掃到(radio=$_r), 嘗試連線"
+            _tried=$(( _tried + 1 ))
+            if sta_try_one "$_b" "$_s" "$_k" "$_r"; then
+                log "✅ 組$_i [$_s] 連線成功"
+                return 0
+            fi
+            log "組$_i [$_s] 失敗: ${STA_FAILMSG:-未知原因}"
+        else
+            log "組$_i [$_s] band=$_b: 未掃到, 暫時跳過"
+            # ⚠️ 用 TAB 保持欄位完整(SSID/密碼可能含空白)
+            _unscanned="${_unscanned}${_b}	${_s}	${_k}
+"
+        fi
+    done <<EOF
+$_list
+EOF
+
+    # ── 第二段: 全都沒連上, 盲試沒掃到的 ──
+    if [ -n "$_unscanned" ]; then
+        log "掃到的候選都不成(或都沒掃到), 改盲試未掃到的組"
+        _j=0
+        while IFS='	' read -r _b _s _k; do
+            [ -n "$_s" ] || continue
+            _j=$(( _j + 1 ))
+            [ -z "$_b" ] && _b=2g
+            # band=auto 且沒掃到 → 無從得知該用哪個 radio, 退回 2g(較可能)
+            case "$_b" in auto) _b=2g ;; esac
+            log "盲試$_j [$_s] band=$_b"
+            _tried=$(( _tried + 1 ))
+            if sta_try_one "$_b" "$_s" "$_k" ""; then
+                log "✅ 盲試$_j [$_s] 連線成功"
+                return 0
+            fi
+            log "盲試$_j [$_s] 失敗: ${STA_FAILMSG:-未知原因}"
+        done <<EOF
+$_unscanned
+EOF
+    fi
+
+    # 全部都失敗 —— 推一則, 不是每組一則
+    log "❌ $_total 組候選全部失敗(實際嘗試 $_tried 組)"
+    push_notify "STA備援啟用失敗: $_total 組候選全試過都連不上。最後一組原因: ${STA_FAILMSG:-未知}"
+    return 1
 }
 
 # ---------- 關閉 STA 並還原 ----------
@@ -698,9 +862,14 @@ sta_off() {
 show_status() {
     echo "=== STA 備援現況 ==="
     echo "  enable   : $(_read "$ENABLE_F")  (1=自動判斷啟用, 0=完全不動作)"
-    echo "  ssid     : $(_read "$SSID_F")"
-    echo "  key      : $([ -s "$KEY_F" ] && echo "已設定($(wc -c < "$KEY_F" | tr -d ' ') bytes)" || echo '(空)')"
-    echo "  band     : $(_read "$BAND_F")  → radio: $(pick_radio 2>/dev/null || echo '找不到')"
+    # ★ 候選清單(不印密碼, 只印長度)
+    echo "  候選組數 : $(ap_list | grep -c .)  (來源: $([ -s "$AP_F" ] && echo "$AP_F" || echo '舊單組旗標'))"
+    ap_list | awk -F'\t' 'NF>=2 && $2!="" {
+        printf "    %d) band=%-5s ssid=[%s] key=%s\n", ++n, $1, $2, ($3=="" ? "(無密碼)" : "已設定(" length($3) " 字元)")
+    }'
+    echo "  ssid(舊) : $(_read "$SSID_F")"
+    echo "  key(舊)  : $([ -s "$KEY_F" ] && echo "已設定($(wc -c < "$KEY_F" | tr -d ' ') bytes)" || echo '(空)')"
+    echo "  band(舊) : $(_read "$BAND_F")  → radio: $(pick_radio 2>/dev/null || echo '找不到')"
     echo "  state    : $(_read "$STATE_F")"
     echo "  失敗計數 : $(_cnt_get "$FAILCNT_F") / $FAIL_NEED"
     echo "  正常計數 : $(_cnt_get "$OKCNT_F") / $OK_NEED"
