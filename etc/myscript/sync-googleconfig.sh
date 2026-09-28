@@ -928,37 +928,22 @@ main() {
             log "🔧 sta_backup_ap: 已更新 $(printf '%s' "$_ap_new" | grep -c . ) 組 → ${_ap_names:-(空)} (hostname=$MY_HOSTNAME)"
         fi
 
-        # ★ 同時維持舊的三個單組旗標 = 第 1 組的值。
-        #   為什麼保留: sta-backup.sh 若尚未更新(部署有時差), 讀舊旗標仍能運作;
-        #   status 輸出與其他腳本的引用也不會一次全斷。
-        NEW_STA_SSID="$NEW_STA_SSID1"
-        NEW_STA_KEY="$NEW_STA_KEY1"
-        # ⚠️ 舊旗標不可寫 auto —— 舊版 pick_radio() 只認 2g/5g, 收到 auto 會
-        #    「找不到 radio」而整個啟用失敗。降級成 2g(舊版的預設)。
-        case "$NEW_STA_BAND1" in
-            auto) NEW_STA_BAND=2g ;;
-            *)    NEW_STA_BAND="$NEW_STA_BAND1" ;;
-        esac
-        # ⚠️ 迴圈分隔符改用 TAB 而非 ':' —— SSID/密碼含冒號會被 ${_pair%%:*}
-        #    切錯(例如密碼 "a:b" 會變成 name=sta_backup_key 值=a)。
-        printf '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
-            "sta_backup_ssid"   "$NEW_STA_SSID" \
-            "sta_backup_key"    "$NEW_STA_KEY" \
-            "sta_backup_band"   "$NEW_STA_BAND" \
-            "sta_backup_enable" "$NEW_STA_ENABLE" \
-        | while IFS="$(printf '\t')" read -r _name _val; do
-            _f="/etc/myscript/.${_name}"
-            _cur=$(cat "$_f" 2>/dev/null)
-            if [ "$_val" != "$_cur" ]; then
-                ( umask 077; echo "$_val" > "$_f" )
-                # ⚠️ 同上: umask 對已存在的檔案無效, key 檔必須明確 chmod。
-                [ "$_name" = "sta_backup_key" ] && chmod 600 "$_f" 2>/dev/null
-                # ⚠️ 不要把密碼寫進 log
-                if [ "$_name" = "sta_backup_key" ]; then
-                    log "🔧 ${_name}: 已更新 (${#_val} 字元, hostname=$MY_HOSTNAME)"
-                else
-                    log "🔧 ${_name}: [$_cur] → [$_val] (hostname=$MY_HOSTNAME)"
-                fi
+        # ★ enable 是功能開關(不是候選設定), 獨立一個檔照舊。
+        _en_f="/etc/myscript/.sta_backup_enable"
+        _en_cur=$(cat "$_en_f" 2>/dev/null)
+        if [ "$NEW_STA_ENABLE" != "$_en_cur" ]; then
+            echo "$NEW_STA_ENABLE" > "$_en_f"
+            log "🔧 sta_backup_enable: [$_en_cur] → [$NEW_STA_ENABLE] (hostname=$MY_HOSTNAME)"
+        fi
+
+        # ★ 單組舊旗標(.sta_backup_ssid/.key/.band)已廢除(2026-09-28)。
+        #   候選設定一律走 .sta_backup_ap(見上面)。這裡主動清除殘留檔 ——
+        #   ⚠️ 不清會留下含密碼的 644/600 檔案在 flash 上, 而且日後有人
+        #     誤讀舊旗標會拿到「只有第 1 組」的過期設定, 比沒有更危險。
+        for _old in sta_backup_ssid sta_backup_key sta_backup_band; do
+            _of="/etc/myscript/.${_old}"
+            if [ -f "$_of" ]; then
+                rm -f "$_of" 2>/dev/null && log "🧹 已移除廢棄旗標: .${_old}(改用 .sta_backup_ap)"
             fi
         done
 

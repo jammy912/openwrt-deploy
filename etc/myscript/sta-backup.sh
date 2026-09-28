@@ -13,10 +13,10 @@
 #                                       依行序 1→2→3 試, 第一個連上的就用
 #                                       band 可填 2g / 5g / auto(auto=掃描決定)
 #   /etc/myscript/.sta_backup_enable  1=啟用自動判斷, 0=完全不動作(預設)
-#   -- 以下為舊的單組旗標, 僅在 .sta_backup_ap 不存在時當退路(向後相容) --
-#   /etc/myscript/.sta_backup_ssid    上游 AP 名稱
-#   /etc/myscript/.sta_backup_key     密碼 (600)
-#   /etc/myscript/.sta_backup_band    2g / 5g (預設 2g)
+#
+# ⚠️ 舊的單組旗標 .sta_backup_{ssid,key,band} 已於 2026-09-28 廢除。
+#   候選設定唯一來源是 .sta_backup_ap; sync-googleconfig.sh 會主動清除殘留檔。
+#   別再加 fallback 回去讀它們 —— 那會拿到「只有第 1 組」的過期設定。
 #
 # 觸發條件 (三者同時成立, 且連續 FAIL_NEED 次):
 #   1. WAN 沒有 IP, 或有 IP 但 ping 不通
@@ -45,16 +45,13 @@ PUSH_NAMES="${PUSH_NAMES:-admin}"
 
 TAG="sta-backup"
 CFG_DIR="/etc/myscript"
-SSID_F="$CFG_DIR/.sta_backup_ssid"
-KEY_F="$CFG_DIR/.sta_backup_key"
-BAND_F="$CFG_DIR/.sta_backup_band"
 ENABLE_F="$CFG_DIR/.sta_backup_enable"
 # ★ 多組候選清單(2026-09-28): 每行一組, TAB 分三欄 band<TAB>ssid<TAB>key
 #   由 sync-googleconfig.sh 從 Sheet 的 sta_backup_{ssid,key,band}{1,2,3} 落檔。
 #   依行序 1→2→3 嘗試, 第一個「掃到得且連得上」的就用。
 #   ⚠️ 用 TAB 而非 / ; , : 空白 —— 那些字元在 WiFi 密碼與 SSID 裡都合法,
 #     當分隔符會靜默解析錯位, 而且只在真的斷線(人在外面)時才發作。
-#   ⚠️ 不存在或空 = 退回讀舊的三個單組旗標(部署時差 / 舊 Sheet 相容)。
+#   ⚠️ 這是候選設定的唯一來源(2026-09-28 起)。不存在或空 = 沒設定, 不啟用。
 AP_F="$CFG_DIR/.sta_backup_ap"
 
 STATE_F="/tmp/.sta_backup_state"       # active / idle
@@ -147,10 +144,9 @@ mesh_ok() {
 }
 
 # ---------- 取得要用的 radio ----------
-# 用法: pick_radio [band]   band 省略時讀舊旗標 .sta_backup_band(預設 2g)
+# 用法: pick_radio [band]   band 省略時用預設 2g
 pick_radio() {
     _want="$1"
-    [ -z "$_want" ] && _want=$(_read "$BAND_F")
     [ -z "$_want" ] && _want=2g
     for _r in radio0 radio1 radio2 radio3; do
         _b=$(uci -q get wireless.$_r.band 2>/dev/null)
@@ -161,17 +157,12 @@ pick_radio() {
 
 # ---------- 候選清單 ----------
 # 輸出: 每行 band<TAB>ssid<TAB>key
-# 優先讀 AP_F; 沒有就用舊的三個單組旗標組一行出來(向後相容)。
+# ⚠️ 唯一來源是 AP_F(.sta_backup_ap)。單組舊旗標已於 2026-09-28 廢除 ——
+#   不再 fallback。沒有這個檔就是「沒設定」, 由呼叫端報錯, 不要猜。
 ap_list() {
-    if [ -s "$AP_F" ]; then
-        # 只輸出至少有 ssid(第 2 欄非空)的行
-        awk -F'\t' 'NF>=2 && $2 != "" {print}' "$AP_F" 2>/dev/null
-        return 0
-    fi
-    _ls=$(_read "$SSID_F")
-    [ -n "$_ls" ] || return 0
-    _lb=$(_read "$BAND_F"); [ -z "$_lb" ] && _lb=2g
-    printf '%s\t%s\t%s\n' "$_lb" "$_ls" "$(_read "$KEY_F")"
+    [ -s "$AP_F" ] || return 0
+    # 只輸出至少有 ssid(第 2 欄非空)的行
+    awk -F'\t' 'NF>=2 && $2 != "" {print}' "$AP_F" 2>/dev/null
 }
 
 # ---------- 掃描: 目標 SSID 在不在 ----------
@@ -654,7 +645,7 @@ sta_on() {
 
     _list=$(ap_list)
     if [ -z "$_list" ]; then
-        log "❌ 無法啟用: 候選清單是空的(.sta_backup_ap 與 .sta_backup_ssid 都沒有值)"
+        log "❌ 無法啟用: 候選清單是空的($AP_F 不存在或無有效行)。檢查 Sheet 的 sta_backup_ssid1/2/3 是否有填, 以及 sync-googleconfig 是否跑過。"
         return 1
     fi
     _total=$(printf '%s\n' "$_list" | grep -c .)
@@ -867,9 +858,7 @@ show_status() {
     ap_list | awk -F'\t' 'NF>=2 && $2!="" {
         printf "    %d) band=%-5s ssid=[%s] key=%s\n", ++n, $1, $2, ($3=="" ? "(無密碼)" : "已設定(" length($3) " 字元)")
     }'
-    echo "  ssid(舊) : $(_read "$SSID_F")"
-    echo "  key(舊)  : $([ -s "$KEY_F" ] && echo "已設定($(wc -c < "$KEY_F" | tr -d ' ') bytes)" || echo '(空)')"
-    echo "  band(舊) : $(_read "$BAND_F")  → radio: $(pick_radio 2>/dev/null || echo '找不到')"
+    echo "  radio    : 2g→$(pick_radio 2g 2>/dev/null || echo '無')  5g→$(pick_radio 5g 2>/dev/null || echo '無')"
     echo "  state    : $(_read "$STATE_F")"
     echo "  失敗計數 : $(_cnt_get "$FAILCNT_F") / $FAIL_NEED"
     echo "  正常計數 : $(_cnt_get "$OKCNT_F") / $OK_NEED"
