@@ -772,6 +772,23 @@ sta_ok() {
     [ "$(_read "$STATE_F")" = "active" ] || return 1
     _sdev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
     [ -z "$_sdev" ] && return 1
+    # ⚠️ 真兇 2026-09-28: 原本只用 ping 判定, 但上游 AP(鄰居/飯店)很常擋 ICMP
+    #   —— 實測第九輪: STA 10:17:04 起來、10:17:05 DNS 接手成功、http=204 一路
+    #   正常, 但 10:18:43 起連續「判定無出路」, 45 秒內就被拆掉退回 .1。
+    #   前幾輪也反覆看到同一組合: ping=N 但 http=204。
+    #   ★ 改成「HTTP 或 ICMP 任一通就算活著」, HTTP 排前面 —— 它才是「真的
+    #     能上網」的判準, ICMP 只是輔助。
+    # ⚠️ 前兩發刻意用「純 IP」而非域名: 若拿域名當判準, DNS 一壞 sta_ok 就
+    #   跟著失敗 -> 拆 STA -> DNS 更沒機會恢復, 是循環依賴。
+    #   實測 2026-09-28 哪些 IP 的 80 埠真的有回應(exit=0 才算):
+    #     1.1.1.1 -> 301 ✅   1.0.0.1 -> 301 ✅   223.5.5.5 -> 404 ✅(中國,不用)
+    #     8.8.8.8 -> exit 28 ❌   9.9.9.9 -> exit 28 ❌   (它們不開 HTTP)
+    #   ★ 判斷看 curl 的 exit code 不是 http_code —— 301/404 都代表「連得上」。
+    curl -s -o /dev/null --interface "$_sdev" --max-time 6 http://1.1.1.1/ 2>/dev/null && return 0
+    curl -s -o /dev/null --interface "$_sdev" --max-time 6 http://1.0.0.1/ 2>/dev/null && return 0
+    # 域名版當第三層: 上游若用透明代理擋裸 IP, 域名可能反而通
+    curl -s -o /dev/null --interface "$_sdev" --max-time 6 \
+         http://www.gstatic.com/generate_204 2>/dev/null && return 0
     ping -c 1 -W 3 -I "$_sdev" 1.1.1.1 >/dev/null 2>&1 && return 0
     ping -c 1 -W 3 -I "$_sdev" 8.8.8.8 >/dev/null 2>&1 && return 0
     return 1
