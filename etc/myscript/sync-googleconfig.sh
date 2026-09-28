@@ -897,24 +897,75 @@ main() {
                 *)               log "⚠️ sta_backup_band 值不合法, 當成 2g: [$1]" >&2; echo 2g ;;
             esac
         }
-        NEW_STA_BAND1=$(_norm_band "$NEW_STA_BAND1")
-        NEW_STA_BAND2=$(_norm_band "$NEW_STA_BAND2")
-        NEW_STA_BAND3=$(_norm_band "$NEW_STA_BAND3")
-
-        # ★ 三組候選寫成單一清單檔 .sta_backup_ap(2026-09-28)
+        # ★ 候選清單 .sta_backup_ap(2026-09-28)
         #   格式: 每行一組, 以 TAB 分三欄 —— band<TAB>ssid<TAB>key
-        #   為什麼用 TAB 而不是 / 或 ; 或空白:
-        #     WiFi 密碼與 SSID 裡 / ; , : 空白 全都是合法字元, 任何一個當分隔符
-        #     都可能在密碼中間出現 → 靜默解析錯位 → 連不上(而且是 WAN 全斷、
-        #     人在外面時才發作)。TAB 是 Sheet 欄位內容不可能含有的字元。
-        #   ⚠️ 只寫「有 ssid 的組」: 空組留著會讓 sta_on() 白跑一輪掃描。
-        #   ⚠️ 權限 600 —— 整個檔案都是鄰居/飯店的 WiFi 密碼。
+        #   為什麼落檔用 TAB: WiFi 密碼與 SSID 裡 / ; , : | 空白 全都是合法字元,
+        #     拿任何一個當落檔分隔符都可能在密碼中間出現 → 靜默解析錯位。
+        #     TAB 是 Sheet 欄位內容不可能含有的字元。
+        #
+        # ★ Sheet 端每個編號欄位可再用 `|` 塞多筆(2026-09-28 加):
+        #     option sta_backup_ssid1 'IOT|cht-52-1F'
+        #     option sta_backup_key1  'pass1|pass2'
+        #     option sta_backup_band1 '2g|5g'
+        #   展開順序: 先欄位編號(1→2→3), 同欄位內再依 `|` 左到右。
+        #   ⚠️ `|` 在 WiFi 密碼裡是合法字元 —— 含 `|` 的密碼必須單獨放一個
+        #     編號欄位(不要跟別人用 `|` 擠在同一欄), 否則會被切錯而靜默連不上。
+        #     這是使用者明確接受的取捨(2026-09-28: 「特殊我會放單筆」)。
+        #   ⚠️ 筆數不符時以 ssid 為準: key 不足補空字串(視為開放網路,
+        #     encryption=none —— 飯店/公共 WiFi 常態), band 不足沿用最後一個值。
+        #     不可反過來讓 key/band 的筆數決定組數, 那會靜默少掉候選。
+        #
+        # ⚠️ 只寫「有 ssid 的組」: 空組留著會讓 sta_on() 白跑一輪掃描。
+        # ⚠️ 權限 600 —— 整個檔案都是鄰居/飯店的 WiFi 密碼。
+        #
+        # _nth <字串> <第幾筆>  取以 `|` 分隔的第 n 筆(1-based), 超出範圍回空
+        # ⚠️ 用 awk 而非 cut -d'|' —— busybox cut 的 -d 只吃單字元沒問題,
+        #   但 SSID/密碼可能含 cut 會有疑慮的字元, awk 的欄位切割較可控。
+        #   同時保留前後空白以外的原樣內容(只 trim 兩端, 不動中間)。
+        _nth() {
+            printf '%s' "$1" | awk -v n="$2" '
+                BEGIN { FS="|" }
+                { if (n <= NF) { v=$n; sub(/^[ \t]+/,"",v); sub(/[ \t]+$/,"",v); printf "%s", v } }
+            '
+        }
+        # _cnt <字串>  算 `|` 分隔的筆數(空字串回 0)
+        _cnt() {
+            [ -n "$1" ] || { echo 0; return; }
+            printf '%s' "$1" | awk 'BEGIN{FS="|"} {print NF}'
+        }
+
         _ap_new=""
         for _n in 1 2 3; do
-            eval "_s=\$NEW_STA_SSID$_n; _k=\$NEW_STA_KEY$_n; _b=\$NEW_STA_BAND$_n"
-            [ -n "$_s" ] || continue
-            _ap_new="${_ap_new}${_b}	${_s}	${_k}
+            eval "_sraw=\$NEW_STA_SSID$_n; _kraw=\$NEW_STA_KEY$_n; _braw=\$NEW_STA_BAND$_n"
+            [ -n "$_sraw" ] || continue
+            _nss=$(_cnt "$_sraw")          # ssid 筆數 = 這一欄要展開幾組
+            _nks=$(_cnt "$_kraw")
+            _nbs=$(_cnt "$_braw")
+            # ⚠️ key 的筆數比 ssid 多 = 幾乎可以確定是「密碼裡含 |」被誤切。
+            #   這種錯完全靜默(連上不了但看不出原因), 且只在 WAN 全斷、人在
+            #   外面時才發作 —— 一定要記 log。解法是把該密碼單獨放一個編號欄位。
+            if [ "$_nks" -gt "$_nss" ]; then
+                log "⚠️ sta_backup_key${_n} 有 ${_nks} 筆但 ssid${_n} 只有 ${_nss} 筆 —— 密碼含 '|' 會被切錯, 請把該組單獨放一個編號欄位 (hostname=$MY_HOSTNAME)"
+            fi
+            _m=1
+            while [ "$_m" -le "$_nss" ]; do
+                _s=$(_nth "$_sraw" "$_m")
+                if [ -z "$_s" ]; then _m=$(( _m + 1 )); continue; fi
+                # key: 不足補空(開放網路)
+                if [ "$_m" -le "$_nks" ]; then _k=$(_nth "$_kraw" "$_m"); else _k=""; fi
+                # band: 不足沿用最後一個值; 整欄空則預設 2g
+                if [ "$_nbs" -eq 0 ]; then
+                    _b=""
+                elif [ "$_m" -le "$_nbs" ]; then
+                    _b=$(_nth "$_braw" "$_m")
+                else
+                    _b=$(_nth "$_braw" "$_nbs")
+                fi
+                _b=$(_norm_band "$_b")
+                _ap_new="${_ap_new}${_b}	${_s}	${_k}
 "
+                _m=$(( _m + 1 ))
+            done
         done
         _ap_f="/etc/myscript/.sta_backup_ap"
         _ap_cur=$(cat "$_ap_f" 2>/dev/null)

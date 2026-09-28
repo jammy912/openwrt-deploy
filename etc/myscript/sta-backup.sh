@@ -10,8 +10,16 @@
 # 設定來源 (Sheet 的 config batmanmesh → sync-googleconfig.sh 落檔):
 #   /etc/myscript/.sta_backup_ap      ★ 候選清單, 每行 band<TAB>ssid<TAB>key (600)
 #                                       來自 Sheet 的 sta_backup_{ssid,key,band}{1,2,3}
-#                                       依行序 1→2→3 試, 第一個連上的就用
+#                                       依行序試, 第一個連上的就用
 #                                       band 可填 2g / 5g / auto(auto=掃描決定)
+#     Sheet 端每個編號欄位可再用 `|` 塞多筆, 例如:
+#       option sta_backup_ssid1 'IOT|cht-52-1F'
+#       option sta_backup_key1  'pass1|pass2'
+#       option sta_backup_band1 '2g|5g'
+#     展開順序: 欄位編號 1→2→3, 同欄位內依 `|` 左到右。
+#     筆數不符以 ssid 為準: key 不足補空(開放網路), band 不足沿用最後一個值。
+#     ⚠️ 密碼含 `|` 必須單獨放一個編號欄位 —— 否則會被切錯而靜默連不上
+#       (sync-googleconfig 偵測到 key 筆數 > ssid 筆數時會記 log 警告)。
 #   /etc/myscript/.sta_backup_enable  1=啟用自動判斷, 0=完全不動作(預設)
 #
 # ⚠️ 舊的單組旗標 .sta_backup_{ssid,key,band} 已於 2026-09-28 廢除。
