@@ -533,8 +533,31 @@ sta_off_raw() {
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
         fi
         rm -f /etc/myscript/.sta_lan_ip_prev
-        # ★ 清掉 auto-role 的 wg 重拉旗標, 否則下次 STA 啟用時不會再 ifup
-        rm -f /tmp/.sta_wg_kicked
+        # ★ 還原 STA 期間被停掉的 wg / PBR / DBR(2026-09-28)
+        #   STA 供網時 auto-role 會主動停掉它們(見 auto-role.sh ~line 540 的
+        #   決策說明), WAN 恢復後要在這裡開回來。
+        if [ -f /tmp/.sta_dbr_stopped ]; then
+            [ -f /tmp/.sta_dbroute-domains.conf.bak ] \
+                && mv /tmp/.sta_dbroute-domains.conf.bak /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+            [ -x /etc/myscript/dbroute-setup.sh ] && /etc/myscript/dbroute-setup.sh >/dev/null 2>&1
+            rm -f /tmp/.sta_dbr_stopped
+            log "STA 拆除: 已還原 DBR 域名分流"
+        fi
+        if [ -f /tmp/.sta_pbr_stopped ]; then
+            /etc/init.d/pbr start >/dev/null 2>&1
+            rm -f /tmp/.sta_pbr_stopped
+            log "STA 拆除: 已還原 PBR"
+        fi
+        # wg 介面: 交給 netifd 自己拉(auto-role 下一輪的 WG 延遲啟動會處理),
+        # 這裡只確保 client 端那幾支有被踢一次, 不然要等到下次角色切換。
+        for _w in $(uci -q show network 2>/dev/null \
+                    | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
+                    | sort -u); do
+            [ "$(ifstatus "$_w" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] && continue
+            ifup "$_w" 2>/dev/null
+        done
+        log "STA 拆除: 已重新拉起 wg client 介面"
     fi
     if [ -z "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
        && [ -z "$(uci -q get network.wwan 2>/dev/null)" ]; then

@@ -5,14 +5,14 @@
 case "$INTERFACE" in
     wg*|wan)
         [ "$ACTION" = "ifup" ] || exit 0
-        # ⚠️ 2026-09-27 實測: STA 備援供網期間不能跑這段。auto-role 會在 STA 下
-        #   主動 ifup wg0/wg3/wg_900 想讓 VPN 走 STA 出去, 但那個 ifup 觸發本
-        #   hotplug -> dbroute-setup 以 wan 為出口重建規則(WAN 此時是斷的) ->
-        #   連鎖把剛拉起來的 wg 全部打下去。log 佐證:
+        # ⚠️ STA 備援供網期間不能跑這段(2026-09-27 實測)。
+        #   dbroute-setup 會以 wan 為出口重建規則, 但 WAN 此時是斷的:
         #     23:18:49 pbr-cust: wg0 up → 執行 dbroute-setup
         #     23:18:49 dbroute: Domain routing via wan (table 254/main) configured
         #     23:18:49 netifd: Interface 'wg_900'/'wg0'/'wg3' is now down
-        #   STA 結束後 sta-backup/auto-role 會自行重建 dbroute, 這裡跳過無妨。
+        #   現行策略(2026-09-28)是 STA 期間直接停掉 wg/PBR/DBR, 這個守衛仍要
+        #   留著 —— sta-backup.sh 拆除時會 ifup wg, 那一刻 state 可能還是
+        #   active, 擋掉一次無謂的重建。還原由 sta-backup.sh 負責。
         if [ "$(cat /tmp/.sta_backup_state 2>/dev/null)" = "active" ]; then
             logger -t pbr-cust "$INTERFACE up → STA 備援供網中, 跳過 dbroute 重建"
             exit 0

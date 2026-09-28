@@ -536,113 +536,43 @@ else
         ip route del default via 192.168.1.1 dev br-lan 2>/dev/null \
             && log "STA 供網中: 移除 default via 192.168.1.1 dev br-lan(會蓋過 STA 出口)"
 
-        # ★ 讓 WireGuard 能走 STA 出去(2026-09-27 實測補強)
-        #   問題: STA 供網時 wg 全部 up=false、handshake 0 個。兩個原因 ——
-        #   (1) wg ifup 時 resolve endpoint 會「跟著當下的 default 方向」釘一條
-        #       host route。STA 剛起來那瞬間 default 還是 via br-lan, 於是釘成
-        #         180.177.189.12 via 192.168.1.1 dev br-lan proto static
-        #       而 192.168.1.1 在 br-lan 側是上游鄰居、不是本機能到的下一跳 →
-        #       handshake 封包送不出去(這段邏輯原本只在「切回主 gw」時清, 見
-        #       下方 ~line 594 的相同處理)。
-        #   (2) pbr_wan 表被 PBR 在 WAN 斷線時清空, 但 rule 29992-29995
-        #       仍把 wg 的來源埠(51600/51663/51699/51820)導進去 → 進了空表。
-        # ⚠️ 代價: wg 流量會經過上游 AP(鄰居/飯店)。使用者已確認接受 ——
-        #   那是「沒有 VPN」與「VPN 經過別人網路」之間的取捨。
-        # ⚠️ 2026-09-27 實測: 只靠 .route[0].nexthop 會在 STA 剛起來那輪取不到
-        #   (udhcpc 還沒把 route 填進 ifstatus), 結果整個 (1)(2)(3) 區塊被無聲
-        #   跳過 —— log 裡什麼都沒有, 很難查。改成三重來源 + 取不到時記 log。
-        _sta_dev=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
-        _sta_gw=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
-        # 來源 2: sta-backup.sh 切換時已把 default 放進主表 (metric 300)
-        [ -z "$_sta_gw" ] && [ -n "$_sta_dev" ] \
-            && _sta_gw=$(ip route show default dev "$_sta_dev" 2>/dev/null \
-                         | awk '/via/ {for(i=1;i<NF;i++) if($i=="via") print $(i+1); exit}')
-        # 來源 3: table 99 的 default (policy routing 那份)
-        [ -z "$_sta_gw" ] \
-            && _sta_gw=$(ip route show table 99 2>/dev/null \
-                         | awk '/^default .*via/ {for(i=1;i<NF;i++) if($i=="via") print $(i+1); exit}')
-        if [ -z "$_sta_dev" ] || [ -z "$_sta_gw" ]; then
-            log "STA: 尚未取得出口資訊 (dev=${_sta_dev:-無} gw=${_sta_gw:-無}), 本輪跳過 wg/PBR 修正, 等下一輪"
+        # ★ STA 備援期間: 主動停掉 wg / PBR / DBR(2026-09-28 改採此策略)
+        #
+        # 原本(3733ebb~0c67e0a)是反過來做 ——「讓 wg 走 STA 出去」, 清 endpoint
+        # host route、補 pbr_wan、主動 ifup。連續五輪實測都失敗, 因為 ifup 會
+        # 觸發一連串「以 WAN 為前提」的自動化, 反手把 wg 打掉。已查明三條:
+        #   1. pbr-cust hotplug -> dbroute-setup 用 wan 重建規則(35036b3 已擋)
+        #   2. 角色切換 -> wan6 管理的 uci commit network -> netifd 重載全部
+        #      wireguard 介面(0c67e0a 已擋)
+        #   3. wifi reload(全域)-> 連 STA 自己的 wwan 都被 disable/enable
+        # 每擋掉一條就冒出下一條, 且第 1-3 輪 wg 即使 up=true 也握不到手 ——
+        # 上游是別人的 AP(飯店/鄰居), 擋不擋 UDP 不是我們能控制的。
+        #
+        # ⚠️ 使用者決策(2026-09-28): STA 是「偶爾到外地」的最後手段, 目標只要
+        #   「副gw 能上網」。VPN 在這個情境不是必需品, 硬要它穿過別人的 AP
+        #   得不償失。改為 STA 期間乾脆停掉, WAN 恢復後再讓它們自己起來。
+        _stopped=""
+        for _w in $(uci -q show network 2>/dev/null \
+                    | sed -n 's/^network\.\(wg[^.=]*\)=interface$/\1/p'); do
+            [ "$(ifstatus "$_w" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] || continue
+            ifdown "$_w" 2>/dev/null && _stopped="$_stopped $_w"
+        done
+        [ -n "$_stopped" ] && log "STA 備援: 已停用 wg 介面(VPN 不走上游 AP):$_stopped"
+        # PBR: 停掉服務本體, 避免它每輪拿斷線的 wan 當 uplink 重算規則
+        if [ -n "$(pidof pbr 2>/dev/null)" ] || /etc/init.d/pbr enabled 2>/dev/null; then
+            if [ ! -f /tmp/.sta_pbr_stopped ]; then
+                /etc/init.d/pbr stop >/dev/null 2>&1 \
+                    && { touch /tmp/.sta_pbr_stopped; log "STA 備援: 已停用 PBR(uplink=wan 已斷, 規則無意義)"; }
+            fi
         fi
-        if [ -n "$_sta_dev" ] && [ -n "$_sta_gw" ]; then
-            # (1) 清掉「釘錯方向」的 endpoint host route, 讓 wg 下次 resolve 時
-            #     跟著正確的 default(已是 STA)重釘。兩種形態都要清:
-            #       - via 192.168.1.1 dev br-lan (副gw 期間釘的)
-            #       - dev wg2 之類 (0.0.0.0/0 的 wg 先起來時釘的, 見 ~line 1435
-            #         的 2026-09-27 真兇紀錄)
-            ip route show 2>/dev/null | awk '/via 192.168.1.1 dev br-lan/ && $1 != "default" {print $1}' \
-                | while read -r _stale; do
-                    ip route del "$_stale" via 192.168.1.1 dev br-lan 2>/dev/null \
-                        && log "STA: 清除指向 br-lan 的 endpoint host route $_stale"
-                done
-            for _ep in $(uci -q show network 2>/dev/null \
-                         | sed -n 's/^network\.@wireguard_[^[]*\[[0-9]*\]\.endpoint_host=.\(.*\).$/\1/p' \
-                         | sort -u); do
-                case "$_ep" in
-                    *[!0-9.]*) _epip=$(nslookup "$_ep" 2>/dev/null \
-                                       | awk '/^Address/ && $NF ~ /^[0-9.]+$/ {print $NF}' | tail -1) ;;
-                    *) _epip="$_ep" ;;
-                esac
-                [ -n "$_epip" ] || continue
-                _epdev=$(ip route show "$_epip" 2>/dev/null | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')
-                case "$_epdev" in
-                    wg*) ip route del "$_epip" dev "$_epdev" 2>/dev/null \
-                             && log "STA: 清除釘往 wg 的 endpoint host route $_epip dev $_epdev" ;;
-                esac
-            done
-            # (2) 補 pbr_wan 的 default, 讓被 rule 導進去的 wg 封包有路可走。
-            #     ⚠️ 用 replace 而非 add —— WAN 恢復時 PBR 會自己覆寫回去。
-            if [ "$(ip route show table pbr_wan 2>/dev/null | grep -c '^default')" -eq 0 ]; then
-                ip route replace default via "$_sta_gw" dev "$_sta_dev" table pbr_wan 2>/dev/null \
-                    && log "STA: pbr_wan 補 default via $_sta_gw dev $_sta_dev(原本是空表)"
+        # DBR: 清掉 nft set 與 dnsmasq 的域名分流, 讓所有流量單純走 STA
+        if [ ! -f /tmp/.sta_dbr_stopped ] && [ -x /etc/myscript/dbroute-setup.sh ]; then
+            if [ -f /etc/dnsmasq.d/dbroute-domains.conf ]; then
+                mv /etc/dnsmasq.d/dbroute-domains.conf /tmp/.sta_dbroute-domains.conf.bak 2>/dev/null \
+                    && /etc/init.d/dnsmasq reload >/dev/null 2>&1
             fi
-            # (3) 路由修好後 wg 不會自己起來(WAN 斷時已被 netifd 標成 down),
-            #     需要主動 ifup。⚠️ 用旗標檔限制只做一次 —— wg 若因上游
-            #     環境(飯店 NAT、對端不可達)本來就連不上, 每分鐘 ifup 會
-            #     無止盡重建 tunnel 且吃掉 CPU。
-            # ★ 只處理「client 端」介面(peer 有設 endpoint_host 的)。本機的
-            #   wg1/wg2/wg4/wg5 是 server 端, peer endpoint 是 (none)、
-            #   handshake 恆為 0(等對方連進來), 對它們 ifup 毫無意義, 只會
-            #   白白重建 tunnel 踢掉既有 client。實測基準(2026-09-27 WAN
-            #   正常): wg0/wg3/wg_900 有 handshake, 其餘四支全 0。
-            #   uci 格式是 network.@wireguard_wg0[0].endpoint_host=...
-            # ⚠️ 2026-09-27 實測: 原本「touch 旗標 = 只做一次」有缺陷 —— STA 剛
-            #   起來那輪路由還沒收斂(pbr_wan 空、endpoint 還指向 dev wg2),
-            #   ifup 出去也握不到手, 但旗標已經蓋下去, 之後永遠不再嘗試。
-            #   改成「握到手才封印」: 只要還有 client 端介面沒 handshake 就繼續
-            #   重試, 上限 RETRY_MAX 輪(每輪 cron 一分鐘)避免上游環境本來就
-            #   連不上時無止盡重建 tunnel 吃 CPU。
-            _wgflag=/tmp/.sta_wg_kicked          # 內容 = 已嘗試輪數
-            _wgretry_max=5
-            _wgtried=$(cat "$_wgflag" 2>/dev/null)
-            case "$_wgtried" in ''|*[!0-9]*) _wgtried=0 ;; esac
-            # 有任何一支 client 端介面握到手就算成功, 不再動它
-            _wg_ok=0
-            for _w in $(uci -q show network 2>/dev/null \
-                        | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
-                        | sort -u); do
-                _hs=$(wg show "$_w" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
-                [ -n "$_hs" ] && [ "$_hs" != "0" ] && { _wg_ok=1; break; }
-            done
-            if [ "$_wg_ok" = "1" ]; then
-                [ "$_wgtried" != "done" ] && log "STA: wg 已握手, 停止重試"
-                echo "done" > "$_wgflag"
-            elif [ "$_wgtried" -lt "$_wgretry_max" ]; then
-                _kicked=""
-                for _w in $(uci -q show network 2>/dev/null \
-                            | sed -n 's/^network\.@wireguard_\([^[]*\)\[[0-9]*\]\.endpoint_host=.*/\1/p' \
-                            | sort -u); do
-                    # up=true 但 handshake=0 也要重拉 —— 介面活著不代表通
-                    ifup "$_w" 2>/dev/null && _kicked="$_kicked $_w"
-                done
-                _wgtried=$((_wgtried + 1))
-                echo "$_wgtried" > "$_wgflag"
-                [ -n "$_kicked" ] && log "STA: 重拉 wg client 介面 (第 $_wgtried/$_wgretry_max 輪):$_kicked"
-            else
-                [ "$_wgtried" = "$_wgretry_max" ] \
-                    && { log "STA: wg 重試 $_wgretry_max 輪仍未握手, 放棄(上游可能擋 UDP 或對端不可達)"
-                         echo "gaveup" > "$_wgflag"; }
-            fi
+            touch /tmp/.sta_dbr_stopped
+            log "STA 備援: 已停用 DBR 域名分流(流量全走 STA)"
         fi
     elif [ "$NEW_ROLE" = "client" ]; then
         # client 沒 WAN，走 .1
