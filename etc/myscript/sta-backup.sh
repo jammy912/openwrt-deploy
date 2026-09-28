@@ -254,24 +254,18 @@ sta_rules_apply() {
         uci -q delete dhcp.lan.dhcp_option
         uci add_list dhcp.lan.dhcp_option="3,$_sta_ip"
         uci add_list dhcp.lan.dhcp_option="6,$_sta_ip"
-        # ★ 2026-09-28 真兇: 只改 IPv4 不夠。br-lan 的 ULA(fdff:...::1)是寫死的,
-        #   不會跟著 IPv4 從 .1 改成 .9, odhcpd 仍把它當 IPv6 DNS 發給 client。
-        #   Windows 優先用 IPv6 DNS -> 查詢送到 ULA -> dnsmasq 雖然有在聽, 但
-        #   STA 期間只有 IPv4 出口, IPv6 上游是斷的 -> 全部逾時。
-        #   症狀: ping 1.1.1.1 通、但瀏覽器完全上不了網; ipconfig/all 會看到
-        #     DNS 伺服器: fdff:fe7f:9ad6::1     <- 排在 IPv4 前面
-        #                 192.168.1.9
-        #   解法: STA 期間停掉 RA/DHCPv6, client 只拿 IPv4 DNS。
-        _ra_prev=$(uci -q get dhcp.lan.ra)
-        if [ -n "$_ra_prev" ] && [ "$_ra_prev" != "disabled" ]; then
-            echo "$_ra_prev" > /etc/myscript/.sta_ra_prev
-            echo "$(uci -q get dhcp.lan.dhcpv6)" > /etc/myscript/.sta_dhcpv6_prev
-            uci set dhcp.lan.ra='disabled'
-            uci set dhcp.lan.dhcpv6='disabled'
-            log "STA: 停用 IPv6 RA/DHCPv6(ULA 不隨 LAN IP 改, 會讓 client 拿到查不通的 IPv6 DNS)"
-        fi
+        # ⚠️ 2026-09-28 走過的死路,別再試: 曾在這裡把 dhcp.lan.ra / dhcpv6 設成
+        #   'disabled', 想讓 client 別再拿 br-lan 的 ULA(fdff:...::1)當 IPv6 DNS
+        #   —— 因為那個位址寫死, 不會跟著 IPv4 從 .1 改成 .9。
+        #   ★ 實測是反效果: 停 RA 只讓 client「不再更新」IPv6 設定, 不會讓它
+        #     「立刻丟棄」。Windows 仍把 ULA 排在 IPv4 DNS 前面當首選, 但 IPv6
+        #     的路由/鄰居關係已經失效 -> 封包根本送不到 -> nslookup 全逾時
+        #     (使用者實測: 瀏覽器能上網但 nslookup 對 ULA 連續 timeout)。
+        #   ★ 正解是「發了就要能用」: dnsmasq 本來就在 ULA 上監聽(netstat 可證),
+        #     只要它的 upstream 是通的(見 sta_dns_takeover 接手上游 AP 的 DNS),
+        #     IPv6 查詢一樣查得到。實測 `nslookup ... fdff:fe7f:9ad6::1` ✅通。
+        #   所以這裡「不碰」IPv6 RA, 只改 IPv4 的 dhcp_option。
         uci commit dhcp
-        /etc/init.d/odhcpd restart >/dev/null 2>&1
         /etc/init.d/dnsmasq reload >/dev/null 2>&1
         _lan_self="$_sta_ip"
     fi
@@ -587,9 +581,9 @@ sta_off_raw() {
             uci commit dhcp
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
         fi
-        # ★ 還原 IPv6 RA/DHCPv6(STA 期間停掉的, 見 ~line 230)
-        #   ⚠️ 不能包在上面那個 dhcp_option 判斷裡 —— 若 option 已先被清掉,
-        #   RA 就永遠還原不了, client 從此拿不到 IPv6。
+        # 舊版(2026-09-28 上午)曾在 STA 期間把 ra/dhcpv6 設成 disabled, 那是
+        # 死路已移除(見 ~line 257 的說明)。這裡只負責「把舊版留下的旗標還原後
+        # 清掉」—— 升級前就進入 STA 的機器, 旗標會殘留在 flash。
         if [ -f /etc/myscript/.sta_ra_prev ]; then
             uci set dhcp.lan.ra="$(cat /etc/myscript/.sta_ra_prev)"
             _dh6=$(cat /etc/myscript/.sta_dhcpv6_prev 2>/dev/null)
@@ -597,7 +591,7 @@ sta_off_raw() {
             rm -f /etc/myscript/.sta_ra_prev /etc/myscript/.sta_dhcpv6_prev
             uci commit dhcp
             /etc/init.d/odhcpd restart >/dev/null 2>&1
-            log "STA 拆除: 已還原 IPv6 RA/DHCPv6"
+            log "STA 拆除: 已還原舊版停用的 IPv6 RA/DHCPv6(相容處理)"
         fi
         # ★ 還原 dnsmasq 的 upstream DNS(hotplug 95-sta-backup 在 STA 期間
         #   改成上游 AP 給的)。這裡再做一次是保險 —— 若 wwan 是被直接刪掉
