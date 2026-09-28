@@ -911,6 +911,34 @@ case "$1" in
     #    流量會落回主表(而主表刻意沒有上游路由)→ 整條備援靜默失效。
     rules-refresh) sta_rules_apply; exit $? ;;
     rules-clear)   sta_rules_clear; exit 0 ;;
+    # ★ 開機清除孤兒 STA(2026-09-28): 由 rc.local 呼叫。
+    #   真兇: STATE_F 在 /tmp(tmpfs, 重開即失), 但 wireless.sta_backup 與
+    #   network.wwan 寫在 uci(flash, 重開還在)。主流程的拆除條件是
+    #   `CUR_STATE = active`, 而開機後 state 檔不存在 → CUR_STATE=idle →
+    #   拆除分支永遠不執行 → STA 設定永久殘留, WAN 回來也不拆。
+    #   實測 2026-09-28 於 MX4200: state 檔不存在但 wireless.sta_backup 存在、
+    #   wwan 拿著 192.168.1.249、ip rule 990/991 還在, okcnt=4 已超過門檻
+    #   (OK_NEED=3)卻因 CUR_STATE=idle 而跳過拆除。
+    #   ★ 判斷以「uci 實體設定」為準而非 state 檔 —— 開機時 state 必定不存在,
+    #     拿它當依據只會永遠誤判成 idle。
+    boot-cleanup)
+        STA_VERBOSE=1
+        if [ -n "$(uci -q get wireless.${STA_SECTION} 2>/dev/null)" ] \
+           || [ -n "$(uci -q get network.wwan 2>/dev/null)" ]; then
+            log "開機偵測到 STA 殘留設定(state 檔已隨 tmpfs 消失), 拆除還原"
+            sta_off_raw
+            # ⚠️ sta_off_raw 不推播(它是給回滾用的), 但這裡要讓人知道 ——
+            #   殘留代表上次是「STA 供網中斷電/重開」, 值得留紀錄。
+            push_notify "開機清除 STA 殘留: 上次重開前 STA 備援仍啟用中, 已還原為正常設定"
+        else
+            log "開機檢查: 無 STA 殘留"
+        fi
+        # 計數器一律歸零(它們也在 /tmp, 但明確寫一次比較安全)
+        echo 0 > "$FAILCNT_F" 2>/dev/null
+        echo 0 > "$OKCNT_F" 2>/dev/null
+        rm -f "$STUCK_F.notified" 2>/dev/null
+        exit 0
+        ;;
 esac
 
 # ★ 總開關: enable != 1 時「完全不碰任何設定」, 直接結束。

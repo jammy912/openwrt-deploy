@@ -77,6 +77,19 @@ esac
 # 開機後，等網路穩定再把 .pushqueue 內累積的 reboot log 逐一送給 admin
 /etc/myscript/push-queue.sh &
 
+# ★ 開機清除孤兒 STA 備援設定(2026-09-28)
+#   為什麼需要: STA 的狀態檔 /tmp/.sta_backup_state 在 tmpfs, 重開就消失,
+#   但 wireless.sta_backup 與 network.wwan 寫在 uci(flash)重開還在。
+#   sta-backup.sh 主流程的拆除條件是「state = active」, 開機後 state 不存在
+#   → 判定 idle → 永遠不拆 → WAN 回來了 STA 設定卻一直殘留。
+#   實測 2026-09-28 於 MX4200: okcnt 已累到 4(門檻 3)仍未拆, wwan 還握著
+#   192.168.1.249、ip rule 990/991 都在。
+#   ⚠️ 必須放在 `mount --bind /tmp/config_ram /etc/config` 之後 ——
+#     在那之前改 uci 會被 bind mount 蓋掉。
+#   ⚠️ 也要在下面的 sync-googleconfig.sh --apply 之前: 讓網路設定在同步
+#     開始前就是乾淨狀態, 避免 sync 在半殘留的基礎上套設定。
+[ -x /etc/myscript/sta-backup.sh ] && /etc/myscript/sta-backup.sh boot-cleanup
+
 # hybrid 模式: 開機自動偵測角色
 [ "$(cat /etc/myscript/.mesh_role 2>/dev/null)" = "hybrid" ] && /etc/myscript/auto-role.sh
 
