@@ -451,7 +451,16 @@ sta_on() {
     #   改為讓 DHCP 正常建路由, 再由 hotplug(95-sta-backup)在 ifup 時
     #   把它從主表搬進 table 99。代價是有數秒空窗期主表是髒的。
     uci set network.wwan.defaultroute='1'
-    uci set network.wwan.peerdns='0'
+    # ⚠️ peerdns 必須是 1(2026-09-28 修正):
+    #   原本設 0, 想避免上游 DNS 污染設定, 結果 dnsmasq 只剩寫死的 upstream
+    #   (本機 uci dhcp.@dnsmasq[0].server, 這台是 1.1.1.1)。那在飯店/公共
+    #   WiFi 幾乎一定失敗 —— 它們常攔截或只允許自家 DNS。
+    #   實測 2026-09-28 於 MX4200: STA 起來後 client DNS 連續三分鐘查不到
+    #   (09:16 ❌ / 09:17 ❌ / 09:18 ❌, 09:19 才 ✅), 而 ping 1.1.1.1 在
+    #   09:18 就通了 —— 差距是 dnsmasq 對不通的 upstream 在做退避重試。
+    #   ★ 收下上游給的 DNS 當 upstream(那是上游自己的, 一定通),
+    #     由 95-sta-backup hotplug 寫進 dnsmasq 並 reload。
+    uci set network.wwan.peerdns='1'
     # ⚠️ 必須放進 wan zone 才會做 NAT, 否則 LAN 出不去
     _zi=0
     while [ -n "$(uci -q get firewall.@zone[$_zi] 2>/dev/null)" ]; do
@@ -560,6 +569,19 @@ sta_off_raw() {
             uci commit dhcp
             /etc/init.d/odhcpd restart >/dev/null 2>&1
             log "STA 拆除: 已還原 IPv6 RA/DHCPv6"
+        fi
+        # ★ 還原 dnsmasq 的 upstream DNS(hotplug 95-sta-backup 在 STA 期間
+        #   改成上游 AP 給的)。這裡再做一次是保險 —— 若 wwan 是被直接刪掉
+        #   而非 ifdown, hotplug 不會觸發, DNS 就會卡在上游的值。
+        if [ -f /etc/myscript/.sta_dns_prev ]; then
+            uci -q delete dhcp.@dnsmasq[0].server
+            while read -r _d; do
+                [ -n "$_d" ] && uci add_list dhcp.@dnsmasq[0].server="$_d"
+            done < /etc/myscript/.sta_dns_prev
+            rm -f /etc/myscript/.sta_dns_prev
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+            log "STA 拆除: 已還原 DNS upstream"
         fi
         rm -f /etc/myscript/.sta_lan_ip_prev
         # ★ 還原 STA 期間被停掉的 wg / PBR / DBR(2026-09-28)

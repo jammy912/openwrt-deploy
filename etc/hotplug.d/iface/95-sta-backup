@@ -1,5 +1,5 @@
 #!/bin/sh
-# STA 備援: wwan 介面起落時重建/清除 policy routing 規則
+# STA 備援: wwan 介面起落時重建/清除 policy routing 規則 + 接手上游 DNS
 #
 # ★ 為什麼需要這支: wwan 的位址是鄰居 AP 的 DHCP 給的, 每次續約都可能不同。
 #   sta-backup.sh 的規則是 `ip rule add from <實際位址>`, 位址一換舊規則就
@@ -10,14 +10,50 @@
 [ "$INTERFACE" = "wwan" ] || exit 0
 [ -x /etc/myscript/sta-backup.sh ] || exit 0
 
+# ★ 2026-09-28: STA 期間讓 dnsmasq 改用「上游 AP 給的 DNS」。
+#   本機 dnsmasq 是 noresolv='1' + server='1.1.1.1' —— 完全不讀
+#   resolv.conf.auto, 只認那個寫死的 upstream。在飯店/公共 WiFi 那幾乎
+#   一定失敗(常攔截或只放行自家 DNS), client 就全部解析不了。
+#   實測 2026-09-28 於 MX4200: STA 起來後 client DNS 連三分鐘查不到,
+#   而 ping 1.1.1.1 早一分鐘就通 —— 差距是 dnsmasq 對不通的 upstream
+#   在退避重試。
+#   ⚠️ 原值存 flash(/etc/myscript/.sta_dns_prev), 放 /tmp 重開就還原不回來。
+_dns_prev_f=/etc/myscript/.sta_dns_prev
+sta_dns_take() {
+    _up=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')
+    [ -n "$_up" ] || { logger -t sta-backup "wwan 沒給 DNS, 沿用原 upstream"; return 0; }
+    # 只在第一次接手時備份, 避免續約時把已改過的值當成原值存下去
+    if [ ! -f "$_dns_prev_f" ]; then
+        uci -q get dhcp.@dnsmasq[0].server > "$_dns_prev_f" 2>/dev/null || : > "$_dns_prev_f"
+    fi
+    uci -q delete dhcp.@dnsmasq[0].server
+    for _d in $_up; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
+    uci commit dhcp
+    /etc/init.d/dnsmasq reload >/dev/null 2>&1
+    logger -t sta-backup "DNS upstream 改用上游 AP 提供的:$_up"
+}
+sta_dns_restore() {
+    [ -f "$_dns_prev_f" ] || return 0
+    uci -q delete dhcp.@dnsmasq[0].server
+    while read -r _d; do
+        [ -n "$_d" ] && uci add_list dhcp.@dnsmasq[0].server="$_d"
+    done < "$_dns_prev_f"
+    rm -f "$_dns_prev_f"
+    uci commit dhcp
+    /etc/init.d/dnsmasq reload >/dev/null 2>&1
+    logger -t sta-backup "DNS upstream 已還原"
+}
+
 case "$ACTION" in
     ifup)
         logger -t sta-backup "hotplug: wwan ifup → 重建 policy routing"
         /etc/myscript/sta-backup.sh rules-refresh >/dev/null 2>&1
+        sta_dns_take
         ;;
     ifdown)
         logger -t sta-backup "hotplug: wwan ifdown → 清除 policy routing"
         /etc/myscript/sta-backup.sh rules-clear >/dev/null 2>&1
+        sta_dns_restore
         ;;
 esac
 
