@@ -348,6 +348,32 @@ sta_rules_apply() {
     [ "$_upnet" = "$_lannet" ] && \
         log "⚠️ 上游與本地同網段($_upnet) —— 已用 policy routing 隔離, 但 LAN 內若有與上游相同的主機位址仍會有歧義"
 
+    # ★ DNS upstream 接手(2026-09-28)
+    #   本機 dnsmasq 是 noresolv='1' + 寫死的 server(這台是 1.1.1.1), 完全
+    #   不讀 resolv.conf.auto。STA 期間那個 upstream 未必通 —— 飯店/公共 WiFi
+    #   常攔截或只放行自家 DNS —— client 就全部解析不了。改用上游 AP 給的。
+    #   ⚠️ 原本放在 95-sta-backup hotplug, 實測 2026-09-28 失敗: 備份檔寫出來了
+    #     (dns_prev=1.1.1.1) 但 uci 沒換成上游的 192.168.1.1, 且連 logger 那行
+    #     都沒留下任何紀錄 —— 函式跑到一半中斷, 極可能是中間的
+    #     `/etc/init.d/dnsmasq reload` 把 netifd 觸發的 hotplug 自己也帶掉了。
+    #   ★ 改放這裡: sta-backup.sh 是獨立 cron(每分鐘), 不受 netifd 生命週期影響,
+    #     而且每輪都會重新檢查 —— 上游續約換 DNS 也跟得上。
+    _updns=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')
+    if [ -n "$_updns" ]; then
+        _curdns=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ')
+        # 冪等: 已經是上游那組就不要每分鐘重寫 flash + reload dnsmasq
+        if [ "$_curdns" != "$_updns" ]; then
+            [ -f /etc/myscript/.sta_dns_prev ] || \
+                { uci -q get dhcp.@dnsmasq[0].server > /etc/myscript/.sta_dns_prev 2>/dev/null \
+                  || : > /etc/myscript/.sta_dns_prev; }
+            uci -q delete dhcp.@dnsmasq[0].server
+            for _d in $_updns; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
+            uci commit dhcp
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+            log "DNS upstream 改用上游 AP 提供的: $_updns (原: $_curdns)"
+        fi
+    fi
+
     # ★ 驗證: 主表不可再有指向 STA 介面的路由, 否則等於沒搬(仍會失聯)。
     #   搬不乾淨時寧可整個回滾, 也不要留在「連上了但把自己鎖在門外」的狀態。
     # ⚠️ 必須排除 metric 300 —— 那兩筆是本函式「刻意」補進主表的
