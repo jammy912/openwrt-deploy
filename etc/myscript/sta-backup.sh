@@ -611,12 +611,25 @@ sta_off_raw() {
         #   STA 供網時 auto-role 會主動停掉它們(見 auto-role.sh ~line 540 的
         #   決策說明), WAN 恢復後要在這裡開回來。
         if [ -f /tmp/.sta_dbr_stopped ]; then
-            [ -f /tmp/.sta_dbroute-domains.conf.bak ] \
-                && mv /tmp/.sta_dbroute-domains.conf.bak /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null
-            /etc/init.d/dnsmasq reload >/dev/null 2>&1
-            [ -x /etc/myscript/dbroute-setup.sh ] && /etc/myscript/dbroute-setup.sh >/dev/null 2>&1
+            if [ -f /tmp/.sta_dbroute-domains.conf.bak ]; then
+                mv /tmp/.sta_dbroute-domains.conf.bak /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null
+                /etc/init.d/dnsmasq reload >/dev/null 2>&1
+                [ -x /etc/myscript/dbroute-setup.sh ] && /etc/myscript/dbroute-setup.sh >/dev/null 2>&1
+                log "STA 拆除: 已還原 DBR 域名分流"
+            else
+                # ⚠️ 備份檔放 /tmp, STA 期間若重開機就沒了(實測 2026-09-28 踩到:
+                #   還原後 dbroute-domains.conf 整個不見, dbroute-setup.sh 只會
+                #   log "No dbroute-domains.conf found, skipping" —— 它是讀取者
+                #   不是產生者, 產生者是 sync-googleconfig 的 DB Route 段)。
+                #   ★ 刻意不改放 flash(避免磨損), 改用 sync 重建。
+                #   ⚠️ 必須先刪 state —— 否則 sync 會判定「內容未變化, 跳過更新」,
+                #   而實際檔案已經不在了, state 與現實不一致。
+                find /etc/myscript -name "*dbroute*state*" -delete 2>/dev/null
+                [ -x /etc/myscript/sync-googleconfig.sh ] \
+                    && /etc/myscript/sync-googleconfig.sh --apply --force >/dev/null 2>&1
+                log "STA 拆除: DBR 備份檔已失(期間重開過), 改由 sync 重建"
+            fi
             rm -f /tmp/.sta_dbr_stopped
-            log "STA 拆除: 已還原 DBR 域名分流"
         fi
         if [ -f /tmp/.sta_pbr_stopped ]; then
             /etc/init.d/pbr start >/dev/null 2>&1
