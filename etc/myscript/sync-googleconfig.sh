@@ -1961,10 +1961,38 @@ NFTEOF
                         # 把還原的 WG 介面加回 firewall zone
                         # wg0 → vpn (小寫，PBR 出站)
                         # wg1-9 → VPN (大寫，入站)
+                        #
+                        # ★ 真兇修正(2026-09-30): 原本用 `grep -oE "wg[0-9]+"` 掃
+                        #   整個 TMP_RC_WG 的「文字」, 對 wg8ts 只擷取出 "wg8" ——
+                        #   那是**不存在的介面**, 於是:
+                        #     a) 幽靈 wg8 被 add_list 進 VPN zone
+                        #     b) 真正的 wg8ts 永遠沒有被加進任何 zone → 不放行
+                        #   實測 2026-09-30 於 RAX3000Z:
+                        #     zone[3] VPN: wg1 wg2 wg3 wg4 wg5 wg6 wg8
+                        #     uci -q get network.wg8 → 不存在(幽靈)
+                        #     實際介面是 wg8ts, 不在任何 zone 裡
+                        #   ⚠️ 這與上方刪除端 2026-09-06 修過的是**同型錯誤**
+                        #     (-oE 'network\.wg[0-9]+' 對 network.wg8ts 截成
+                        #      network.wg8), 但當時只修了刪除端, 漏了這個迴圈。
+                        #
+                        #   grep -oE 掃全文還會抓到 allowed_ips、endpoint_host、
+                        #   註解等任何含 wgN 的字串, 本來就不該用來列舉介面名。
                         log "  🔥 還原 WG firewall zone..."
-                        for wg_name in $(grep -oE "wg[0-9]+" "$TMP_RC_WG" | sort -u); do
+                        # ★ 列舉來源改成「uci 裡實際存在的 wg* 介面」(2026-09-30)
+                        #   不再從 TMP_RC_WG 的文字 grep —— 那只看得到本次還原的
+                        #   純數字介面, 手動維護的 wg8ts / wg_900 永遠補不到 zone。
+                        #   使用者決定(2026-09-30): wg8ts 這類也要自動納入 zone,
+                        #   以免日後新增類似介面又漏。介面本身仍由人工維護(本段
+                        #   上方的刪除/寫入條件不變), 只有 zone 歸屬自動補。
+                        # ⚠️ 用 uci 實際存在的 section 當來源, 從根本上不可能產生
+                        #   幽靈名 —— 這是比「修好 grep 正規式」更強的保證。
+                        for wg_name in $(uci show network 2>/dev/null \
+                                | sed -n 's/^network\.\(wg[^.=]*\)=interface$/\1/p' \
+                                | sort -u); do
                             case "$wg_name" in
                                 wg0)  FW_ZONE="vpn" ;;
+                                # wg_900 歷來就在小寫 vpn zone(PBR 出站), 維持原狀
+                                wg_900) FW_ZONE="vpn" ;;
                                 *)    FW_ZONE="VPN" ;;
                             esac
                             # 找到對應 zone 的 index
@@ -1986,6 +2014,33 @@ NFTEOF
                             else
                                 log "    ⚠️ 找不到 $FW_ZONE zone，跳過 $wg_name"
                             fi
+                        done
+                        # ★ 清除 vpn/VPN zone 裡「介面已不存在」的幽靈成員(2026-09-30)
+                        #   本段只會 add_list 從不移除, 於是 Sheet 移掉某個 wgN 後
+                        #   zone 裡那筆會永久殘留; 加上上方 grep 截斷產生的 wg8,
+                        #   實測 RAX3000Z 的 VPN zone 有 wg6 與 wg8 兩個幽靈。
+                        #   幽靈本身不會讓防火牆放行不該放行的東西(介面不存在就沒有
+                        #   封包), 但會讓「zone 裡有什麼」失去可信度, 診斷時誤導人。
+                        # ⚠️ 只清 wg 開頭且確定不存在的 —— 不碰 lan/wan 等其他成員,
+                        #   也不碰手動維護但確實存在的 wg8ts / wg_900。
+                        for _fz in vpn VPN; do
+                            _zi=0
+                            while uci -q get firewall.@zone[$_zi].name >/dev/null 2>&1; do
+                                if [ "$(uci -q get firewall.@zone[$_zi].name)" = "$_fz" ]; then
+                                    for _n in $(uci -q get firewall.@zone[$_zi].network 2>/dev/null); do
+                                        case "$_n" in
+                                            wg*)
+                                                if ! uci -q get "network.$_n" >/dev/null 2>&1; then
+                                                    uci -q del_list firewall.@zone[$_zi].network="$_n"
+                                                    log "    🧹 清除幽靈成員: $_n (介面不存在) ← $_fz zone"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                    break
+                                fi
+                                _zi=$((_zi + 1))
+                            done
                         done
                         uci commit firewall
                     fi
