@@ -1988,6 +1988,10 @@ NFTEOF
                     printing { print }
                     /^$/ && printing { printing=0 }
                     ' "$TMP_RC_PLAIN" > "$TMP_RC_SFX"
+                    # 診斷: 明確記錄 payload 裡有沒有後綴型介面, 避免「沒反應」
+                    # 時分不清是 payload 沒有、還是本段邏輯沒跑到。
+                    _sfx_n=$(grep -c "^config interface" "$TMP_RC_SFX" 2>/dev/null || echo 0)
+                    log "  🔎 後綴型 WG 介面(wgN+後綴): payload 內 ${_sfx_n} 個$([ "$_sfx_n" = "0" ] && echo ' —— Sheet 備份裡沒有, 無法救援')"
                     if [ -s "$TMP_RC_SFX" ]; then
                         # 逐一檢查: uci 裡沒有該介面才補
                         for _sfx in $(grep "^config interface" "$TMP_RC_SFX" \
