@@ -1948,6 +1948,68 @@ NFTEOF
                     /^$/ && printing { printing=0 }
                     ' "$TMP_RC_PLAIN" > "$TMP_RC_WG"
 
+                    # ★ 後綴型介面(wg8ts 這類「wg+數字+後綴」)的救援還原(2026-10-01)
+                    #
+                    # 真兇=上傳端與還原端不對稱:
+                    #   上傳 sync-uploadconfig.sh  /^wg[0-9]/        → wg8ts 有備份
+                    #   刪除 本段 wg[0-9]*=interface$               → wg8ts 不刪(正確)
+                    #   還原 本段 awk /^wg[0-9]+$/                  → wg8ts 不寫 ❌
+                    # 於是 wg8ts 在 Sheet payload 裡「備份得很完整」, 但一旦機器上的
+                    # uci 設定消失就永遠補不回來。
+                    #
+                    # 實測 2026-10-01 於 RAX3000Z: wg8ts 於 16:38 消失(log 無任何
+                    # 「清理舊有 wg」記錄, 非本段所為), 之後每分鐘的 sync --apply
+                    # 都補不回來; PBR 每 30 秒喊「[PENDING] wg8ts 介面不存在」,
+                    # 最後「[FLAP] 1小時內 DOWN 10 次, 長鎖 24 小時(累計第 3 次)」
+                    # —— Sheet 的 dbroute 有 8 筆 Netflix 域名指向 wg8ts,
+                    # 分流整個失效切回 wan。
+                    # 同時 x60pro 上 wg8ts 完整存在且已上傳(介面 7 個/Peer 13 個),
+                    # 證明備份端沒問題, 只有還原端漏了。
+                    #
+                    # ★ 為什麼要獨立一段而不是放寬上面的 awk 錨點:
+                    #   上面是「先全刪再全寫」, 放寬錨點會讓 wg8ts 每次同步 append
+                    #   一份而刪除端不刪 → 無限累積(正是 2026-09-06 的原始災難:
+                    #   區塊 1→2→3..., addresses 翻倍到 1024 行, 上傳 MD5 每次都變,
+                    #   造成下載→套用→上傳無限循環推播)。
+                    #   ★ 本段改用「只在 uci 裡不存在時才建立」, 冪等, 不會累積。
+                    #     已存在就完全不碰 —— 尊重它「手動維護」的定位。
+                    TMP_RC_SFX="/tmp/rc_wg_sfx.uci"
+                    awk '
+                    /^config interface/ {
+                        name = $3; gsub(/'\''/, "", name)
+                        # wg + 數字 + 非數字後綴(如 wg8ts); 排除純數字與 wg_ 開頭
+                        if (name ~ /^wg[0-9]+[a-z]/) { printing=1; print; next } else { printing=0 }
+                    }
+                    /^config wireguard_wg[0-9]/ {
+                        type = $2
+                        if (type ~ /^wireguard_wg[0-9]+[a-z]/) { printing=1; print; next } else { printing=0 }
+                    }
+                    /^config / && !/^config interface/ && !/^config wireguard_wg[0-9]/ { printing=0 }
+                    printing { print }
+                    /^$/ && printing { printing=0 }
+                    ' "$TMP_RC_PLAIN" > "$TMP_RC_SFX"
+                    if [ -s "$TMP_RC_SFX" ]; then
+                        # 逐一檢查: uci 裡沒有該介面才補
+                        for _sfx in $(grep "^config interface" "$TMP_RC_SFX" \
+                                | awk '{n=$3; gsub(/'\''/,"",n); print n}' | sort -u); do
+                            if uci -q get "network.$_sfx" >/dev/null 2>&1; then
+                                continue        # 已存在 → 不碰(手動維護優先)
+                            fi
+                            # 介面區塊 + 對應 peer 區塊一起補, 否則得到沒有 peer 的空介面
+                            {
+                                sed -n "/^config interface '$_sfx'\$/,/^\$/p" "$TMP_RC_SFX"
+                                sed -n "/^config wireguard_$_sfx\$/,/^\$/p" "$TMP_RC_SFX"
+                            } >> /etc/config/network
+                            uci commit network
+                            _np=$(uci show network 2>/dev/null \
+                                  | grep -c "^network\.@wireguard_${_sfx}\[")
+                            log "  🔧 救援還原遺失的 WG 介面: $_sfx (peer ${_np} 個) —— 它不在純數字還原範圍內"
+                            push_notify "WG 介面 $_sfx 曾遺失, 已從 Sheet 備份救援還原(peer ${_np} 個)。若反覆發生請查是什麼在刪它。"
+                            CHANGED_NETWORK=1
+                        done
+                    fi
+                    rm -f "$TMP_RC_SFX"
+
                     if [ -s "$TMP_RC_WG" ]; then
                         cat "$TMP_RC_WG" >> /etc/config/network
                         uci commit network
