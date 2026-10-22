@@ -179,87 +179,82 @@ collect_netdiag() {
     fi
 }
 
-# === odhcp6c 重複 instance 自癒 (2026-10-22) ===
-# ★ 真兇記錄: x60pro 實測 load 7.95 / idle 13% / 1088 threads。
-#   兩個 odhcp6c 用同一個 DUID + 同一張網卡(eth1) 同時跑 DHCPv6,
-#   互相搶答 → netifd 收到矛盾結果 → wan6 "down→setting up→down"
-#   每秒 5~6 次無限迴圈 → 每次都丟 RTM_NEWROUTE/DELROUTE,
-#   把 tailscaled 的 network monitor 餵到 28~44% CPU(吃掉一整顆核)。
-#   同時 firewall reload 連鎖觸發 dbroute-fwinclude → 堆積 235 個
-#   dnsmasq restart 行程。
-#   解法實測有效: ifdown wan6 → kill 殘留 odhcp6c → ifup wan6
-#   → flap 立刻停, idle 13%→84%, load 7.95→3.79, tailscaled 44%→4%。
-# ⚠️ 擺在 Load 警告之前: 這是「load 高的其中一個已知成因」,
-#   先修因, 避免被下面 load>=12 的規則直接 reboot 掉。
-# ⚠️ 只在「確實重複」時才動作; 正常 1 個(或 0 個, 沒開 IPv6)完全不碰。
-# ⚠️ 冷卻 30 分鐘: 若修完又長出來代表另有根因, 不要變成每 7 分鐘 restart
-#   wan6 的新迴圈 —— 那比原本的問題更糟。改推播請人看。
-# ⚠️ 動手前先推一則: restart wan6 是會動到 WAN 介面的操作, 即使失敗/卡住
-#   也要留下「它決定要動了」的紀錄, 不能只在成功後才推。
-_O6_COOL="/tmp/.odhcp6c_fix_until"
-_o6_count() { pidof odhcp6c 2>/dev/null | wc -w; }
-_O6_N=$(_o6_count)
-if [ "$_O6_N" -gt 1 ]; then
-    _o6_now=$(date +%s)
-    _o6_until=$(cat "$_O6_COOL" 2>/dev/null)
-    case "$_o6_until" in ''|*[!0-9]*) _o6_until=0 ;; esac
-    if [ "$_o6_now" -lt "$_o6_until" ]; then
-        # ⚠️ 冷卻期內要重新判斷「是不是其實已經好了」。
-        #   數量 >1 不等於故障 —— 交接期會並存, 而真正的故障指標是 flap。
-        #   2026-10-22 實測: 10:28 自癒成功後, 這裡連印三次「仍有 2 個」,
-        #   但當下實際只有 1 個(舊版用 ps|grep 會誤抓到 shell 指令列),
-        #   flap 也早就停了。那三則訊息純屬雜訊。
-        #   現在: 近 3 分鐘內沒有新的 flap = 已恢復 → 解除冷卻, 安靜收工。
-        _o6_flap_recent=$(logread | grep "wan6' is setting up" | tail -1 | awk '{print $4}')
-        _o6_quiet=1
-        if [ -n "$_o6_flap_recent" ]; then
-            # log 時間格式 HH:MM:SS → 換成當日秒數比對
-            _o6_fs=$(echo "$_o6_flap_recent" | awk -F: '{print $1*3600 + $2*60 + $3}')
-            _o6_ns=$(date +%H:%M:%S | awk -F: '{print $1*3600 + $2*60 + $3}')
-            _o6_age=$(( _o6_ns - _o6_fs ))
-            [ "$_o6_age" -lt 0 ] && _o6_age=$(( _o6_age + 86400 ))   # 跨午夜
-            [ "$_o6_age" -lt 180 ] && _o6_quiet=0
-        fi
-        if [ "$_o6_quiet" = "1" ]; then
-            rm -f "$_O6_COOL" 2>/dev/null
-            log "✅ odhcp6c=${_O6_N} 但近 3 分鐘無 flap(最後 ${_o6_flap_recent:-無}) → 判定已恢復, 解除冷卻"
-        else
-            log "⚠️ odhcp6c ${_O6_N} 個且仍在 flap(最後 ${_o6_flap_recent}), 冷卻中 (剩 $(( (_o6_until - _o6_now) / 60 )) 分), 不重複處理"
-        fi
+# === wan6 無限 flap 自癒 (2026-10-22) ===
+# ★ 真兇與誤判史(重要, 別再走回頭路):
+#   早上 load 7.95 / idle 13% / 1088 threads 的災難是真的, 機制是:
+#     netifd 對 wan6 無限 retry("Invalid argument") → 每秒 down/up 5~6 次
+#     → 每次都丟 RTM_NEWROUTE/DELROUTE → tailscaled 的 network monitor
+#       被餵到吃滿一顆核 → 連鎖觸發 firewall reload → 堆積 235 個
+#       dnsmasq restart 行程。
+#     restart wan6 實測有效(idle 13%→84%, tailscaled 44%→4%)。
+#
+#   ⚠️ 但第一版用「odhcp6c 行程數 > 1」當觸發條件是錯的 ——
+#     odhcp6c 每次收到上游 RA/DHCPv6 更新, 會 fork 自己去執行
+#     /lib/netifd/dhcpv6.script(該檔開頭就寫 "should be run by odhcpc6c")。
+#     fork 出來的子行程在 exec 成 shell 前, /proc 裡的名字還是 odhcp6c,
+#     所以 pidof 會「短暫」看到 2 個 —— 這是完全正常的行為。
+#     實測 2026-10-22 17:01~17:05 四分鐘內出現 7 次, 每次存活僅數秒
+#     (父子關係可證: PPID 指向另一個 odhcp6c)。
+#     後果: 舊版會在正常 fork 的瞬間誤觸發, 平白無故 restart WAN6。
+#     10:28 與 16:49 那兩次「成功自癒」極可能根本沒病。
+#
+# ★ 正確的故障指標是 flap 頻率, 不是行程數:
+#     正常   = 近 60 秒 0 次  (實測)
+#     發作時 = 每秒 5~6 次 → 一分鐘 300+ 次 (實測)
+#   區分度極高, 門檻取 10 不可能誤判。
+# ⚠️ 擺在 Load 警告之前: 這是 load 高的已知成因, 先修因,
+#   避免被下面 load>=12 的規則直接 reboot 掉。
+_W6_COOL="/tmp/.wan6_flap_fix_until"
+# 數「近 60 秒內」wan6 進入 setting up 的次數
+_w6_flapcnt() {
+    _ns=$(date +%H:%M:%S | awk -F: '{print $1*3600+$2*60+$3}')
+    logread 2>/dev/null | grep "wan6' is setting up" | awk -v now="$_ns" '
+    {
+        split($4, t, ":")
+        s = t[1]*3600 + t[2]*60 + t[3]
+        age = now - s
+        if (age < 0) age += 86400
+        if (age <= 60) n++
+    }
+    END { print n+0 }'
+}
+_W6_FLAP=$(_w6_flapcnt)
+if [ "$_W6_FLAP" -gt 10 ]; then
+    _w6_now=$(date +%s)
+    _w6_until=$(cat "$_W6_COOL" 2>/dev/null)
+    case "$_w6_until" in ''|*[!0-9]*) _w6_until=0 ;; esac
+    if [ "$_w6_now" -lt "$_w6_until" ]; then
+        log "⚠️ wan6 近 60 秒 flap ${_W6_FLAP} 次, 但冷卻中 (剩 $(( (_w6_until - _w6_now) / 60 )) 分), 不重複處理"
     else
-        _o6_load_before=$(awk '{print $1, $2, $3}' /proc/loadavg)
-        log "⚠️ odhcp6c 重複 ${_O6_N} 個 → wan6 會無限 flap, 執行 restart wan6 自癒"
-        # 動手前先推: 讓你知道它正要動 WAN, 就算下面卡住也有紀錄
-        push_notify "🔧 watchdog 偵測到 odhcp6c 重複 ${_O6_N} 個 —— 這會害 wan6 每秒 flap 5 次、tailscaled 吃滿一顆核。現在開始 restart wan6 自癒 (ifdown → 清殘留 → ifup, 約 20 秒)。load(1m/5m/15m)=${_o6_load_before}"
-        # 冷卻時間先寫下去: 萬一下面卡死或機器被重開, 也不會一醒來就再衝一次
-        echo $(( _o6_now + 1800 )) > "$_O6_COOL"
+        _w6_load_before=$(awk '{print $1, $2, $3}' /proc/loadavg)
+        log "⚠️ wan6 近 60 秒 flap ${_W6_FLAP} 次(門檻 10) → netifd retry loop, 執行 restart wan6 自癒"
+        # 動手前先推: restart 會動到 WAN 介面, 即使後續卡住也要留紀錄
+        push_notify "🔧 watchdog 偵測到 wan6 無限 flap: 近 60 秒 ${_W6_FLAP} 次(正常為 0) —— 這會害 tailscaled 吃滿一顆核、堆積大量 dnsmasq restart。現在開始 restart wan6 自癒(約 20 秒)。load(1m/5m/15m)=${_w6_load_before}"
+        # 冷卻先寫: 萬一卡死或機器重開, 醒來不會立刻再衝一次
+        echo $(( _w6_now + 1800 )) > "$_W6_COOL"
         ifdown wan6 2>/dev/null
         sleep 5
-        # ifdown 不保證收乾淨殘留的那個, 明確清掉再起
-        for _p in $(pidof odhcp6c 2>/dev/null); do
-            kill "$_p" 2>/dev/null
-        done
+        # 清殘留 odhcp6c 再起 —— 注意這裡是「清乾淨再起」的手段,
+        # 不是把行程數當判斷依據(那是上面講的誤判)。
+        killall -q odhcp6c 2>/dev/null
         sleep 2
         ifup wan6 2>/dev/null
-        # ⚠️ 不能只 sleep 10 就數: ifup 後新舊 odhcp6c 會短暫並存, 實測約 1 分鐘
-        #   才收斂。2026-10-22 10:28 真的誤判過一次 —— 自癒其實成功了(事後確認
-        #   只剩 1 個、flap 停在 ifup 那一刻、load 0.43), 卻因為在第 10 秒數到
-        #   2 個而推了「自癒無效」的假警報。改為輪詢最多 60 秒。
-        _O6_AFTER=99
-        _o6_i=0
-        while [ "$_o6_i" -lt 12 ]; do
-            sleep 5
-            _O6_AFTER=$(_o6_count)
-            [ "$_O6_AFTER" -le 1 ] && break
-            _o6_i=$(( _o6_i + 1 ))
+        # 等 flap 真的停: 給 60 秒, 每 10 秒重數一次近 60 秒的 flap
+        _w6_ok=0
+        _w6_i=0
+        while [ "$_w6_i" -lt 6 ]; do
+            sleep 10
+            if [ "$(_w6_flapcnt)" -le 10 ]; then _w6_ok=1; break; fi
+            _w6_i=$(( _w6_i + 1 ))
         done
-        _o6_load_after=$(awk '{print $1}' /proc/loadavg)
-        if [ "$_O6_AFTER" -le 1 ]; then
-            log "✅ odhcp6c 已回復 ${_O6_AFTER} 個, wan6 已重啟"
-            push_notify "✅ wan6 restart 完成: odhcp6c ${_O6_N} → ${_O6_AFTER} 個, flap 應已停止。load(1m) ${_o6_load_before%% *} → ${_o6_load_after} (load 是衰減平均, 會再過幾分鐘才完全降下來)。根因未明, 若頻繁發生請回報此訊息時間供追查。"
+        _w6_after=$(_w6_flapcnt)
+        _w6_load_after=$(awk '{print $1}' /proc/loadavg)
+        if [ "$_w6_ok" = "1" ]; then
+            log "✅ wan6 flap 已停 (近 60 秒 ${_w6_after} 次), 自癒成功"
+            push_notify "✅ wan6 restart 完成: flap ${_W6_FLAP} → ${_w6_after} 次/分, 已停止。load(1m) ${_w6_load_before%% *} → ${_w6_load_after} (load 是衰減平均, 會再過幾分鐘才完全降下來)。根因(netifd 為何進入 retry loop)仍未明, 若頻繁發生請回報此訊息時間。"
         else
-            log "⚠️ restart wan6 後 odhcp6c 仍有 ${_O6_AFTER} 個"
-            push_notify "⚠️ wan6 restart 後 odhcp6c 仍有 ${_O6_AFTER} 個 —— 自癒無效, 需人工介入。冷卻 30 分鐘後才會再試。"
+            log "⚠️ restart wan6 後 flap 仍有 ${_w6_after} 次/分"
+            push_notify "⚠️ wan6 restart 後仍在 flap (${_w6_after} 次/分) —— 自癒無效, 需人工介入。冷卻 30 分鐘後才會再試。"
         fi
     fi
 fi
