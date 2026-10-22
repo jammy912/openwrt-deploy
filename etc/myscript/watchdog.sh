@@ -197,13 +197,35 @@ collect_netdiag() {
 # ⚠️ 動手前先推一則: restart wan6 是會動到 WAN 介面的操作, 即使失敗/卡住
 #   也要留下「它決定要動了」的紀錄, 不能只在成功後才推。
 _O6_COOL="/tmp/.odhcp6c_fix_until"
-_O6_N=$(ps w | grep '[o]dhcp6c' | wc -l)
+_o6_count() { pidof odhcp6c 2>/dev/null | wc -w; }
+_O6_N=$(_o6_count)
 if [ "$_O6_N" -gt 1 ]; then
     _o6_now=$(date +%s)
     _o6_until=$(cat "$_O6_COOL" 2>/dev/null)
     case "$_o6_until" in ''|*[!0-9]*) _o6_until=0 ;; esac
     if [ "$_o6_now" -lt "$_o6_until" ]; then
-        log "⚠️ odhcp6c 仍有 ${_O6_N} 個, 但冷卻中 (剩 $(( (_o6_until - _o6_now) / 60 )) 分), 不重複處理"
+        # ⚠️ 冷卻期內要重新判斷「是不是其實已經好了」。
+        #   數量 >1 不等於故障 —— 交接期會並存, 而真正的故障指標是 flap。
+        #   2026-10-22 實測: 10:28 自癒成功後, 這裡連印三次「仍有 2 個」,
+        #   但當下實際只有 1 個(舊版用 ps|grep 會誤抓到 shell 指令列),
+        #   flap 也早就停了。那三則訊息純屬雜訊。
+        #   現在: 近 3 分鐘內沒有新的 flap = 已恢復 → 解除冷卻, 安靜收工。
+        _o6_flap_recent=$(logread | grep "wan6' is setting up" | tail -1 | awk '{print $4}')
+        _o6_quiet=1
+        if [ -n "$_o6_flap_recent" ]; then
+            # log 時間格式 HH:MM:SS → 換成當日秒數比對
+            _o6_fs=$(echo "$_o6_flap_recent" | awk -F: '{print $1*3600 + $2*60 + $3}')
+            _o6_ns=$(date +%H:%M:%S | awk -F: '{print $1*3600 + $2*60 + $3}')
+            _o6_age=$(( _o6_ns - _o6_fs ))
+            [ "$_o6_age" -lt 0 ] && _o6_age=$(( _o6_age + 86400 ))   # 跨午夜
+            [ "$_o6_age" -lt 180 ] && _o6_quiet=0
+        fi
+        if [ "$_o6_quiet" = "1" ]; then
+            rm -f "$_O6_COOL" 2>/dev/null
+            log "✅ odhcp6c=${_O6_N} 但近 3 分鐘無 flap(最後 ${_o6_flap_recent:-無}) → 判定已恢復, 解除冷卻"
+        else
+            log "⚠️ odhcp6c ${_O6_N} 個且仍在 flap(最後 ${_o6_flap_recent}), 冷卻中 (剩 $(( (_o6_until - _o6_now) / 60 )) 分), 不重複處理"
+        fi
     else
         _o6_load_before=$(awk '{print $1, $2, $3}' /proc/loadavg)
         log "⚠️ odhcp6c 重複 ${_O6_N} 個 → wan6 會無限 flap, 執行 restart wan6 自癒"
@@ -214,13 +236,23 @@ if [ "$_O6_N" -gt 1 ]; then
         ifdown wan6 2>/dev/null
         sleep 5
         # ifdown 不保證收乾淨殘留的那個, 明確清掉再起
-        for _p in $(ps w | grep '[o]dhcp6c' | awk '{print $1}'); do
+        for _p in $(pidof odhcp6c 2>/dev/null); do
             kill "$_p" 2>/dev/null
         done
         sleep 2
         ifup wan6 2>/dev/null
-        sleep 10
-        _O6_AFTER=$(ps w | grep '[o]dhcp6c' | wc -l)
+        # ⚠️ 不能只 sleep 10 就數: ifup 後新舊 odhcp6c 會短暫並存, 實測約 1 分鐘
+        #   才收斂。2026-10-22 10:28 真的誤判過一次 —— 自癒其實成功了(事後確認
+        #   只剩 1 個、flap 停在 ifup 那一刻、load 0.43), 卻因為在第 10 秒數到
+        #   2 個而推了「自癒無效」的假警報。改為輪詢最多 60 秒。
+        _O6_AFTER=99
+        _o6_i=0
+        while [ "$_o6_i" -lt 12 ]; do
+            sleep 5
+            _O6_AFTER=$(_o6_count)
+            [ "$_O6_AFTER" -le 1 ] && break
+            _o6_i=$(( _o6_i + 1 ))
+        done
         _o6_load_after=$(awk '{print $1}' /proc/loadavg)
         if [ "$_O6_AFTER" -le 1 ]; then
             log "✅ odhcp6c 已回復 ${_O6_AFTER} 個, wan6 已重啟"
