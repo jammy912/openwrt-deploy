@@ -30,7 +30,7 @@ PUSH_NAMES="admin"
 log() { logger -t catch-wan6flap "$1"; }
 
 # 單一實例保護: PID 檔 + 驗活
-# ⚠️ 不能用 pidof <腳本名>: busybox 的 ps 顯示成 {catch-odhcp6c.s}(截斷),
+# ⚠️ 不能用 pidof <腳本名>: busybox 的 ps 顯示成 {catch-wan6flap.s}(截斷),
 #   pidof 認不出來 —— 2026-10-22 實測第一版就是這樣失守, 跑出兩個實例。
 # ⚠️ 也不能只看 PID 檔存在: 上次被 kill 或重開會留下陳舊 PID。
 PID_F="/tmp/.catch-wan6flap.pid"
@@ -39,7 +39,7 @@ if [ -f "$PID_F" ]; then
     case "$_old" in ''|*[!0-9]*) _old="" ;; esac
     if [ -n "$_old" ] && [ -d "/proc/$_old" ]; then
         case "$(tr '\0' ' ' < /proc/$_old/cmdline 2>/dev/null)" in
-            *catch-odhcp6c*) log "已有實例在跑(PID $_old), 退出"; exit 0 ;;
+            *catch-wan6flap*) log "已有實例在跑(PID $_old), 退出"; exit 0 ;;
         esac
     fi
 fi

@@ -174,7 +174,7 @@ rm -f /tmp/luci-indexcache
 #   事後回看一定已被洗掉 —— 必須在發生的當下就存檔。
 # ★ 只讀不改: 絕不 kill、絕不動 wan6。自癒是 watchdog 的事,
 #   這支只負責蒐證, 兩者分工不互相干擾。
-/etc/myscript/catch-odhcp6c.sh &
+/etc/myscript/catch-wan6flap.sh &
 
 exit 0
 
