@@ -168,13 +168,5 @@ rm -f /tmp/luci-indexcache
 #   沒跑 hostapd 的機器腳本自己會安靜退出, 故此行可安全下發給整個機隊。
 /etc/myscript/check-roam.sh &
 
-# wan6 flap 蒐證器 (2026-10-22, 暫時性: 查到根因就該移除)
-# ★ 用 rc.local 常駐不用 cron: 第二個 odhcp6c 的誕生是秒級事件,
-#   cron 最快 1 分鐘, 而 log_size 只有 128KB(實測僅涵蓋 ~58 分鐘),
-#   事後回看一定已被洗掉 —— 必須在發生的當下就存檔。
-# ★ 只讀不改: 絕不 kill、絕不動 wan6。自癒是 watchdog 的事,
-#   這支只負責蒐證, 兩者分工不互相干擾。
-/etc/myscript/catch-wan6flap.sh &
-
 exit 0
 
