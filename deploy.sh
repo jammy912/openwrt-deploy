@@ -894,8 +894,16 @@ if [ "$MESH_ROLE" != "client" ]; then
     uci delete dhcp.@dnsmasq[0].interface 2>/dev/null
     uci add_list dhcp.@dnsmasq[0].interface='lan'
     uci add_list dhcp.@dnsmasq[0].interface='wg1'
+    # localservice=0: ★ 不設這個,上面的 interface='wg1' 等於白設 ——
+    #   interface 只管「聽哪個介面」,localservice 管「接不接受這個來源」,
+    #   兩者是獨立的開關。wg1 的介面位址是 192.168.200.1/32,/32 的子網
+    #   只含自己,所以 localservice=1 會把 192.168.200.x 的 client 判定成
+    #   外部來源直接丟棄 —— WG 撥入後 DNS 完全不通(2026-10-27 於 x60pro 實測)。
+    #   安全性: dnsmasq 只綁 127.0.0.1 / LAN / wg1 位址,WAN 介面沒綁,
+    #   外網打不進來;wg1 前面另有 WireGuard 金鑰驗證與 firewall zone。
+    uci set dhcp.@dnsmasq[0].localservice='0'
     uci commit dhcp
-    echo "  ✅ dnsmasq DNS → 8.8.8.8 / 1.1.1.1 (allservers=1,AdGuard Home 啟動後由 check-adguard.sh 自動切換)"
+    echo "  ✅ dnsmasq DNS → 8.8.8.8 / 1.1.1.1 (allservers=1,localservice=0 讓 wg1 撥入可查,AdGuard Home 啟動後由 check-adguard.sh 自動切換)"
 fi
 
 # qosify template (sync-googleconfig 需要)
