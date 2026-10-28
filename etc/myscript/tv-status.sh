@@ -82,8 +82,11 @@ MEM_AVAIL=$(awk '/^MemAvailable:/ {printf "%d", $2*1024}' /proc/meminfo 2>/dev/n
 CPU_TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 CT_COUNT=$(readf /proc/sys/net/netfilter/nf_conntrack_count)
 CT_MAX=$(readf /proc/sys/net/netfilter/nf_conntrack_max)
+# ⚠️ 副gw 是 dhcp.lan.ignore=1 不發 DHCP, 但 /tmp/dhcp.leases 會留著當主gw 時的舊檔
+#    (實測 .4 舊檔 6 筆) -> 不發 DHCP 時回 null, 免得電視端看到假數字
 DHCP_CLIENTS=""
-[ -f /tmp/dhcp.leases ] && DHCP_CLIENTS=$(grep -c . /tmp/dhcp.leases)
+[ "$(uci -q get dhcp.lan.ignore)" != 1 ] && [ -f /tmp/dhcp.leases ] && \
+    DHCP_CLIENTS=$(grep -c . /tmp/dhcp.leases)
 
 # ---- WAN / WAN6 (ubus network.interface.*) ----
 # 回傳: {"up":..,"uptime":..,"has_ipv4|6":..,"ipv4|6_masked":..}
