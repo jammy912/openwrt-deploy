@@ -160,6 +160,106 @@ if pidof qosify >/dev/null 2>&1; then
 fi
 [ -n "$QOS_JSON" ] && QOS_JSON="[$QOS_JSON]" || QOS_JSON=null
 
+# ---- 實體連接埠 (同 LuCI「連接埠狀態」) ----
+# 清單取 /etc/board.json: wan.device + lan.ports; 不列 eth0(CPU 埠)/br-lan 等虛擬介面
+# role 是 board.json 的出廠角色; attached 是執行期實際掛在哪個 master
+#   (⚠️ 兩台的 lan2 都在 bat0 = batman mesh 有線, 不在 br-lan)
+# ★ 迴圈內只用 read 內建 (不 fork), 最後一次 awk 組 JSON
+#   —— 原本每個值都 $(readf)/$(num) 各 fork 一次, 5 個埠約 125 次, 實測讓
+#      整支 CPU 時間從 0.31s 翻到 0.71s/次 (電視每 5 秒打一次 = 吃掉 .4 單核 14%)
+_bw=$(jsonfilter -i /etc/board.json -e '@.network.wan.device' 2>/dev/null)
+_bl=$(jsonfilter -i /etc/board.json -e '@.network.lan.ports[*]' 2>/dev/null)
+PORTS_JSON=$(
+    for _pd in $_bw $_bl; do
+        _sd="/sys/class/net/$_pd"
+        [ -d "$_sd" ] || continue
+        [ "$_pd" = "$_bw" ] && _role=wan || _role=lan
+        _car= _spd= _dup= _rx= _tx= _att=
+        read -r _car 2>/dev/null < "$_sd/carrier"   # 介面 down 時讀取會 EINVAL -> 空
+        read -r _spd 2>/dev/null < "$_sd/speed"
+        read -r _dup 2>/dev/null < "$_sd/duplex"
+        read -r _rx 2>/dev/null < "$_sd/statistics/rx_bytes"
+        read -r _tx 2>/dev/null < "$_sd/statistics/tx_bytes"
+        [ -L "$_sd/master" ] && { _att=$(readlink "$_sd/master"); _att=${_att##*/}; }
+        echo "$_pd $_role ${_att:-_} ${_car:-_} ${_spd:-_} ${_dup:-_} ${_rx:-_} ${_tx:-_}"
+    done | awk '
+        function n(v) { return (v == "_" || v == "") ? "null" : v }
+        function s(v) { return (v == "_" || v == "") ? "null" : "\"" v "\"" }
+        {
+            up  = ($4 == "1")
+            spd = (up && $5 ~ /^[0-9]+$/) ? $5 : "_"     # 未連結時 speed 是 -1
+            dup = (up && $6 != "unknown") ? $6 : "_"
+            o = o (o == "" ? "" : ",") sprintf("{\"name\":\"%s\",\"role\":\"%s\",\"attached\":%s,\"up\":%s,\"speed_mbps\":%s,\"duplex\":%s,\"rx_bytes\":%s,\"tx_bytes\":%s}", \
+                $1, $2, s($3), (up ? "true" : "false"), n(spd), s(dup), n($7), n($8))
+        }
+        END { print (o == "" ? "null" : "[" o "]") }')
+
+# ---- 生效中的 Wi-Fi (一個 SSID 一筆) ----
+# 只列 hostapd.<ifname> 存在的 = 真的在發射的 AP; disabled 或 radio 起不來的不會出現
+# radio/band/hidden 由 network.wireless status 反查 (它只列啟用中的介面)
+# ⚠️ AP 模式下 iwinfo 的 Signal/Bit Rate 是「連上來的 client」的值, 不是 AP 本身;
+#    沒 client 時會是 0 dBm / unknown -> 一律回 null
+# ★ 同連接埠: 原始資料加前綴丟給單一 awk 組 JSON, 不逐值 fork
+#   MAP <ifname> <radio> <band> <hidden>   /   IF <ifname> <clients>   /   I <ifname> <iwinfo 原文>
+_wst=$(ubus call network.wireless status 2>/dev/null)
+_wmap=""
+for _r in $(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+    _band=$(echo "$_wst" | jsonfilter -e "@.$_r.config.band" 2>/dev/null)
+    _k=0
+    while :; do
+        _i= _s=
+        eval "$(echo "$_wst" | jsonfilter -e "_i=@.$_r.interfaces[$_k].ifname" \
+            -e "_s=@.$_r.interfaces[$_k].section" 2>/dev/null)"
+        [ -n "$_s" ] || break
+        _h=false; [ "$(uci -q get "wireless.$_s.hidden")" = 1 ] && _h=true
+        [ -n "$_i" ] && _wmap="${_wmap}MAP $_i $_r ${_band:-_} $_h
+"
+        _k=$((_k + 1))
+    done
+done
+WIFI_JSON=$(
+    {
+        printf '%s' "$_wmap"
+        for _hap in $(ubus list 'hostapd.*' 2>/dev/null); do
+            _wi=${_hap#hostapd.}
+            echo "IF $_wi $(ubus call "$_hap" get_clients 2>/dev/null | grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"' | wc -l)"
+            iwinfo "$_wi" info 2>/dev/null | sed "s/^/I $_wi /"
+        done
+    } | awk '
+        function n(v) { return (v == "") ? "null" : v }
+        # SSID 的 JSON 跳脫。⚠️ busybox awk 和 gawk 行為不同, 實測只有這樣才對:
+        #   /\\/ 會把 \/ 當跳脫斜線害 regex 延伸到後面 -> 用 [\\]
+        #   replacement 要 8 個反斜線才得到 \\, 引號要 "\\\\\"" 才得到 \"
+        function s(v) { if (v == "" || v == "_") return "null"; gsub(/[\\]/, "\\\\\\\\", v); gsub(/"/, "\\\\\"", v); return "\"" v "\"" }
+        $1 == "MAP" { rd[$2] = $3; bd[$2] = $4; hd[$2] = $5; next }
+        $1 == "IF"  { ord[++cnt] = $2; cl[$2] = $3; next }
+        $1 == "I"   {
+            w = $2; l = substr($0, length($1) + length($2) + 3)   # 保留 SSID 內的連續空白
+            k = split(l, a, " ")
+            if (l ~ /ESSID:/) { v = l; sub(/.*ESSID: "/, "", v); sub(/"[ \t]*$/, "", v); ss[w] = v }
+            if (l ~ /Mode:/) {
+                for (i = 1; i <= k; i++) {
+                    # ⚠️ 這行有兩個 "Mode:" (Mode: Master ... HT Mode: HT20), 只取第一個
+                    if (a[i] == "Mode:" && !(w in md)) md[w] = a[i+1]
+                    if (a[i] == "Channel:") { ch[w] = a[i+1]; f = a[i+2]; gsub(/[()]/, "", f); fq[w] = sprintf("%d", f * 1000) }
+                }
+            }
+            if (a[1] == "Signal:") { sg[w] = a[2]; nz[w] = a[5] }
+            # ⚠️ 一律 sprintf %d: awk 預設 6 位有效數字, 1 Gbit 以上會變科學記號
+            if (a[1] == "Bit" && a[2] == "Rate:" && a[3] != "unknown") br[w] = sprintf("%d", a[3] * 1000)
+        }
+        END {
+            for (j = 1; j <= cnt; j++) {
+                w = ord[j]
+                sig = (cl[w] > 0 && sg[w] != "0") ? sg[w] : ""
+                bit = (cl[w] > 0) ? br[w] : ""
+                o = o (o == "" ? "" : ",") sprintf("{\"radio\":%s,\"band\":%s,\"ifname\":\"%s\",\"ssid\":%s,\"hidden\":%s,\"mode\":%s,\"channel\":%s,\"freq_mhz\":%s,\"clients\":%s,\"bitrate_kbps\":%s,\"signal_dbm\":%s,\"noise_dbm\":%s}", \
+                    s(rd[w]), s(bd[w]), w, s(ss[w]), (w in hd ? hd[w] : "null"), s(md[w]), \
+                    n(ch[w]), n(fq[w]), n(cl[w]), n(bit), n(sig), n(nz[w]))
+            }
+            print (o == "" ? "null" : "[" o "]")
+        }')
+
 # ---- Ping (check-pbr-wg.sh 旁路留下的 /tmp/tv-ping/<iface>) ----
 # 格式 "<epoch> <avg_ms|null> <loss%|null>"; 經該介面 ping 8.8.8.8 (端到端出口延遲)
 # 只有 check-pbr-wg 健檢會 ping 的介面才有 (wg3/wg8ts/wg0 未被 flap 鎖時), 其餘回 null
@@ -237,4 +337,5 @@ printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
     "$(num "$CT_COUNT")" "$(num "$CT_MAX")" "$(num "$DHCP_CLIENTS")"
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$(str "$WAN_DEV")" "$(num "$WAN_RX")" "$(num "$WAN_TX")"
+printf '"ports":%s,"wifi":%s,' "$PORTS_JSON" "$WIFI_JSON"
 printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON"
