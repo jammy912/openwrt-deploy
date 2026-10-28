@@ -168,5 +168,11 @@ rm -f /tmp/luci-indexcache
 #   沒跑 hostapd 的機器腳本自己會安靜退出, 故此行可安全下發給整個機隊。
 /etc/myscript/check-roam.sh &
 
+# 電視 App 唯讀狀態 CGI: 補建 /cgi-bin/tv-status symlink
+# ★ sync-deploy 只同步 /etc/myscript 不碰 /www, sysupgrade 也不保留 /www,
+#   靠這行讓全機隊開機自癒(auto-role 互換後誰接 .1.1 都要有)
+[ -d /www/cgi-bin ] && [ ! -e /www/cgi-bin/tv-status ] && \
+    ln -s /etc/myscript/tv-status.sh /www/cgi-bin/tv-status
+
 exit 0
 
