@@ -79,6 +79,7 @@ set -- $(readf /proc/loadavg)
 LOAD="[$(num "$1"),$(num "$2"),$(num "$3")]"
 MEM_TOTAL=$(awk '/^MemTotal:/ {printf "%d", $2*1024}' /proc/meminfo 2>/dev/null)
 MEM_AVAIL=$(awk '/^MemAvailable:/ {printf "%d", $2*1024}' /proc/meminfo 2>/dev/null)
+CPUS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
 CPU_TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 CT_COUNT=$(readf /proc/sys/net/netfilter/nf_conntrack_count)
 CT_MAX=$(readf /proc/sys/net/netfilter/nf_conntrack_max)
@@ -123,6 +124,41 @@ if [ -n "$WAN_DEV" ] && [ -d "/sys/class/net/$WAN_DEV" ]; then
     WAN_RX=$(readf "/sys/class/net/$WAN_DEV/statistics/rx_bytes")
     WAN_TX=$(readf "/sys/class/net/$WAN_DEV/statistics/tx_bytes")
 fi
+
+# ---- qosify 頻寬 (電視端當流量負載的分母) ----
+# ★ 讀 tc 上實際生效的 cake bandwidth, 不讀 uci 數字:
+#   uci 有設不代表有套用 (副gw 的 wg0 有設定但沒有介面, 就不會有 cake),
+#   qosify 沒跑時 cake 也不在 -> 自然得到 null
+# 上行 = dev 本身 root cake, 下行 = ifb-<dev> 的 ingress cake
+# 介面清單取 uci qosify 的 interface section (name 是 UCI 介面名, 例如 wan/wg0)
+cake_bps() {
+    tc qdisc show dev "$1" 2>/dev/null | awk '/ cake / {
+        for (i = 1; i < NF; i++) if ($i == "bandwidth") {
+            v = $(i+1); n = v + 0
+            if (v ~ /Gbit$/) n *= 1000000000
+            else if (v ~ /Mbit$/) n *= 1000000
+            else if (v ~ /Kbit$/) n *= 1000
+            else if (v !~ /bit$/) next
+            printf "%.0f", n; exit
+        }
+    }'
+}
+QOS_JSON=""
+if pidof qosify >/dev/null 2>&1; then
+    for _s in $(uci -q show qosify | sed -n "s/^qosify\.\([^.]*\)=interface$/\1/p"); do
+        [ "$(uci -q get "qosify.$_s.disabled")" = 1 ] && continue
+        _n=$(uci -q get "qosify.$_s.name")
+        [ -n "$_n" ] || continue
+        _d=$(ubus call "network.interface.$_n" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        [ -n "$_d" ] || continue
+        _up=$(cake_bps "$_d")
+        _dn=$(cake_bps "ifb-$_d")
+        [ -n "$_up$_dn" ] || continue
+        QOS_JSON="${QOS_JSON:+$QOS_JSON,}$(printf '{"iface":%s,"dev":%s,"down_bps":%s,"up_bps":%s}' \
+            "$(str "$_n")" "$(str "$_d")" "$(num "$_dn")" "$(num "$_up")")"
+    done
+fi
+[ -n "$QOS_JSON" ] && QOS_JSON="[$QOS_JSON]" || QOS_JSON=null
 
 # ---- Ping (check-pbr-wg.sh 旁路留下的 /tmp/tv-ping/<iface>) ----
 # 格式 "<epoch> <avg_ms|null> <loss%|null>"; 經該介面 ping 8.8.8.8 (端到端出口延遲)
@@ -193,12 +229,12 @@ fi
 # ---- 輸出 ----
 printf 'Content-Type: application/json\r\n'; hdr; printf '\r\n'
 [ "$REQUEST_METHOD" = HEAD ] && exit 0
-printf '{"v":1,"ts":%s,"host":%s,"role":%s,"uptime":%s,"load":%s,' \
-    "$(num "$NOW")" "$(str "$HOST")" "$(str "$ROLE")" "$(num "$UPTIME")" "$LOAD"
+printf '{"v":1,"ts":%s,"host":%s,"role":%s,"uptime":%s,"cpus":%s,"load":%s,' \
+    "$(num "$NOW")" "$(str "$HOST")" "$(str "$ROLE")" "$(num "$UPTIME")" "$(num "$CPUS")" "$LOAD"
 printf '"mem_total":%s,"mem_available":%s,"cpu_temp_c":%s,' \
     "$(num "$MEM_TOTAL")" "$(num "$MEM_AVAIL")" "$(num "$CPU_TEMP")"
 printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
     "$(num "$CT_COUNT")" "$(num "$CT_MAX")" "$(num "$DHCP_CLIENTS")"
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$(str "$WAN_DEV")" "$(num "$WAN_RX")" "$(num "$WAN_TX")"
-printf '"ping":%s,"wg":[%s],"tailscale":%s}\n' "$PING_JSON" "$WG_JSON" "$TS_JSON"
+printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON"
