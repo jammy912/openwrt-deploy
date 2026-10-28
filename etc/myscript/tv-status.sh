@@ -65,6 +65,35 @@ run_limited() {
     rm -f "$TMPF"
 }
 
+# ---- 本機 AP 的 client 清單 (給主gw 彙整全屋 wifi_mesh 用) ----
+# 輸出純文字:  H <hostname>  /  S <mac_hash> <inactive_ms> <band> <ssid...>
+# ★ 只列 authorized 的 station; inactive 用來在漫遊重複時判斷「現在在哪台」
+# ★ MAC 只回 md5 前 12 碼(跨節點去重用), 不回原始 MAC
+tv_stations() {
+    echo "H $(cat /proc/sys/kernel/hostname 2>/dev/null)"
+    for _hap in $(ubus list 'hostapd.*' 2>/dev/null); do
+        _wi=${_hap#hostapd.}
+        iw dev "$_wi" info 2>/dev/null | sed "s/^/I $_wi /"
+        iw dev "$_wi" station dump 2>/dev/null | sed "s/^/S $_wi /"
+    done | awk '
+        function flush() { if (m != "" && au == "yes") print m, (in_ == "" ? 0 : in_), (bd[w] == "" ? "_" : bd[w]), (ss[w] == "" ? "_" : ss[w]); m = ""; au = ""; in_ = "" }
+        $1 == "I" && $3 == "ssid" { v = $0; sub(/^I [^ ]+ [ \t]*ssid /, "", v); ss[$2] = v; next }
+        $1 == "I" && $3 == "channel" { f = $5; gsub(/[()]/, "", f); f += 0
+            bd[$2] = (f < 3000) ? "2g" : (f < 5925) ? "5g" : "6g"; next }
+        $1 == "S" && $3 == "Station" { flush(); w = $2; m = $4; next }
+        $1 == "S" && $3 == "inactive" { in_ = $5 + 0; next }
+        $1 == "S" && $3 == "authorized:" { au = $4; next }
+        END { flush() }' | while read -r _m _in _b _ss; do
+        echo "S $(printf '%s' "$_m" | md5sum | cut -c1-12) $_in $_b $_ss"
+    done
+}
+case "$QUERY_STRING" in
+    *stations*)
+        printf 'Content-Type: text/plain\r\n'; hdr; printf '\r\n'
+        [ "$REQUEST_METHOD" = HEAD ] || tv_stations
+        exit 0 ;;
+esac
+
 NOW=$(date +%s)
 
 # ---- 系統 ----
@@ -288,6 +317,65 @@ WIFI_JSON=$(
             print (o == "" ? "null" : "[" o "]")
         }')
 
+# ---- 全屋 Wi-Fi client (只有主gw 提供) ----
+# 主gw 向各節點 GET /cgi-bin/tv-status?stations, 加上本機, 依 MAC hash 去重
+# ★ 不用 usteer: 實測它只看 ssid_list 裡的 Portkey(IOT 不在), remote 也只看到 .4
+# ★ 節點 IP = auto-role 依 DHCP 靜態租約給副gw 的位址 (AX3000T .2/.3、RAX3000Z .4、
+#   MX4200 .5、x60pro .6), 主gw 固定 .1; 本機的 br-lan IP 會自動略過
+# ★ 漫遊重複: 同一 hash 出現在多台時只算一次, 歸給 inactive 最小(最近有收發)的那台
+# ★ 快取 30 秒、背景更新: 電視請求不等 curl (離線節點最多卡 3 秒)
+#   沒快取(開機後第一次)時這欄回 null, 下一輪就有; ts = 彙整時間
+TV_MESH_NODES="192.168.1.1 192.168.1.2 192.168.1.3 192.168.1.4 192.168.1.5 192.168.1.6"
+tv_mesh_refresh() {
+    _d="/tmp/tv-mesh.$$"
+    mkdir -p "$_d" || return
+    _self=" $(ip -4 -o addr show br-lan 2>/dev/null | awk '{sub(/\/.*/, "", $4); printf "%s ", $4}')"
+    tv_stations > "$_d/local" 2>/dev/null
+    for _ip in $TV_MESH_NODES; do
+        case "$_self" in *" $_ip "*) continue ;; esac
+        curl -sf -m 3 -o "$_d/$_ip" "http://$_ip/cgi-bin/tv-status?stations" 2>/dev/null || : > "$_d/$_ip" &
+    done
+    wait
+    _ips=$(ls "$_d" | grep -v '^local$' | tr '\n' ' ')
+    for _f in "$_d"/*; do sed "s|^|${_f##*/} |" "$_f"; done | awk -v now="$NOW" -v ips="$_ips" '
+        function s(v) { if (v == "" || v == "_") return "null"; gsub(/[\\]/, "\\\\\\\\", v); gsub(/"/, "\\\\\"", v); return "\"" v "\"" }
+        $2 == "H" { if (!($3 in seen)) { seen[$3] = 1; nodes[++nn] = $3 }; hn[$1] = $3; next }
+        $2 == "S" {
+            h = $3; node = hn[$1]; if (node == "") next
+            v = $0; sub(/^[^ ]+ S [^ ]+ [^ ]+ [^ ]+ /, "", v)
+            if (!(h in best) || $4 + 0 < best[h]) { best[h] = $4 + 0; bn[h] = node; bb[h] = $5; bs[h] = v }
+            next
+        }
+        END {
+            for (f in hn) ok[f] = 1
+            for (h in best) { tot++; byn[bn[h]]++; k = bs[h] SUBSEP bb[h]; if (!(k in bys)) ko[++nk] = k; bys[k]++ }
+            for (j = 1; j <= nk; j++) { split(ko[j], p, SUBSEP)
+                o1 = o1 (o1 == "" ? "" : ",") sprintf("{\"ssid\":%s,\"band\":%s,\"clients\":%d}", s(p[1]), s(p[2]), bys[ko[j]]) }
+            for (j = 1; j <= nn; j++)
+                o2 = o2 (o2 == "" ? "" : ",") sprintf("{\"node\":%s,\"clients\":%d}", s(nodes[j]), byn[nodes[j]])
+            n = split(ips, ia, " ")
+            for (j = 1; j <= n; j++) if (!(ia[j] in ok))
+                o3 = o3 (o3 == "" ? "" : ",") "\"" ia[j] "\""
+            printf "{\"total\":%d,\"by_ssid\":[%s],\"by_node\":[%s],\"nodes_seen\":%d,\"nodes_missing\":[%s],\"ts\":%d}\n", \
+                tot, o1, o2, nn, o3, now
+        }' > /tmp/tv-status.mesh.tmp \
+        && mv -f /tmp/tv-status.mesh.tmp /tmp/tv-status.mesh
+    rm -rf "$_d"
+}
+MESH_JSON=null
+if [ "$ROLE" = main ]; then
+    _ml=
+    read -r _ml 2>/dev/null < /tmp/tv-status.mesh.lock
+    _mt=
+    [ -s /tmp/tv-status.mesh ] && _mt=$(date -r /tmp/tv-status.mesh +%s 2>/dev/null)
+    # 快取滿 30 秒且沒有進行中的更新(鎖超過 60 秒視為殘留)才觸發
+    if { [ -z "$_mt" ] || [ $((NOW - _mt)) -ge 30 ]; } && { [ -z "$_ml" ] || [ $((NOW - _ml)) -ge 60 ]; }; then
+        echo "$NOW" > /tmp/tv-status.mesh.lock
+        ( tv_mesh_refresh; rm -f /tmp/tv-status.mesh.lock ) </dev/null >/dev/null 2>&1 &
+    fi
+    [ -s /tmp/tv-status.mesh ] && read -r MESH_JSON < /tmp/tv-status.mesh
+fi
+
 # ---- Ping (check-pbr-wg.sh 旁路留下的 /tmp/tv-ping/<iface>) ----
 # 格式 "<epoch> <avg_ms|null> <loss%|null>"; 經該介面 ping 8.8.8.8 (端到端出口延遲)
 # 只有 check-pbr-wg 健檢會 ping 的介面才有 (wg3/wg8ts/wg0 未被 flap 鎖時), 其餘回 null
@@ -366,5 +454,5 @@ printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
     "$(num "$CT_COUNT")" "$(num "$CT_MAX")" "$(num "$DHCP_CLIENTS")"
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$(str "$WAN_DEV")" "$(num "$WAN_RX")" "$(num "$WAN_TX")"
-printf '"ports":%s,"wifi":%s,' "$PORTS_JSON" "$WIFI_JSON"
+printf '"ports":%s,"wifi":%s,"wifi_mesh":%s,' "$PORTS_JSON" "$WIFI_JSON" "$MESH_JSON"
 printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON"
