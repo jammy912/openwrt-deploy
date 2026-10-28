@@ -79,12 +79,18 @@ tv_stations() {
         function flush() { if (m != "" && au == "yes") print m, (in_ == "" ? 0 : in_), (bd[w] == "" ? "_" : bd[w]), (ss[w] == "" ? "_" : ss[w]); m = ""; au = ""; in_ = "" }
         $1 == "I" && $3 == "ssid" { v = $0; sub(/^I [^ ]+ [ \t]*ssid /, "", v); ss[$2] = v; next }
         $1 == "I" && $3 == "channel" { f = $5; gsub(/[()]/, "", f); f += 0
-            bd[$2] = (f < 3000) ? "2g" : (f < 5925) ? "5g" : "6g"; next }
+            if (!($2 in ch)) ord[++na] = $2
+            ch[$2] = $4; bd[$2] = (f < 3000) ? "2g" : (f < 5925) ? "5g" : "6g"; next }
         $1 == "S" && $3 == "Station" { flush(); w = $2; m = $4; next }
         $1 == "S" && $3 == "inactive" { in_ = $5 + 0; next }
         $1 == "S" && $3 == "authorized:" { au = $4; next }
-        END { flush() }' | while read -r _m _in _b _ss; do
-        echo "S $(printf '%s' "$_m" | md5sum | cut -c1-12) $_in $_b $_ss"
+        # A <band> <channel> <ssid...>: 每個發射中的 AP 一行(沒 client 也列), 給 by_ssid.channels
+        END { flush(); for (j = 1; j <= na; j++) { w = ord[j]; print "A", bd[w], ch[w], (ss[w] == "" ? "_" : ss[w]) } }' |
+    while read -r _t _m _rest; do
+        case "$_t" in
+            A) echo "A $_m $_rest" ;;
+            *) echo "S $(printf '%s' "$_t" | md5sum | cut -c1-12) $_m $_rest" ;;
+        esac
     done
 }
 case "$QUERY_STRING" in
@@ -340,6 +346,14 @@ tv_mesh_refresh() {
     for _f in "$_d"/*; do sed "s|^|${_f##*/} |" "$_f"; done | awk -v now="$NOW" -v ips="$_ips" '
         function s(v) { if (v == "" || v == "_") return "null"; gsub(/[\\]/, "\\\\\\\\", v); gsub(/"/, "\\\\\"", v); return "\"" v "\"" }
         $2 == "H" { if (!($3 in seen)) { seen[$3] = 1; nodes[++nn] = $3 }; hn[$1] = $3; next }
+        # <file> A <band> <channel> <ssid...>: 該節點這個 SSID 正在發射的頻道
+        $2 == "A" {
+            node = hn[$1]; if (node == "") next
+            v = $0; sub(/^[^ ]+ A [^ ]+ [^ ]+ /, "", v)
+            k = v SUBSEP $3; if (!(k in bys)) { ko[++nk] = k; bys[k] = 0 }
+            if ($4 ~ /^[0-9]+$/) chn[k, node] = $4
+            next
+        }
         $2 == "S" {
             h = $3; node = hn[$1]; if (node == "") next
             v = $0; sub(/^[^ ]+ S [^ ]+ [^ ]+ [^ ]+ /, "", v)
@@ -349,8 +363,11 @@ tv_mesh_refresh() {
         END {
             for (f in hn) ok[f] = 1
             for (h in best) { tot++; byn[bn[h]]++; k = bs[h] SUBSEP bb[h]; if (!(k in bys)) ko[++nk] = k; bys[k]++ }
-            for (j = 1; j <= nk; j++) { split(ko[j], p, SUBSEP)
-                o1 = o1 (o1 == "" ? "" : ",") sprintf("{\"ssid\":%s,\"band\":%s,\"clients\":%d}", s(p[1]), s(p[2]), bys[ko[j]]) }
+            # channels 依 by_node 的節點順序; 該節點沒發射這個 SSID 就不列
+            for (j = 1; j <= nk; j++) { split(ko[j], p, SUBSEP); oc = ""
+                for (i = 1; i <= nn; i++) if ((ko[j], nodes[i]) in chn)
+                    oc = oc (oc == "" ? "" : ",") sprintf("{\"node\":%s,\"channel\":%d}", s(nodes[i]), chn[ko[j], nodes[i]])
+                o1 = o1 (o1 == "" ? "" : ",") sprintf("{\"ssid\":%s,\"band\":%s,\"clients\":%d,\"channels\":[%s]}", s(p[1]), s(p[2]), bys[ko[j]], oc) }
             for (j = 1; j <= nn; j++)
                 o2 = o2 (o2 == "" ? "" : ",") sprintf("{\"node\":%s,\"clients\":%d}", s(nodes[j]), byn[nodes[j]])
             n = split(ips, ia, " ")
