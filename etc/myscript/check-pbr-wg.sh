@@ -869,6 +869,16 @@ if [ -f "$DBR_CONF" ]; then
     done
 fi
 
+# === 旁路：WAN 延遲（給 tv-status 電視 App, 不參與任何判定） ===
+# 健檢本身不 ping wan (DBR 迴圈刻意跳過), 2026-10-28 應 Jammy 要求額外量一筆,
+# 目標同隧道用的 $TARGET_IP, 電視端才能直接比較「直出 vs 各隧道出口」。
+# ★ -I 要用 l3_device(eth1/pppoe-wan), 不能用 "wan"(UCI 名, busybox: bad address)
+# ★ -w 4 封頂: 健康約 2 秒, WAN 全斷最多 4 秒, 不拖長 cron 全域鎖太多
+_wan_dev=$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+if [ -n "$_wan_dev" ]; then
+    tv_ping_save wan "$(ping -c 3 -W 2 -w 4 -I "$_wan_dev" $TARGET_IP 2>/dev/null)"
+fi
+
 # === 第四階段：server wg 多 peer 的 0.0.0.0/0 出口 failover ===
 # 場景: 一個 passive server wg 介面（無 endpoint_host）下掛多個 peer，
 #       多個 peer 的 uci allowed_ips 都宣告 0.0.0.0/0（想當該介面的對外出口）。
