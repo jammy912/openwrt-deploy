@@ -80,6 +80,34 @@ LOAD="[$(num "$1"),$(num "$2"),$(num "$3")]"
 MEM_TOTAL=$(awk '/^MemTotal:/ {printf "%d", $2*1024}' /proc/meminfo 2>/dev/null)
 MEM_AVAIL=$(awk '/^MemAvailable:/ {printf "%d", $2*1024}' /proc/meminfo 2>/dev/null)
 CPUS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+
+# ---- CPU 使用率 (%) = 與「上一次被呼叫時」的 /proc/stat 相減 ----
+# ★ 不另開取樣服務、也不在 CGI 裡 sleep: 每次呼叫存一份快照到 /tmp,
+#   下次呼叫相減; 電視每 5 秒打一次 -> 得到最近約 5 秒的全機平均使用率
+# - 上一份快照超過 60 秒(電視剛打開/沒人在看) 或不存在 -> null, 下一次就有值
+# - 與上一份相隔 < 2 秒(多個電視同時輪詢) -> 回上次算好的值且不覆蓋快照,
+#   避免視窗太短數字亂跳
+# - 純 shell 算術 + read 內建, 不 fork
+# ⚠️ 數字含 tv-status 自己的 CPU 消耗 (每次約 0.4s CPU, .4 雙核每 5 秒約 4%)
+CPU_PCT="" CPU_WIN=""
+_cs=/tmp/tv-status.cpustat
+read -r _c _u _n _s _i _w _q _sq _st _rest < /proc/stat
+_ctot=$((_u + _n + _s + _i + _w + _q + _sq + _st)); _cidle=$((_i + _w))
+_pt= _ptot= _pidle= _ppct=
+read -r _pt _ptot _pidle _ppct 2>/dev/null < "$_cs"
+if [ -n "$_pt" ] && [ $((NOW - _pt)) -lt 2 ]; then
+    CPU_PCT=$_ppct
+else
+    if [ -n "$_pt" ] && [ $((NOW - _pt)) -le 60 ] && [ $((_ctot - _ptot)) -gt 0 ]; then
+        _pm=$(( ((_ctot - _ptot) - (_cidle - _pidle)) * 1000 / (_ctot - _ptot) ))
+        [ "$_pm" -lt 0 ] && _pm=0
+        CPU_PCT="$((_pm / 10)).$((_pm % 10))"
+        CPU_WIN=$((NOW - _pt))
+    fi
+    echo "$NOW $_ctot $_cidle ${CPU_PCT:-_}" > "$_cs.$$" 2>/dev/null && mv -f "$_cs.$$" "$_cs" 2>/dev/null
+fi
+[ "$CPU_PCT" = "_" ] && CPU_PCT=""
+
 CPU_TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 CT_COUNT=$(readf /proc/sys/net/netfilter/nf_conntrack_count)
 CT_MAX=$(readf /proc/sys/net/netfilter/nf_conntrack_max)
@@ -329,8 +357,9 @@ fi
 # ---- 輸出 ----
 printf 'Content-Type: application/json\r\n'; hdr; printf '\r\n'
 [ "$REQUEST_METHOD" = HEAD ] && exit 0
-printf '{"v":1,"ts":%s,"host":%s,"role":%s,"uptime":%s,"cpus":%s,"load":%s,' \
-    "$(num "$NOW")" "$(str "$HOST")" "$(str "$ROLE")" "$(num "$UPTIME")" "$(num "$CPUS")" "$LOAD"
+printf '{"v":1,"ts":%s,"host":%s,"role":%s,"uptime":%s,"cpus":%s,"cpu_pct":%s,"cpu_pct_window_s":%s,"load":%s,' \
+    "$(num "$NOW")" "$(str "$HOST")" "$(str "$ROLE")" "$(num "$UPTIME")" "$(num "$CPUS")" \
+    "$(num "$CPU_PCT")" "$(num "$CPU_WIN")" "$LOAD"
 printf '"mem_total":%s,"mem_available":%s,"cpu_temp_c":%s,' \
     "$(num "$MEM_TOTAL")" "$(num "$MEM_AVAIL")" "$(num "$CPU_TEMP")"
 printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
