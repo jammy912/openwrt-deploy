@@ -115,6 +115,22 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
 }
 
+# 順手把 ping 的平均 RTT/丟包率留給 tv-status (電視 App 監看)
+# ★ 純旁路: 不參與任何判定, 不多送封包; 寫檔失敗一律忽略, 永遠 return 0
+# 格式: /tmp/tv-ping/<iface> = "<epoch> <avg_ms|null> <loss%|null>"
+# ping 完全沒輸出(介面不存在等)就不寫, 舊值靠 epoch 讓前端判斷過期
+tv_ping_save() {
+    [ -n "$2" ] || return 0
+    {
+        mkdir -p /tmp/tv-ping
+        _tvp_ms=$(echo "$2" | sed -n 's#^round-trip min/avg/max = [0-9.]*/\([0-9.]*\)/.*#\1#p')
+        _tvp_loss=$(echo "$2" | sed -n 's/.* \([0-9][0-9]*\)% packet loss.*/\1/p')
+        echo "$(date +%s) ${_tvp_ms:-null} ${_tvp_loss:-null}" > "/tmp/tv-ping/$1.tmp" \
+            && mv -f "/tmp/tv-ping/$1.tmp" "/tmp/tv-ping/$1"
+    } 2>/dev/null
+    return 0
+}
+
 # 切換事件強制寫 logread，不受 QUIET_MODE 影響
 log_event() {
     logger -t PBR_HealthCheck "$1"
@@ -403,8 +419,9 @@ for SECTION in $SECTIONS; do
     fi
 
     log " -> 正在檢查介面: $INTERFACE ..."
-    _received=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP 2>/dev/null \
-        | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
+    _ping_out=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I $INTERFACE $TARGET_IP 2>/dev/null)
+    _received=$(echo "$_ping_out" | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
+    tv_ping_save "$INTERFACE" "$_ping_out"
     _received=${_received:-0}
     _need=$(( PING_COUNT - PING_LOSS_TOLERATE ))
     if [ "$_received" -ge "$_need" ]; then
@@ -761,8 +778,9 @@ if [ -f "$DBR_CONF" ]; then
         fi
 
         if [ "${DBR_HS_OK:-0}" = "1" ]; then
-            DBR_RX=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I "$DR_IFACE" $TARGET_IP 2>/dev/null \
-                | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
+            _ping_out=$(ping -c $PING_COUNT -W $PING_TIMEOUT -I "$DR_IFACE" $TARGET_IP 2>/dev/null)
+            DBR_RX=$(echo "$_ping_out" | sed -n 's/^.*, \([0-9][0-9]*\) packets received.*/\1/p')
+            tv_ping_save "$DR_IFACE" "$_ping_out"
             DBR_RX=${DBR_RX:-0}
             DBR_NEED=$(( PING_COUNT - PING_LOSS_TOLERATE ))
             [ "$DBR_RX" -ge "$DBR_NEED" ] && DBR_RESULT="up"

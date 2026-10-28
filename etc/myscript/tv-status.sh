@@ -124,6 +124,21 @@ if [ -n "$WAN_DEV" ] && [ -d "/sys/class/net/$WAN_DEV" ]; then
     WAN_TX=$(readf "/sys/class/net/$WAN_DEV/statistics/tx_bytes")
 fi
 
+# ---- Ping (check-pbr-wg.sh 旁路留下的 /tmp/tv-ping/<iface>) ----
+# 格式 "<epoch> <avg_ms|null> <loss%|null>"; 經該介面 ping 8.8.8.8 (端到端出口延遲)
+# 只有 check-pbr-wg 健檢會 ping 的介面才有 (wg3/wg8ts/wg0 未被 flap 鎖時), 其餘回 null
+# ⚠️ 只信主gw: 副gw 不跑 check-pbr-wg, 但 /tmp/tv-ping 會留著當主gw 時的舊檔
+tvp_read() {
+    TVP_TS= TVP_MS= TVP_LOSS=
+    [ "$ROLE" = main ] && [ -f "/tmp/tv-ping/$1" ] || return 0
+    read TVP_TS TVP_MS TVP_LOSS < "/tmp/tv-ping/$1" 2>/dev/null
+    return 0
+}
+PING_JSON=null
+tvp_read wan
+[ -n "$TVP_TS" ] && PING_JSON=$(printf '[{"target":"8.8.8.8","iface":"wan","ms":%s,"loss":%s,"ping_ts":%s}]' \
+    "$(num "$TVP_MS")" "$(num "$TVP_LOSS")" "$(num "$TVP_TS")")
+
 # ---- WireGuard ----
 # ⚠️ 介面清單從 uci 的 proto=wireguard section 列舉, 不用 `wg show interfaces`
 #    —— 後者只列現存介面, 掉線的隧道會整條消失, 電視端看不出它斷了
@@ -146,13 +161,16 @@ for _i in $(uci -q show network | sed -n "s/^network\.\([^.]*\)\.proto='wireguar
             age = (hs > 0) ? now - hs : "null"
             printf "%d %s %d %.0f %.0f", n, age, act, rx, tx
         }')
+    tvp_read "$_i"
+    _p=$(printf '"ping_ms":%s,"ping_loss":%s,"ping_ts":%s' \
+        "$(num "$TVP_MS")" "$(num "$TVP_LOSS")" "$(num "$TVP_TS")")
     if [ -n "$_stat" ]; then
         set -- $_stat
-        _o=$(printf '{"name":"%s","up":%s,"handshake_age":%s,"peers":%s,"peers_active":%s,"rx_bytes":%s,"tx_bytes":%s}' \
-            "$_i" "$_up" "$(num "$2")" "$(num "$1")" "$(num "$3")" "$(num "$4")" "$(num "$5")")
+        _o=$(printf '{"name":"%s","up":%s,"handshake_age":%s,"peers":%s,"peers_active":%s,"rx_bytes":%s,"tx_bytes":%s,%s}' \
+            "$_i" "$_up" "$(num "$2")" "$(num "$1")" "$(num "$3")" "$(num "$4")" "$(num "$5")" "$_p")
     else
-        _o=$(printf '{"name":"%s","up":%s,"handshake_age":null,"peers":null,"peers_active":null,"rx_bytes":null,"tx_bytes":null}' \
-            "$_i" "$_up")
+        _o=$(printf '{"name":"%s","up":%s,"handshake_age":null,"peers":null,"peers_active":null,"rx_bytes":null,"tx_bytes":null,%s}' \
+            "$_i" "$_up" "$_p")
     fi
     WG_JSON="${WG_JSON:+$WG_JSON,}$_o"
 done
@@ -183,4 +201,4 @@ printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
     "$(num "$CT_COUNT")" "$(num "$CT_MAX")" "$(num "$DHCP_CLIENTS")"
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$(str "$WAN_DEV")" "$(num "$WAN_RX")" "$(num "$WAN_TX")"
-printf '"wg":[%s],"tailscale":%s}\n' "$WG_JSON" "$TS_JSON"
+printf '"ping":%s,"wg":[%s],"tailscale":%s}\n' "$PING_JSON" "$WG_JSON" "$TS_JSON"
