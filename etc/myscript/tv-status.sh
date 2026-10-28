@@ -135,6 +135,7 @@ NOW=$(date +%s)
 
 # ---- 系統 ----
 # ★ 單行檔一律用 read 內建讀, 不 cat/awk (每個 fork 在 a53 上約數 ms)
+#   ⚠️ 例外: /proc/sys 的整數檔 (見下方 conntrack 註解)
 HOST= _gw= UPTIME= _l1= _l2= _l3=
 read -r HOST 2>/dev/null < /proc/sys/kernel/hostname
 read -r _gw 2>/dev/null < /etc/myscript/.mesh_gw_type
@@ -181,9 +182,13 @@ fi
 CPU_TEMP= _t=
 read -r _t 2>/dev/null < /sys/class/thermal/thermal_zone0/temp
 case "$_t" in ''|*[!0-9]*) ;; *) _t=$(( (_t + 50) / 100 )); CPU_TEMP="$((_t / 10)).$((_t % 10))" ;; esac
+# ⚠️ /proc/sys 的整數檔不能用 read 內建: busybox ash 的 read 一次讀 1 byte,
+#    而 proc_dointvec 在 offset≠0 時直接回 EOF -> 只讀到第一個字元
+#    (2026-10-28 實測 582 讀成 5、31232 讀成 3)。用一次 cat 兩個檔
+#    (/proc/uptime、loadavg 是 seq_file, sysfs、hostname 字串型都沒這問題)
 CT_COUNT= CT_MAX=
-read -r CT_COUNT 2>/dev/null < /proc/sys/net/netfilter/nf_conntrack_count
-read -r CT_MAX 2>/dev/null < /proc/sys/net/netfilter/nf_conntrack_max
+set -- $(cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)
+[ $# -eq 2 ] && CT_COUNT=$1 CT_MAX=$2
 # ⚠️ 副gw 是 dhcp.lan.ignore=1 不發 DHCP, 但 /tmp/dhcp.leases 會留著當主gw 時的舊檔
 #    (實測 .4 舊檔 6 筆) -> 不發 DHCP 時回 null, 免得電視端看到假數字
 DHCP_CLIENTS=""
