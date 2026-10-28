@@ -1705,6 +1705,16 @@ if [ -f "$AGH_YAML" ] && [ -n "$AGH_BIN" ]; then
 fi
 fi  # end gateway-only AGH
 
+# =====================
+# 電視 App 唯讀狀態 CGI (/cgi-bin/tv-status)
+# =====================
+# 主副gw 都掛: auto-role 互換後 192.168.1.1 換人, 電視端固定打 .1.1
+# symlink 指向 myscript, 腳本更新走 sync-deploy 不用再跑 deploy
+if [ -d /www/cgi-bin ]; then
+    ln -sf /etc/myscript/tv-status.sh /www/cgi-bin/tv-status
+    echo "  ✅ /cgi-bin/tv-status 已掛載"
+fi
+
 
 # =====================
 # 重啟前驗證 LAN 設定完整性
