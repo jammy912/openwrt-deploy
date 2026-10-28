@@ -393,6 +393,105 @@ if [ "$ROLE" = main ]; then
     [ -s /tmp/tv-status.mesh ] && read -r MESH_JSON < /tmp/tv-status.mesh
 fi
 
+# ---- 流量前 10 名的 LAN 裝置 (只有主gw 提供) ----
+# 來源 = conntrack 的 bytes 計數 (nf_conntrack_acct=1), 不改防火牆、不裝套件
+# ★ 軟體 flow offload 不會漏算: fw4 的 flowtable 有 counter 旗標, [OFFLOAD] 的連線
+#   bytes 照樣會更新 (nft list flowtables 可查)
+# ★ 速率 = 每條連線和「上一次呼叫」的快照相減, 再依 MAC 加總 (同 cpu_pct 的做法)
+#   新出現的連線整條算進本區間; 兩次呼叫之間就結束的短連線會漏算
+# ⚠️ /proc/net/nf_conntrack 是邊走雜湊表邊輸出, 不是原子快照: 實測連讀 3 次,
+#    533 條中偶爾漏 1 條或重複 1 條 -> 漏掉的下一輪會被當新連線「整條」算進去
+#    (曾把一條 615MB 的舊 UDP 算成 702Mbps)。對策:
+#    1. 同一次讀取重複的 key 只算一次
+#    2. 上一輪有、這一輪沒讀到的連線, 帶舊值留在快照最多 2 輪 (第 4 欄 = 已漏讀次數)
+#    3. 上一輪是基準快照(第一行第 2 欄 gen=0)時, 沒看過的連線算 0 不整條算
+# ★ 裝置歸屬: 原始方向來源 IP 在 br-lan neigh 表(或 DHCP 租約)裡 = LAN 發起,
+#   up=原始方向 bytes, down=回程 bytes; 反過來(外部連進來, 例如 port forward)則對調
+#   走 wg 的連線原始來源仍是 LAN IP, 會算回那台裝置; 隧道外層封包來源是路由器自己, 不會重複算
+#   IPv6 也經 neigh 表對到 MAC, 和 IPv4 合併成同一台
+# ★ 看不到: 不經主gw 的流量 (LAN 內互傳、同一台 AP 底下互傳)
+# ★ 快照超過 60 秒或不存在回 null; 相隔 < 2 秒回上次結果且不覆蓋快照 (多台電視同時輪詢)
+TOP_JSON=null TOP_WIN=null
+if [ "$ROLE" = main ]; then
+    _ts=/tmp/tv-status.ctsnap _tc=/tmp/tv-status.tophosts
+    _pt= _pg=
+    read -r _pt _pg 2>/dev/null < "$_ts"
+    if [ -n "$_pt" ] && [ $((NOW - _pt)) -lt 2 ]; then
+        [ -s "$_tc" ] && { read -r TOP_WIN; read -r TOP_JSON; } < "$_tc"
+    else
+        _win=
+        [ -n "$_pt" ] && [ $((NOW - _pt)) -le 60 ] && _win=$((NOW - _pt))
+        # ★ 效能: 欄位由 sed 一次抽出(C 實作), awk 只處理固定欄位; 原本 awk 逐欄跑迴圈
+        #   392 條就要 0.17s 且隨連線數線性成長, 改 sed 後約一半
+        # sed 輸出 C<TAB>原始src<TAB>key<TAB>原始bytes<TAB>回程src<TAB>回程bytes
+        #   key = 協定 + 原始方向 src dst + 其餘欄位(sport/dport 或 icmp type/code/id)
+        #   [UNREPLIED](單向 UDP 等) 夾在中間要允許
+        # 快照格式: 第一行 "<epoch> <gen>", 其餘 key<TAB>原始bytes<TAB>回程bytes<TAB>已漏讀次數
+        # ⚠️ bytes 一律保留原字串寫快照: busybox awk 數字超過 6 位有效數字可能印成科學記號
+        _T=$(printf '\t')
+        _sx="s/^[^ ]* *[0-9]* \([^ ]*\)[^=]* src=\([^ ]*\) dst=\([^ ]*\)\(.*\) packets=[0-9]* bytes=\([0-9]*\) \(\[UNREPLIED\] \)\{0,1\}src=\([^ ]*\) .* bytes=\([0-9]*\).*/C${_T}\2${_T}\1 \2 \3\4${_T}\5${_T}\7${_T}\8/p"
+        _top=$(
+            {
+                ip neigh show dev br-lan 2>/dev/null | sed "s/^/N${_T}/"
+                sed "s/^/L${_T}/" /tmp/dhcp.leases 2>/dev/null
+                [ -n "$_win" ] && sed "1d; s/^/P${_T}/" "$_ts" 2>/dev/null
+                sed -n "$_sx" /proc/net/nf_conntrack 2>/dev/null
+            } | awk -F"$_T" -v win="$_win" -v now="$NOW" -v gen="${_pg:-0}" -v snap="$_ts.$$" '
+                BEGIN { print now, ((win == "") ? 0 : gen + 1) > snap }
+                $1 == "N" { n = split($2, a, " "); for (i = 2; i < n; i++) if (a[i] == "lladdr") mac[a[1]] = a[i+1]; next }
+                # 租約: <到期> <mac> <ip> <hostname> <client-id>; neigh 沒有的 IP 用租約補
+                $1 == "L" { split($2, a, " "); if (a[4] != "*") nm[a[2]] = a[4]; if (!(a[3] in mac)) mac[a[3]] = a[2]; ip4[a[2]] = a[3]; next }
+                $1 == "P" { pu[$2] = $3; pd[$2] = $4; pm[$2] = $5 + 0; next }
+                $1 == "C" {
+                    k = $3
+                    if (k in cur) next
+                    cur[k] = 1
+                    print k "\t" $4 "\t" $6 "\t0" > snap
+                    if (win == "") next
+                    os = $2; rs = $5; ob = $4 + 0; rb = $6 + 0
+                    if (k in pu) { d1 = (ob >= pu[k]) ? ob - pu[k] : ob; d2 = (rb >= pd[k]) ? rb - pd[k] : rb }
+                    else if (gen == 0) { d1 = 0; d2 = 0 }
+                    else { d1 = ob; d2 = rb }
+                    if (os in mac)      { m = mac[os]; up[m] += d1; dn[m] += d2; if (os ~ /\./) ipm[m] = os }
+                    else if (rs in mac) { m = mac[rs]; up[m] += d2; dn[m] += d1; if (rs ~ /\./) ipm[m] = rs }
+                    next
+                }
+                END {
+                    for (k in pu) if (!(k in cur) && pm[k] < 2) print k "\t" pu[k] "\t" pd[k] "\t" (pm[k] + 1) > snap
+                    close(snap)
+                    if (win == "") exit
+                    # 取前 10 名 (裝置數只有幾十台, 直接選擇法)
+                    for (c = 1; c <= 10; c++) {
+                        best = ""; bv = 0
+                        for (m in up) if (!(m in done) && up[m] + dn[m] > bv) { bv = up[m] + dn[m]; best = m }
+                        if (best == "") break
+                        done[best] = 1
+                        ip = (best in ipm) ? ipm[best] : ((best in ip4) ? ip4[best] : "_")
+                        n = (best in nm) ? nm[best] : "_"; gsub(/[^A-Za-z0-9._-]/, "", n); if (n == "") n = "_"
+                        printf "%s %s %d %d %s\n", best, ip, dn[best] * 8 / win, up[best] * 8 / win, n
+                    }
+                }')
+        [ -s "$_ts.$$" ] && mv -f "$_ts.$$" "$_ts" 2>/dev/null || rm -f "$_ts.$$"
+        if [ -n "$_win" ]; then
+            TOP_WIN=$_win
+            _o=""
+            while read -r _m _ip _dn _up _nm; do
+                [ -n "$_m" ] || continue
+                _h=$(printf '%s' "$_m" | md5sum | cut -c1-12)
+                [ "$_nm" = _ ] && _nm=null || _nm="\"$_nm\""
+                [ "$_ip" = _ ] && _ip=null || _ip="\"$_ip\""
+                _o="${_o:+$_o,}{\"name\":$_nm,\"ip\":$_ip,\"mac_hash\":\"$_h\",\"down_bps\":$_dn,\"up_bps\":$_up}"
+            done <<EOF
+$_top
+EOF
+            TOP_JSON="[$_o]"
+            printf '%s\n%s\n' "$TOP_WIN" "$TOP_JSON" > "$_tc.$$" 2>/dev/null && mv -f "$_tc.$$" "$_tc" 2>/dev/null
+        else
+            rm -f "$_tc" 2>/dev/null
+        fi
+    fi
+fi
+
 # ---- Ping (check-pbr-wg.sh 旁路留下的 /tmp/tv-ping/<iface>) ----
 # 格式 "<epoch> <avg_ms|null> <loss%|null>"; 經該介面 ping 8.8.8.8 (端到端出口延遲)
 # 只有 check-pbr-wg 健檢會 ping 的介面才有 (wg3/wg8ts/wg0 未被 flap 鎖時), 其餘回 null
@@ -472,4 +571,5 @@ printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' \
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$(str "$WAN_DEV")" "$(num "$WAN_RX")" "$(num "$WAN_TX")"
 printf '"ports":%s,"wifi":%s,"wifi_mesh":%s,' "$PORTS_JSON" "$WIFI_JSON" "$MESH_JSON"
+printf '"top_hosts":%s,"top_hosts_window_s":%s,' "$TOP_JSON" "$TOP_WIN"
 printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON"
