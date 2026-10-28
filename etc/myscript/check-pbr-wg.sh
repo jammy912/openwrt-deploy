@@ -702,11 +702,18 @@ if [ -f "$DBR_CONF" ]; then
     DBR_HS_TIMEOUT=180  # handshake 超過 180 秒視為對端離線, 直接判 down 不 ping
 
     for DR_IFACE in $DR_IFACES; do
+        # wan 不做 DBR 健檢: 它是 failover 的目的地本身, 而且 dbroute-setup.sh
+        # 對 wan 走特例 (fwmark 0xfe → table 254/main), 刻意不建 dbr_wan。
+        # ⚠️ 2026-10-28 前這裡靠「rt_tables 查無 dbr_wan」間接跳過, 迴圈內另有
+        #    一段 wan 專用分支 `ping -I wan` 從未執行過, 而且本身就是錯的
+        #    (wan 是 UCI 介面名不是裝置名, busybox 回 bad address 'wan')。
+        #    若有人加了 dbr_wan, wan 會被判 down 並每輪推播 → 改成明確跳過。
+        [ "$DR_IFACE" = "wan" ] && continue
         DR_TABLE=$(awk -v name="dbr_${DR_IFACE}" '$2 == name {print $1}' "$RT_TABLES")
         [ -z "$DR_TABLE" ] && continue
         DR_FWMARK=$(printf "0x%x" "$DR_TABLE")
 
-        # --- FLAP 鎖共用（與第一階段同一把 .disabled_until 鎖, wan 免鎖） ---
+        # --- FLAP 鎖共用（與第一階段同一把 .disabled_until 鎖） ---
         # Why: 介面抖動時 DBR 若照常 flip, 同戶裝置 IP 會在 VPN 出口/真實 IP
         #   之間反覆跳動, 對同戶判定(如 Netflix)是最糟訊號; 鎖定期間穩定停在
         #   wan 直到鎖自然到期, 刻意不做「ping 通就早解鎖」。
@@ -724,15 +731,13 @@ if [ -f "$DBR_CONF" ]; then
             [ "$_dbr_has_ep" != "0" ] && _dbr_stage1_managed=1
         fi
         _dbr_locked=0
-        if [ "$DR_IFACE" != "wan" ]; then
-            if [ "$_dbr_stage1_managed" = "1" ]; then
-                _dbr_du="${STATE_DIR}/${DR_IFACE}.disabled_until"
-                if [ -f "$_dbr_du" ] && [ "$DBR_NOW" -lt "$(cat "$_dbr_du")" ]; then
-                    _dbr_locked=1
-                fi
-            else
-                check_flap_disable "$DR_IFACE" || _dbr_locked=1
+        if [ "$_dbr_stage1_managed" = "1" ]; then
+            _dbr_du="${STATE_DIR}/${DR_IFACE}.disabled_until"
+            if [ -f "$_dbr_du" ] && [ "$DBR_NOW" -lt "$(cat "$_dbr_du")" ]; then
+                _dbr_locked=1
             fi
+        else
+            check_flap_disable "$DR_IFACE" || _dbr_locked=1
         fi
         if [ "$_dbr_locked" = "1" ]; then
             # 鎖定中視同 confirmed down: 移除 fwmark 切 wan(NO_FALLBACK 維持
@@ -760,10 +765,6 @@ if [ -f "$DBR_CONF" ]; then
             # 介面不存在, 直接 down (避免 fwmark 命中後流量進空 table)
             log_event "[PENDING] $DR_IFACE 介面不存在 (ifdown), 視為 down"
             DBR_HS_DESC="介面不存在"
-        elif [ "$DR_IFACE" = "wan" ]; then
-            # wan 沒 wg handshake, 直接 ping
-            DBR_HS_OK=1
-            DBR_HS_DESC="wan(免handshake)"
         else
             DBR_LATEST_HS=$(wg show "$DR_IFACE" latest-handshakes 2>/dev/null \
                 | awk '{print $2}' | sort -n | tail -1)
@@ -836,8 +837,7 @@ if [ -f "$DBR_CONF" ]; then
             # 鎖歸 DBR 管的介面(DBR-only 與 passive server wg), confirmed down
             # 記入 flap 視窗; 第一階段有 ping 的介面由第一階段記, 這裡不重複記,
             # 否則同輪雙寫門檻靈敏度翻倍
-            if [ "$_dbf" -ge "$DOWN_CONFIRM" ] && [ "$_dbr_stage1_managed" != "1" ] \
-                && [ "$DR_IFACE" != "wan" ]; then
+            if [ "$_dbf" -ge "$DOWN_CONFIRM" ] && [ "$_dbr_stage1_managed" != "1" ]; then
                 record_down_event "$DR_IFACE"
             fi
 
@@ -859,7 +859,7 @@ if [ -f "$DBR_CONF" ]; then
                 fi
                 # 整點: 真確認 down 且介面存在才 ifdown/ifup
                 # (介面不存在通常是用戶手動 ifdown, 不該自動 ifup 違反用戶意圖)
-                if [ "$CURRENT_HHMM" = "0400" ] && [ "$DR_IFACE" != "wan" ] \
+                if [ "$CURRENT_HHMM" = "0400" ] \
                     && ip link show "$DR_IFACE" >/dev/null 2>&1; then
                     log "${DR_IFACE} 整點重啟（背景）..."
                     (ifdown "$DR_IFACE"; sleep 3; ifup "$DR_IFACE") &
