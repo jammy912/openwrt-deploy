@@ -879,6 +879,36 @@ if [ -n "$_wan_dev" ]; then
     tv_ping_save wan "$(ping -c 3 -W 2 -w 4 -I "$_wan_dev" $TARGET_IP 2>/dev/null)"
 fi
 
+# === 旁路：健檢沒量到的隧道延遲（給 tv-status, 不參與任何判定） ===
+# 2026-10-28 Jammy 改選方案 B: 每條出口隧道都要有延遲(wg2/wg_900/wg_contin9,
+# 以及 wg0 被 FLAP 鎖住期間)。量法同健檢: -I <if> ping $TARGET_IP, 數值才能互比。
+# ★ 只量「kernel allowed-ips 含 0.0.0.0/0 且 handshake ≤180 秒」的介面;
+#   其餘(wg1/wg5 撥入、wg4 無 handshake)刪檔 → tv-status 回 null。
+#   (wg4 無 endpoint 時 ping 回 "Destination address required", 量了也沒意義)
+# ★ /tmp/tv-ping/<if> 不到 50 秒就跳過: 本輪健檢已量過的(wg3/wg8ts)不重送,
+#   cron 一分鐘兩輪時每條約 60 秒更新一次(前端過期門檻 120 秒)。
+# ★ 各條平行丟背景、stdio 斷開: 不拖長本輪健檢與 cron 全域鎖, 失敗一律忽略
+tv_ping_extra() {
+    local _now _tif _tf _tt _rest _hs
+    _now=$(date +%s)
+    for _tif in $(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.proto='wireguard'$/\1/p"); do
+        _tf="/tmp/tv-ping/$_tif"
+        _tt=
+        read -r _tt _rest 2>/dev/null < "$_tf"
+        [ -n "$_tt" ] && [ $((_now - _tt)) -lt 50 ] 2>/dev/null && continue
+        _hs=$(wg show "$_tif" latest-handshakes 2>/dev/null | awk '{if($2>m)m=$2}END{print m+0}')
+        if wg show "$_tif" allowed-ips 2>/dev/null | grep -q '0\.0\.0\.0/0' \
+            && [ $((_now - ${_hs:-0})) -le 180 ]; then
+            ( tv_ping_save "$_tif" "$(ping -c 3 -W 2 -w 4 -I "$_tif" $TARGET_IP 2>/dev/null)" ) \
+                </dev/null >/dev/null 2>&1 &
+        else
+            rm -f "$_tf" 2>/dev/null
+        fi
+    done
+    return 0
+}
+tv_ping_extra 2>/dev/null
+
 # === 第四階段：server wg 多 peer 的 0.0.0.0/0 出口 failover ===
 # 場景: 一個 passive server wg 介面（無 endpoint_host）下掛多個 peer，
 #       多個 peer 的 uci allowed_ips 都宣告 0.0.0.0/0（想當該介面的對外出口）。
