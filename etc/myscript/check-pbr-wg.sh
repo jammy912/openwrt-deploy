@@ -13,7 +13,7 @@
 #   - 整點且確認失敗: 背景 ifdown/ifup 重建 tunnel，ifup 完成後
 #     由本腳本下一輪 ping 成功時自動進入冷靜期，再加回 ip rule。
 #   - 1小時內 DOWN 超過 DOWN_THRESHOLD 次: 短鎖 5 分鐘;24 小時內
-#     累計達 LOCK_ESCALATE_THRESHOLD 次自動升級為長鎖 24 小時。
+#     累計達 LOCK_ESCALATE_THRESHOLD 次自動升級為長鎖 8 小時。
 #     FLAP 鎖為介面級共用: 第三階段(DBR)同受鎖管, 鎖定中域名路由切回
 #     wan 並暫停健檢(wan 介面免鎖); 刻意無早解鎖, 避免抖動期間同戶
 #     裝置 IP 在 VPN/真實 IP 間反覆跳動。
@@ -63,7 +63,7 @@ UP_CONFIRM=4             # 從 DOWN 恢復後, 需連續 N 輪 UP 才加回 wg�
 DOWN_THRESHOLD=10              # 1小時內 DOWN 幾次觸發停用
 DOWN_WINDOW=3600               # 滑動視窗秒數
 SHORT_LOCK_DURATION=300        # 短鎖時長: 5 分鐘
-LONG_LOCK_DURATION=86400       # 長鎖時長: 24 小時
+LONG_LOCK_DURATION=28800       # 長鎖時長: 8 小時
 LOCK_ESCALATE_THRESHOLD=3      # 短鎖累計 N 次升級到長鎖
 LOCK_ESCALATE_WINDOW=86400     # 累計視窗: 24 小時
 DISABLE_DURATION=86400 # 停用秒數（24小時, 保留為相容變數, 未使用）
@@ -192,7 +192,7 @@ fmt_duration() {
 
 # 檢查是否觸發高頻停用，或是否已到恢復時間
 # 階梯式停用: 短鎖 SHORT_LOCK_DURATION (5 分鐘),
-# 24 小時內累計 LOCK_ESCALATE_THRESHOLD (3) 次升級為長鎖 LONG_LOCK_DURATION (24 小時)
+# 24 小時內累計 LOCK_ESCALATE_THRESHOLD (3) 次升級為長鎖 LONG_LOCK_DURATION (8 小時)
 # 回傳 0 = 正常可用，1 = 目前在停用期（跳過 ping）
 check_flap_disable() {
     local iface="$1"

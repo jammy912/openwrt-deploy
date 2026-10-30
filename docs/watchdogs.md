@@ -26,7 +26,7 @@
 
 四個階段(詳見 [DBR-PBR-routing.md] §健檢):
 1. **wg 介面 ping 健檢**:連敗 `DOWN_CONFIRM=2` 輪才切回 wan(抗抖動),連勝 `UP_CONFIRM=4`
-   輪才切回 wg(冷靜期)。1 小時 DOWN 超 10 次→短鎖 5 分;24h 累 3 次→長鎖 24h。
+   輪才切回 wg(冷靜期)。1 小時 DOWN 超 10 次→短鎖 5 分;24h 累 3 次→長鎖 8h。
    **passive server wg(無 endpoint,如 wg2)在 ping 前就 skip**,不進這套(black-hole 語意,
    詳見 [DBR-PBR-routing.md] §passive 特別規則)。
 2. **uci enabled 同步**。
