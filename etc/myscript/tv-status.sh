@@ -599,19 +599,43 @@ fi
 #   W <if> <up 0|1> <ping_ts> <ping_ms> <loss>  /  dump 的 peer 行(9 欄):
 #   <if> <pubkey> <psk> <endpoint> <allowed> <handshake> <rx> <tx> <keepalive>
 #   ⚠️ dump 的介面行(5 欄)含私鑰: awk 只認 9 欄的 peer 行, 且只取數字欄, 什麼都不原樣輸出
+# ★ pbr / dbr: 這條隧道被 PBR(CustRule) / DBR(網域) 用到時的健檢狀態, 沒用到回 null
+#   全部讀 check-pbr-wg 已寫好的狀態檔 (/tmp/check-pbr-wg/), 不另跑指令; 副gw 不跑健檢 → null
+#   - pbr.rules  = <if>.custrules 行數 (pbr-cust 依 uci 重建 = Sheet 有勾選的)
+#   - pbr.state  ← <if>.pingresult: up/pending=ok(pending=失敗確認中, 流量仍走隧道)
+#                  down=down(已切回 WAN) down-hold=down(NO_FALLBACK, 流量卡在隧道不切 WAN)
+#                  skip/無檔=unchecked(例如 wg2 撥入型, 健檢不 ping)
+#   - dbr.domains = dbroute-domains.conf 裡 route_<if>_v4 的網域數
+#   - dbr.state  ← <if>.dbprevresult: up=ok down=down 無檔=unchecked
+#   - 兩者共用 <if>.disabled_until (FLAP 鎖): 未到期 → state=locked 並附 until
+#   - raw = 原始狀態字串, 前端要細分時用
 WG_JSON=$(
     {
+        _sd=/tmp/check-pbr-wg
         for _i in $(uci -q show network | sed -n "s/^network\.\([^.]*\)\.proto='wireguard'$/\1/p"); do
             _f=0
             read -r _f 2>/dev/null < "/sys/class/net/$_i/flags"
             case "$_f" in ''|*[!0-9a-fx]*) _f=0 ;; esac
             tvp_read "$_i"
-            echo "W $_i $(( _f & 1 )) ${TVP_TS:-_} ${TVP_MS:-_} ${TVP_LOSS:-_}"
+            _pr= _dp= _du= _nc=0
+            if [ "$ROLE" = main ]; then
+                read -r _pr 2>/dev/null < "$_sd/$_i.pingresult"
+                read -r _dp 2>/dev/null < "$_sd/$_i.dbprevresult"
+                read -r _du 2>/dev/null < "$_sd/$_i.disabled_until"
+                if [ -f "$_sd/$_i.custrules" ]; then
+                    while read -r _x _y; do [ -n "$_x" ] && _nc=$((_nc + 1)); done < "$_sd/$_i.custrules"
+                fi
+            fi
+            echo "W $_i $(( _f & 1 )) ${TVP_TS:-_} ${TVP_MS:-_} ${TVP_LOSS:-_} ${_pr:-_} ${_dp:-_} ${_du:-_} $_nc"
         done
+        [ "$ROLE" = main ] && sed -n 's|^nftset=/[^/]*/.*#route_\(.*\)_v4$|D \1|p' /etc/dnsmasq.d/dbroute-domains.conf 2>/dev/null
         wg show all dump 2>/dev/null
     } | awk -v now="$NOW" '
         function n(v) { return (v ~ /^-?[0-9.]+$/) ? v : "null" }
-        $1 == "W" && NF == 6 { ord[++c] = $2; up[$2] = $3; ts[$2] = $4; ms[$2] = $5; ls[$2] = $6; next }
+        function q(v) { return (v == "" || v == "_") ? "null" : "\"" v "\"" }
+        $1 == "W" && NF == 10 { ord[++c] = $2; up[$2] = $3; ts[$2] = $4; ms[$2] = $5; ls[$2] = $6
+                                pr[$2] = $7; dp[$2] = $8; du[$2] = $9; nc[$2] = $10; next }
+        $1 == "D" && NF == 2 { dm[$2]++; next }
         NF == 9 {
             i = $1; np[i]++; rx[i] += $7; tx[i] += $8
             if ($6 > hs[i]) hs[i] = $6
@@ -621,6 +645,19 @@ WG_JSON=$(
             for (j = 1; j <= c; j++) {
                 i = ord[j]
                 p = sprintf("\"ping_ms\":%s,\"ping_loss\":%s,\"ping_ts\":%s", n(ms[i]), n(ls[i]), n(ts[i]))
+                lk = (du[i] ~ /^[0-9]+$/ && du[i] + 0 > now)
+                ul = lk ? sprintf(",\"until\":%d", du[i]) : ""
+                pb = "null"
+                if (nc[i] > 0) {
+                    st = lk ? "locked" : (pr[i] == "up" || pr[i] == "pending") ? "ok" : (pr[i] == "down" || pr[i] == "down-hold") ? "down" : "unchecked"
+                    pb = sprintf("{\"used\":true,\"rules\":%d,\"state\":\"%s\",\"raw\":%s%s}", nc[i], st, q(pr[i]), ul)
+                }
+                db = "null"
+                if (dm[i] > 0) {
+                    st = lk ? "locked" : (dp[i] == "up") ? "ok" : (dp[i] == "down") ? "down" : "unchecked"
+                    db = sprintf("{\"used\":true,\"domains\":%d,\"state\":\"%s\",\"raw\":%s%s}", dm[i], st, q(dp[i]), ul)
+                }
+                p = p ",\"pbr\":" pb ",\"dbr\":" db
                 if (up[i] == 1)
                     s = sprintf("{\"name\":\"%s\",\"up\":true,\"handshake_age\":%s,\"peers\":%d,\"peers_active\":%d,\"rx_bytes\":%.0f,\"tx_bytes\":%.0f,%s}", \
                         i, (hs[i] > 0) ? sprintf("%d", now - hs[i]) : "null", np[i], act[i], rx[i], tx[i], p)
