@@ -2157,6 +2157,23 @@ NFTEOF
                             log "  ✅ TDX 憑證已還原 → $TDX_SECRET_DIR/tdx.{appid,appkey}"
                         fi
                     fi
+
+                    # --- 還原電視 App token (tv.token, 由 sync-uploadconfig 2.7 備份) ---
+                    _tvt=$(awk "/^config TVTOKEN/{f=1;next} /^config /{f=0} f && /option token/{print; exit}" "$TMP_RC_PLAIN" \
+                        | sed "s/.*'\(.*\)'.*/\1/")
+                    case "$_tvt" in
+                        ''|*[!A-Za-z0-9_-]*) ;;
+                        *)
+                            mkdir -p "$TDX_SECRET_DIR"
+                            _tvt_old=$(tr -d '\r\n' < "$TDX_SECRET_DIR/tv.token" 2>/dev/null)
+                            if [ "$_tvt" = "$_tvt_old" ]; then
+                                log "  ⏭️ 電視 App token 與本地相同，不更新"
+                            else
+                                ( umask 077; printf '%s\n' "$_tvt" > "$TDX_SECRET_DIR/tv.token" )
+                                log "  ✅ 電視 App token 已還原 → $TDX_SECRET_DIR/tv.token"
+                            fi
+                            ;;
+                    esac
                 else
                     log "  [DRY-RUN] 模擬還原 WG 介面和 DDNS 設定"
                     _wg_cnt=$(grep -c "^config interface 'wg[0-9]" "$TMP_RC_PLAIN" 2>/dev/null || echo 0)

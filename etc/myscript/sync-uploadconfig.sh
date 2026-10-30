@@ -176,6 +176,24 @@ main() {
     fi
 
     # -------------------------------------------------
+    # 2.7 提取電視 App token (tv.token, tv-status 換 gas_url 用)
+    #     ★ 備份到 Sheet: 重刷或新機升主gw 時由 sync-googleconfig 自動還原,
+    #       全機隊同一把, 不必再手動放 (2026-10-30)
+    # -------------------------------------------------
+    TV_COUNT=0
+    _tvt=$(tr -d '\r\n' < "$SECRET_DIR/tv.token" 2>/dev/null)
+    case "$_tvt" in
+        ''|*[!A-Za-z0-9_-]*) ;;
+        *)
+            [ -s "$TMP_PLAIN" ] && echo "" >> "$TMP_PLAIN"
+            echo "config TVTOKEN 'credentials'" >> "$TMP_PLAIN"
+            echo "        option token '$_tvt'" >> "$TMP_PLAIN"
+            TV_COUNT=1
+            log "  ✅ 電視 App token 已納入"
+            ;;
+    esac
+
+    # -------------------------------------------------
     # 3. 驗證提取結果
     # -------------------------------------------------
     if [ ! -s "$TMP_PLAIN" ]; then
@@ -252,7 +270,7 @@ main() {
         log "  ✅ 上傳成功 (HTTP $HTTP_CODE)"
         log "  📝 回應: $RESP"
         echo "$NEW_HASH" > "$HASH_FILE"
-        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} TDX:${TDX_COUNT}"
+        push_notify "UploadConfig_Done | WG:${WG_COUNT} Peer:${WG_PEER_COUNT} DDNS:${DDNS_COUNT} TDX:${TDX_COUNT} TV:${TV_COUNT}"
     else
         RESP=$(cat /tmp/uploadconfig_resp.txt 2>/dev/null)
         log "  ❌ 上傳失敗 (HTTP $HTTP_CODE)"
