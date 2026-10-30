@@ -1147,6 +1147,28 @@ main() {
         [ "$RCH_NO_PAYLOAD" -gt 0 ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - RouterConfigHitron: ${RCH_NO_PAYLOAD}/${RCH_BLOCKS} 筆缺少 payload"
     fi
 
+    # --- uci 語法: 要合併進 /etc/config 的暫存檔, 套用前先試解析 ---
+    # ⚠️ 2026-10-30 實測: section 名含中文或連字號 (例 WG 分頁 C 欄填 'wg_mnl馬尼拉')
+    #    → uci 回 Parse error, 而且「整份」network 都讀不出來 (前後正常的 section 一起失敗);
+    #    Sheet 又下發全機隊 → 整機隊斷網、連 tailscale 都進不來。所以擋在套用前, 整份不套用。
+    #    (Linux 核心本身接受中文網卡名, 卡的是 uci: section 名只允許英數字和底線)
+    _uci_chk="/tmp/sync-ucichk.$$"
+    mkdir -p "$_uci_chk"
+    for _pair in "network:$TMP_NETWORK" "pbr:$TMP_PBR" "dhcp:$TMP_DHCP"; do
+        _pkg=${_pair%%:*}; _uf=${_pair#*:}
+        [ -s "$_uf" ] || continue
+        cp "$_uf" "$_uci_chk/$_pkg"
+        _uerr=$(uci -c "$_uci_chk" show "$_pkg" 2>&1 >/dev/null)
+        if [ -n "$_uerr" ]; then
+            _ubad=$(grep "^config [^ ]* '[^']*'" "$_uf" | grep -v "^config [A-Za-z0-9_]* '[A-Za-z0-9_]*'" | head -3 | tr '\n' ';')
+            COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - ${_pkg}: uci 語法錯誤 (名稱只能英數字和底線) ${_uerr} ${_ubad}"
+        fi
+    done
+    rm -rf "$_uci_chk"
+    # 介面名 = Linux 網卡名, 最長 15 字元 (超過 netifd 建不起來)
+    _ulong=$(sed -n "s/^config interface '\([^']\{16,\}\)'.*/\1/p" "$TMP_NETWORK" 2>/dev/null | tr '\n' ' ')
+    [ -n "$_ulong" ] && COMPONENT_ERRORS="${COMPONENT_ERRORS}\n  - network: 介面名超過 15 字元: ${_ulong}"
+
     # 組件驗證結果
     if [ -n "$COMPONENT_ERRORS" ]; then
         log "🚨 組件欄位驗證失敗！"
