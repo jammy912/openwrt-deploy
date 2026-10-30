@@ -324,6 +324,8 @@ custrule_del() {
 
     echo "$entries" | while read _src _tbl; do
         [ -z "$_src" ] && continue
+        # 只刪現存的: DOWN 期間每輪都會呼叫, 沒有規則時不動也不 log
+        ip rule list | grep -q "^200:.*from ${_src} lookup ${_tbl}\$" || continue
         ip rule del prio 200 from "$_src" lookup "$_tbl" 2>/dev/null
         log_event "[DOWN] $iface CustRule ip rule del from $_src lookup $_tbl"
         log "    動作: CustRule ip rule del from $_src lookup $_tbl"
@@ -381,6 +383,37 @@ custrule_rule_repair() {
     done < "$cache"
 }
 
+# endpoint 換機自救: confirmed DOWN 時, 若 endpoint_host 是網域名稱 → 背景 ifup
+# 重新解析, 換一台機器。
+# Why: netifd 只在 ifup 時解析一次 endpoint, 之後不再查。VPN 業者的某台機器壞掉
+#   或撤出輪替後, 它仍可能回握手但不轉送資料(實測 2026-10-30 wg_mnl 連
+#   151.240.11.25: 握手正常、rx 完全不增加; 換 .15 立刻通)。
+# ⚠️ 不能用「目前 IP 不在 DNS 結果裡」判定已撤下: Surfshark 每次查詢只輪流回
+#   2 個 IP(實測連三次 .15/.12 → .12/.17, 而正常的 .5 都不在), 只用來反向省略
+#   「目前 IP 正好在結果裡」的情況(重解析多半拿回同一台)。
+# DNS 查不到不動作(避免 DNS 掛掉時亂 ifup); 每介面 30 分鐘最多一次
+#   (長時間斷線時不要一直 ifup 觸發 firewall/pbr reload)。
+endpoint_reresolve() {
+    local iface="$1"
+    local stamp="${STATE_DIR}/${iface}.reresolve"
+    local now=$(date '+%s')
+    local host=$(uci -q get "network.@wireguard_${iface}[0].endpoint_host")
+    [ -z "$host" ] && return
+    echo "$host" | grep -qE '^[0-9.]+$' && return
+    local cur=$(wg show "$iface" endpoints 2>/dev/null | awk 'NR==1 {sub(/:[0-9]+$/, "", $2); print $2}')
+    [ -z "$cur" ] || [ "$cur" = "(none)" ] && return
+    local last=$(cat "$stamp" 2>/dev/null || echo 0)
+    [ $(( now - last )) -lt 1800 ] && return
+    local ips=$(nslookup "$host" 2>/dev/null | awk '/^Name:/ {n=1; next} n && /^Address/ {print $NF}')
+    [ -z "$ips" ] && return
+    echo "$ips" | grep -qxF "$cur" && return
+    echo "$now" > "$stamp"
+    log_event "[REPAIR] $iface DOWN, endpoint $cur 換機: ifup 重新解析 $host (DNS 目前回 $(echo $ips))"
+    log "    endpoint $cur 不通 → ifup $iface 重新解析 $host"
+    push_notify "${iface}_WG_🟠Reresolve"
+    (ifup "$iface") &
+}
+
 log "開始檢查 PBR WireGuard 介面連線狀態..."
 
 SECTIONS=$(uci show pbr | grep ".dest_addr='wg" | cut -d'.' -f2)
@@ -414,6 +447,9 @@ for SECTION in $SECTIONS; do
     # 高頻停用檢查：停用中則跳過此介面
     if ! check_flap_disable "$INTERFACE"; then
         echo "skip" > "${STATE_DIR}/${INTERFACE}.pingresult"
+        # 鎖定期間 Sheet 同步(pbr-cust start)也可能把 CustRule 加回 → 照樣刪
+        # (cr_done = 已切走; NO_FALLBACK 介面不會有 cr_done, 維持 black-hole)
+        [ -f "${STATE_DIR}/${INTERFACE}.cr_done" ] && custrule_del "$INTERFACE"
         CHECKED_IFACES="$CHECKED_IFACES $INTERFACE"
         continue
     fi
@@ -561,6 +597,9 @@ for SECTION in $SECTIONS; do
         # 連敗確認完成 → 真切走
         record_down_event "$INTERFACE"
 
+        # endpoint 已撤出 DNS 輪替 → 背景 ifup 重新解析 (NO_FALLBACK 也適用)
+        endpoint_reresolve "$INTERFACE"
+
         # NO_FALLBACK 白名單：DOWN 時「不切 wan」，保持 black-hole 卡死在該 wg，
         # 避免抖動期間漏到 wan(暴露真實 IP / 走錯出口)。不刪主 PBR rule、不
         # custrule_del，wg 回來後第一階段照常修復 → 自動恢復。整點重建仍保留。
@@ -600,11 +639,11 @@ for SECTION in $SECTIONS; do
             log "    動作: ip rule del prio=$_prio fwmark=$_fm → 流量切回 wan（無感）"
         fi
 
-        _cr_done_flag="${STATE_DIR}/${INTERFACE}.cr_done"
-        if [ ! -f "$_cr_done_flag" ]; then
-            custrule_del "$INTERFACE"
-            touch "$_cr_done_flag"
-        fi
+        # 每輪都刪(不只第一次): DOWN 期間 Sheet 同步 → pbr-cust start 會依 Sheet
+        # 的 enabled=1 把 CustRule 加回, 舊邏輯 cr_done 已存在就不再刪 → 裝置被送進
+        # 死隧道(實測 2026-10-30 wg_mnl/.50)。custrule_del 只刪現存規則, 無則不動。
+        custrule_del "$INTERFACE"
+        touch "${STATE_DIR}/${INTERFACE}.cr_done"
 
         # 整點：背景重啟 tunnel
         if [ "$CURRENT_HHMM" = "0400" ]; then
