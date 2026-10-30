@@ -133,6 +133,27 @@ esac
 
 NOW=$(date +%s)
 
+# ---- 改隧道用的 GAS 網址 (只給帶對 token 的電視) ----
+# ?token=<tv token> 與 /etc/myscript/.secrets/tv.token 相符才回 gas_url, 否則 null
+# ★ 只回 exec 網址本身 (去掉 ? 之後): secret.url 帶的是主 token, 能下載整份設定與寫 Index,
+#   絕不能外流; 電視要另帶自己的 TV token 呼叫 GAS 的 SetTunnel (GAS 端另驗)
+# ★ token 只接受 [A-Za-z0-9_-], 不做 URL decode; .secrets/ 在 .gitignore, 不進 git
+GAS_URL=null
+case "&$QUERY_STRING" in
+    *"&token="*)
+        _qt=${QUERY_STRING#*token=}; _qt=${_qt%%&*}
+        _tt=
+        read -r _tt 2>/dev/null < /etc/myscript/.secrets/tv.token
+        case "$_qt" in ''|*[!A-Za-z0-9_-]*) _qt= ;; esac
+        if [ -n "$_qt" ] && [ -n "$_tt" ] && [ "$_qt" = "$_tt" ]; then
+            _gu=
+            read -r _gu 2>/dev/null < /etc/myscript/.secrets/secret.url
+            _gu=${_gu%%\?*}
+            case "$_gu" in https://script.google.com/macros/s/*/exec) GAS_URL="\"$_gu\"" ;; esac
+        fi
+        ;;
+esac
+
 # ---- 系統 ----
 # ★ 單行檔一律用 read 內建讀, 不 cat/awk (每個 fork 在 a53 上約數 ms)
 #   ⚠️ 例外: /proc/sys 的整數檔 (見下方 conntrack 註解)
@@ -644,4 +665,4 @@ printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$_wdev" "$WAN_RX" "$WAN_TX"
 printf '"ports":%s,"wifi":%s,"wifi_mesh":%s,' "$PORTS_JSON" "$WIFI_JSON" "$MESH_JSON"
 printf '"top_hosts":%s,"top_hosts_window_s":%s,' "$TOP_JSON" "$TOP_WIN"
-printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON"
+printf '"qosify":%s,"ping":%s,"wg":[%s],"tailscale":%s,"gas_url":%s}\n' "$QOS_JSON" "$PING_JSON" "$WG_JSON" "$TS_JSON" "$GAS_URL"
