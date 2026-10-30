@@ -181,7 +181,8 @@ main() {
     #       全機隊同一把, 不必再手動放 (2026-10-30)
     # -------------------------------------------------
     TV_COUNT=0
-    _tvt=$(tr -d '\r\n' < "$SECRET_DIR/tv.token" 2>/dev/null)
+    # 2>/dev/null 要擺在 < 前面: 導向由左往右處理, 檔案不存在時才不會噴錯誤
+    _tvt=$(tr -d '\r\n' 2>/dev/null < "$SECRET_DIR/tv.token")
     case "$_tvt" in
         ''|*[!A-Za-z0-9_-]*) ;;
         *)

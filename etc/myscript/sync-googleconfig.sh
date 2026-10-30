@@ -2165,7 +2165,7 @@ NFTEOF
                         ''|*[!A-Za-z0-9_-]*) ;;
                         *)
                             mkdir -p "$TDX_SECRET_DIR"
-                            _tvt_old=$(tr -d '\r\n' < "$TDX_SECRET_DIR/tv.token" 2>/dev/null)
+                            _tvt_old=$(tr -d '\r\n' 2>/dev/null < "$TDX_SECRET_DIR/tv.token")
                             if [ "$_tvt" = "$_tvt_old" ]; then
                                 log "  ⏭️ 電視 App token 與本地相同，不更新"
                             else
