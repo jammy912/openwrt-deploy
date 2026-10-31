@@ -255,20 +255,39 @@ sta_rules_clear() {
 #     那一瞬間 ifstatus wwan 的 dns-server 往往還沒填好 -> 錯過就永遠補不上。
 #     實測 09:40 切換時沒接手, 直到 09:47 手動 rules-refresh 才成功。
 #   ★ 故設計成冪等函式, 由「每輪都會走到」的穩定態路徑也呼叫一次。
+# ★ 2026-10-31 改用公共 DNS, 不再沿用上游 AP 給的(_updns):
+#   真兇 —— 飯店/公共 AP 的 DNS 位址常是 192.168.1.1, 與自家 x60pro 的
+#   LAN IP 完全相同。接手後 uci 寫的是 192.168.1.1, 但封包實際走
+#   `dev phy1-sta0` 打到飯店那台(MAC fc:9f:2a:d7:ae:70), 從設定上
+#   完全看不出來打到誰 —— 解析品質與過濾政策全被飯店決定。
+#   實測 2026-10-31: Chrome 的 Google 帳號驗證(accounts.google.com /
+#   oauth2.googleapis.com)卡住, 而 FB App 正常。
+#   → 改用固定公共 DNS, 不受上游擺佈, 位址也不會與自家網段撞號。
+STA_PUBLIC_DNS="1.1.1.1 8.8.8.8"
 sta_dns_takeover() {
+    # 仍要求 wwan 已起來(有 dns-server 代表 DHCP 完成), 但不採用它的值
     _updns=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')
     [ -n "$_updns" ] || return 0
     _curdns=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ')
-    # 冪等: 已經是上游那組就不要每分鐘重寫 flash + reload dnsmasq
-    [ "$_curdns" = "$_updns" ] && return 0
+    # ★ 備份必須在冪等檢查「之前」(2026-10-31 修):
+    #   舊版把備份放在 return 之後, 當原本的 server 剛好等於目標值時
+    #   (實測: 原設定 192.168.1.1, 上游也給 192.168.1.1)就直接 return,
+    #   .sta_dns_prev 永遠不會建立 -> sta_off 找不到備份就不還原 ->
+    #   DNS upstream 永久停在 STA 期間的值。
     [ -f /etc/myscript/.sta_dns_prev ] || \
         { uci -q get dhcp.@dnsmasq[0].server > /etc/myscript/.sta_dns_prev 2>/dev/null \
           || : > /etc/myscript/.sta_dns_prev; }
+    # 冪等: 已經是目標那組就不要每分鐘重寫 flash + reload dnsmasq
+    # ⚠️ _curdns 來自 `tr '\n' ' '` 尾端會多一個空格, 比對前先正規化,
+    #    否則每分鐘都判定「不同」而重寫 flash(磨損)+reload dnsmasq。
+    _curdns_n=$(echo "$_curdns" | tr -s ' ' | sed 's/ *$//')
+    _want_n=$(echo "$STA_PUBLIC_DNS" | tr -s ' ' | sed 's/ *$//')
+    [ "$_curdns_n" = "$_want_n" ] && return 0
     uci -q delete dhcp.@dnsmasq[0].server
-    for _d in $_updns; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
+    for _d in $STA_PUBLIC_DNS; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
     uci commit dhcp
     /etc/init.d/dnsmasq reload >/dev/null 2>&1
-    log "DNS upstream 改用上游 AP 提供的: $_updns (原: $_curdns)"
+    log "DNS upstream 改用公共 DNS: $STA_PUBLIC_DNS (原: $_curdns; 上游 AP 給的是 $_updns, 刻意不採用)"
 }
 
 sta_rules_apply() {
