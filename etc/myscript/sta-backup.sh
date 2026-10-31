@@ -358,16 +358,33 @@ sta_rules_apply() {
         uci -q delete dhcp.lan.dhcp_option
         uci add_list dhcp.lan.dhcp_option="3,$_sta_ip"
         uci add_list dhcp.lan.dhcp_option="6,$_sta_ip"
-        # ★ 換「網段」時才需要的善後(同網段換位址不需要, 2026-10-31 新增):
+        # ★ 換「網段」時才需要的善後(同網段換位址不需要, 2026-10-31 實測修正):
         #   1. 舊 lease 全部失效 —— client 手上的 192.168.1.x 在新網段不可用,
         #      留著會讓 dnsmasq 把同一個舊 IP 再發回去。清掉強制重新分配。
-        #   2. 靜態綁定(dhcp.@host[].ip)仍寫在舊網段, 這裡不動它 ——
-        #      ⚠️ 改了就要在 sta_off 還原, 風險高於效益; 靜態綁定的裝置
-        #      會因為 lease 檔被清而重新 DISCOVER, dnsmasq 找不到合法的
-        #      同網段靜態值時會從 dhcp-range 正常配發, 不影響連線。
+        #   2. ★ 靜態綁定必須刪除 —— ⚠️ 修正 2026-10-31 上午的錯誤假設:
+        #      我曾寫「dnsmasq 找不到合法的同網段靜態值時會從 dhcp-range
+        #      正常配發」, **實測是錯的**。dnsmasq 看到 MAC 有 dhcp-host
+        #      綁 192.168.1.10, 就堅持發那個 IP; 它不在 192.168.87.0/24
+        #      介面網段內 -> 判定無效 -> **直接不回應, 不會回退動態池**。
+        #      實測後果: 39 筆綁定全在舊網段, 所有 WiFi 裝置拿不到 IP
+        #      (lease=0), 使用者端看到的就是「WiFi 取不到 IP」。
+        #      → 直接整批刪除, **不備份也不還原**: 靜態綁定由 Google Sheet
+        #        下發, sync-googleconfig 每分鐘跑會自己補回來(使用者確認)。
+        #   3. ★ 必須用 restart 不能用 reload —— 另一個同日實測推翻的假設:
+        #      我曾以為 dhcp.lan 用相對值(start/limit)就會自動跟隨介面網段。
+        #      實際上 uci commit + reload **不會重算 dhcp-range**, conf 仍是
+        #      舊網段的 192.168.1.100-249。要 restart 才會依新網段重新產生。
         if [ "$(echo "$_sta_ip" | cut -d. -f1-3)" != "$(echo "$_lan_self" | cut -d. -f1-3)" ]; then
             : > /tmp/dhcp.leases 2>/dev/null
-            log "換網段 ${_self_net}.0/24 → $(echo "$_sta_ip" | cut -d. -f1-3).0/24: 已清空 lease 讓 client 重取"
+            # 靜態綁定: 整批刪除(Sheet 會自己補回來, 不需備份)
+            if uci show dhcp 2>/dev/null | grep -q "@host\[.*\]=host"; then
+                _hn=$(uci show dhcp 2>/dev/null | grep -c "@host\[.*\]=host")
+                while uci -q delete dhcp.@host[0] 2>/dev/null; do :; done
+                log "換網段: 已刪除 $_hn 筆舊網段靜態綁定(由 sync-googleconfig 補回)"
+            fi
+            uci commit dhcp
+            /etc/init.d/dnsmasq restart >/dev/null 2>&1
+            log "換網段 ${_self_net}.0/24 → $(echo "$_sta_ip" | cut -d. -f1-3).0/24: 清 lease + 刪靜態 + restart dnsmasq"
         fi
         # ⚠️ 2026-09-28 走過的死路,別再試: 曾在這裡把 dhcp.lan.ra / dhcpv6 設成
         #   'disabled', 想讓 client 別再拿 br-lan 的 ULA(fdff:...::1)當 IPv6 DNS
@@ -781,9 +798,14 @@ sta_off_raw() {
             ip addr add "$_prev_ip/24" dev br-lan 2>/dev/null
             # ★ 若 STA 期間換過「網段」, 還原時同樣要清 lease(2026-10-31)
             #   —— client 手上是 STA 網段的 IP, 在還原後的網段不可用。
+            #   ⚠️ 同樣必須 restart 不能只 reload: reload 不會重算 dhcp-range,
+            #     conf 會卡在 STA 網段(192.168.87.100-249)而發不出 IP。
+            #   靜態綁定在切換時已刪除, 這裡不用處理 —— sync-googleconfig
+            #   會依 Sheet 把正確網段的綁定補回來。
             if [ "$(echo "$_now_ip" | cut -d. -f1-3)" != "$(echo "$_prev_ip" | cut -d. -f1-3)" ]; then
                 : > /tmp/dhcp.leases 2>/dev/null
-                log "還原跨網段: 已清空 lease 讓 client 重取"
+                /etc/init.d/dnsmasq restart >/dev/null 2>&1
+                log "還原跨網段: 清 lease + restart dnsmasq(重算 dhcp-range)"
             fi
         fi
         # DHCP option 一併清掉, 回到 dnsmasq 預設(發自己的介面位址)
