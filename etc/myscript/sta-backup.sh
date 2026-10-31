@@ -297,12 +297,24 @@ sta_rules_apply() {
     # ⚠️ 通知用 queue_push 不可用 push_notify —— 偵測到衝突的時機正是
     #   「唯一出口還沒建立」, 推播必然送不出去(2026-09-27 使用者指出)。
     _lan_self=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
-    if [ -n "$_gw" ] && [ "$_gw" = "$_lan_self" ]; then
+    # ★ 2026-10-31 修正判斷範圍: 原本只比「IP 完全相同」, 但實測在飯店
+    #   (上游閘道 192.168.1.1 / 本機 LAN 192.168.1.9)兩者不同卻照樣壞 ——
+    #   **同網段就會衝突**, 不必同 IP。症狀: 上網正常(有 default route 可走)
+    #   但 client ping 不到自己的閘道、延遲抖動 16→111ms, 因為
+    #   192.168.1.0/24 同時存在於 br-lan 與 phy1-sta0, ARP 會被上游搶答。
+    #   → 判斷改為比對 /24 網段前綴, 且切換目標改用「不同網段」而非同網段
+    #     換位址(同網段換位址解不了 ARP 衝突)。
+    _gw_net=$(echo "$_gw" | cut -d. -f1-3)
+    _self_net=$(echo "$_lan_self" | cut -d. -f1-3)
+    if [ -n "$_gw" ] && [ -n "$_lan_self" ] && [ "$_gw_net" = "$_self_net" ]; then
         _sta_ip=$(cat /etc/myscript/.sta_lan_ip 2>/dev/null)
         case "$_sta_ip" in ''|*[!0-9.]*) _sta_ip="" ;; esac
-        if [ -z "$_sta_ip" ] || [ "$_sta_ip" = "$_gw" ]; then
-            log "❌ 位址衝突: 上游閘道($_gw) 與本機 LAN IP 相同, 而 .sta_lan_ip 未設或同值"
-            log "   解法: 在 Sheet 的 sta_lan_ip 填一個同網段但不同的位址(例如 192.168.1.9)"
+        # ⚠️ 目標必須是「不同網段」, 同網段(即使不同 IP)無效 —— 這是 2026-10-31
+        #   實測的教訓: .sta_lan_ip=192.168.1.9 對上游 192.168.1.1 仍然衝突。
+        _sta_net=$(echo "$_sta_ip" | cut -d. -f1-3)
+        if [ -z "$_sta_ip" ] || [ "$_sta_net" = "$_gw_net" ]; then
+            log "❌ 網段衝突: 上游閘道($_gw) 與本機 LAN($_lan_self) 同屬 ${_gw_net}.0/24, 而 .sta_lan_ip 未設或仍在同網段"
+            log "   解法: 在 Sheet 的 sta_lan_ip 填一個「不同網段」的位址(例如 192.168.87.1)"
             _cf="/etc/myscript/.sta_conflict_notified"
             _now=$(date +%s); _prev=$(cat "$_cf" 2>/dev/null)
             case "$_prev" in ''|*[!0-9]*) _prev=0 ;; esac
@@ -310,7 +322,7 @@ sta_rules_apply() {
                 echo "$_now" > "$_cf"
                 command -v queue_push >/dev/null 2>&1 && \
                     queue_push "sta-backup-conflict" "sta-lan-ip-unset" \
-                        "上游閘道 $_gw 與本機 LAN IP 相同, 但 Sheet 的 sta_lan_ip 未設定。請填一個同網段不同位址(例如 192.168.1.9)。" \
+                        "上游閘道 $_gw 與本機 LAN $_lan_self 同屬 ${_gw_net}.0/24 網段, 但 Sheet 的 sta_lan_ip 未設或仍在同網段。請填一個「不同網段」的位址(例如 192.168.87.1)。" \
                         >/dev/null 2>&1
             fi
             return 1
@@ -318,7 +330,7 @@ sta_rules_apply() {
         # 切換本機 LAN IP, 避開上游閘道
         # ⚠️ 記下原值供 sta_off 還原 —— 放 flash, 因為 STA 期間可能重開。
         [ -f /etc/myscript/.sta_lan_ip_prev ] || echo "$_lan_self" > /etc/myscript/.sta_lan_ip_prev
-        log "位址衝突($_gw): 本機 LAN $_lan_self → $_sta_ip (避開上游閘道)"
+        log "網段衝突(上游 $_gw / 本機 $_lan_self 同屬 ${_gw_net}.0/24): LAN → $_sta_ip"
         uci set network.lan.ipaddr="$_sta_ip"
         uci commit network
         ip addr del "$_lan_self/24" dev br-lan 2>/dev/null
@@ -327,6 +339,17 @@ sta_rules_apply() {
         uci -q delete dhcp.lan.dhcp_option
         uci add_list dhcp.lan.dhcp_option="3,$_sta_ip"
         uci add_list dhcp.lan.dhcp_option="6,$_sta_ip"
+        # ★ 換「網段」時才需要的善後(同網段換位址不需要, 2026-10-31 新增):
+        #   1. 舊 lease 全部失效 —— client 手上的 192.168.1.x 在新網段不可用,
+        #      留著會讓 dnsmasq 把同一個舊 IP 再發回去。清掉強制重新分配。
+        #   2. 靜態綁定(dhcp.@host[].ip)仍寫在舊網段, 這裡不動它 ——
+        #      ⚠️ 改了就要在 sta_off 還原, 風險高於效益; 靜態綁定的裝置
+        #      會因為 lease 檔被清而重新 DISCOVER, dnsmasq 找不到合法的
+        #      同網段靜態值時會從 dhcp-range 正常配發, 不影響連線。
+        if [ "$(echo "$_sta_ip" | cut -d. -f1-3)" != "$(echo "$_lan_self" | cut -d. -f1-3)" ]; then
+            : > /tmp/dhcp.leases 2>/dev/null
+            log "換網段 ${_self_net}.0/24 → $(echo "$_sta_ip" | cut -d. -f1-3).0/24: 已清空 lease 讓 client 重取"
+        fi
         # ⚠️ 2026-09-28 走過的死路,別再試: 曾在這裡把 dhcp.lan.ra / dhcpv6 設成
         #   'disabled', 想讓 client 別再拿 br-lan 的 ULA(fdff:...::1)當 IPv6 DNS
         #   —— 因為那個位址寫死, 不會跟著 IPv4 從 .1 改成 .9。
@@ -737,6 +760,12 @@ sta_off_raw() {
             uci commit network
             ip addr del "$_now_ip/24" dev br-lan 2>/dev/null
             ip addr add "$_prev_ip/24" dev br-lan 2>/dev/null
+            # ★ 若 STA 期間換過「網段」, 還原時同樣要清 lease(2026-10-31)
+            #   —— client 手上是 STA 網段的 IP, 在還原後的網段不可用。
+            if [ "$(echo "$_now_ip" | cut -d. -f1-3)" != "$(echo "$_prev_ip" | cut -d. -f1-3)" ]; then
+                : > /tmp/dhcp.leases 2>/dev/null
+                log "還原跨網段: 已清空 lease 讓 client 重取"
+            fi
         fi
         # DHCP option 一併清掉, 回到 dnsmasq 預設(發自己的介面位址)
         if [ -n "$(uci -q get dhcp.lan.dhcp_option 2>/dev/null)" ]; then
