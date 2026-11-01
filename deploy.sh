@@ -893,7 +893,22 @@ if [ "$MESH_ROLE" != "client" ]; then
     uci set dhcp.@dnsmasq[0].cachesize='10000'
     uci delete dhcp.@dnsmasq[0].interface 2>/dev/null
     uci add_list dhcp.@dnsmasq[0].interface='lan'
-    uci add_list dhcp.@dnsmasq[0].interface='wg1'
+    # ★ wg1 只在「這台真的有 wg1」時才加(2026-11-01 修):
+    #   ⚠️ 無條件加會害沒有 wg1 的機器整個 local-service 失效 ——
+    #   bind-dynamic 遇到「uci 有定義但 device 不存在」的介面,
+    #   本地子網清單會建不完整, 結果連 127.0.0.1 查詢都被判外部而
+    #   回 REFUSED(實測 2026-11-01 於 MX4200: uci network.wg1 存在但
+    #   `ip link show wg1` → does not exist, nslookup 127.0.0.1 REFUSED)。
+    #   ★ 為何換網段才爆: br-lan 原為 192.168.1.9 與上游同網段時,
+    #     子網比對還能從別處匹配到; 換成 192.168.87.1 後就露餡。
+    #   ⚠️ 不能只查 uci —— MX4200 的 `uci get network.wg1` 回 "interface"
+    #     (設定在), 但 `ip link show wg1` 說 does not exist(從沒 ifup)。
+    #     要查「實際 device 是否存在」才擋得掉。
+    if [ -d /sys/class/net/wg1 ]; then
+        uci add_list dhcp.@dnsmasq[0].interface='wg1'
+    else
+        echo "  ℹ️  本機無 wg1 介面,跳過 dnsmasq interface=wg1(避免 local-service 失效)"
+    fi
     # localservice=0: ★ 不設這個,上面的 interface='wg1' 等於白設 ——
     #   interface 只管「聽哪個介面」,localservice 管「接不接受這個來源」,
     #   兩者是獨立的開關。wg1 的介面位址是 192.168.200.1/32,/32 的子網
