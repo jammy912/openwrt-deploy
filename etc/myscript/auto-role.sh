@@ -79,6 +79,15 @@ while [ $i -lt 120 ]; do
     ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | grep -q '.' && break
     # mesh 有鄰居 → 多機模式
     batctl n 2>/dev/null | grep -q ':' && break
+    # ★ STA 備援供網中 → 也算網路就緒(2026-11-01 補)
+    # ⚠️ 真兇紀錄: 原本只認 wan 與 batman。旅館情境下 WAN 沒接線(up:false)、
+    #    mesh 無鄰居, 但 wwan 其實已經拿到 IP 並扛著整台的對外流量 ——
+    #    判斷式看不到它, 於是**每一輪都必定空等滿 120 秒才超時放行**。
+    #    後果: cron 每分鐘一輪, 上一輪還沒結束下一輪就被「已在執行」擋掉,
+    #    等於 auto-role 的所有健檢在 STA 期間形同半癱(實測 2026-11-01 MX4200:
+    #    log 連續出現「等待網路就緒...」→「⚠️ 等待超時 (120s)」→ 下一輪
+    #    「另一個 auto-role 正在執行，跳過」)。
+    ifstatus wwan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | grep -q '.' && break
     [ $i -eq 0 ] && log "等待網路就緒..."
     sleep 5
     i=$((i + 5))
