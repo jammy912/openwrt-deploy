@@ -1501,6 +1501,41 @@ else
     fi
     # AGH 啟停 & dnsmasq upstream 由 check-adguard.sh 管理
 fi
+
+# ★ dnsmasq 的 interface 清單清除幽靈介面(2026-11-01, 不分角色都要跑)
+# ⚠️ 真兇紀錄 2026-11-01 (MX4200, 旅館 STA 備援中):
+#    deploy.sh 無條件寫 interface='wg1', 但這台的 wg1 只在 uci 有定義、
+#    device 從沒起來(`ip link show wg1` → does not exist)。
+#    bind-dynamic 模式遇到這種幽靈介面, 本地子網清單會建不完整 ——
+#    **連 127.0.0.1 的查詢都被判成外部來源而回 REFUSED**, 整台 DNS 全掛,
+#    但 pidof dnsmasq 有值、status running、DHCPACK 照常 → 從外面看像是
+#    「服務活著卻不解析」, 極難定位。
+# ★ 為何平常不發作: br-lan 與上游同網段時子網比對還能從別處匹配到;
+#    一旦換網段(192.168.1.9 → 192.168.87.1)就露餡。家裡其實一直有這個洞。
+# ★ 定罪方法(移除變因而非推測): 移除幽靈 interface 後把 localservice 設回 1,
+#    REFUSED 次數歸零 → 證明真兇是幽靈介面不是 localservice。
+# ⚠️ 判斷必須查「實際 device」不能只查 uci —— MX4200 正是 uci 有、device 無。
+_ghost_if=""
+for _dif in $(uci -q get dhcp.@dnsmasq[0].interface 2>/dev/null); do
+    # lan/wan 這類 uci 介面名不是 device 名, 交給 netifd 解析後再判斷
+    _dev=$(ifstatus "$_dif" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    [ -z "$_dev" ] && _dev="$_dif"
+    [ -d "/sys/class/net/$_dev" ] && continue
+    _ghost_if="${_ghost_if:+$_ghost_if }$_dif"
+done
+# ⚠️ 先收集再一次處理, 不在迴圈內 del_list —— 迴圈內改 uci 會讓
+#   `uci get` 的清單在迭代中變動, 且萬一後面沒 commit 會留下
+#   「暫存已刪、flash 還在」的半套狀態(2026-11-01 實測踩到)。
+if [ -n "$_ghost_if" ]; then
+    for _g in $_ghost_if; do
+        uci -q del_list dhcp.@dnsmasq[0].interface="$_g"
+    done
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    log "fixup: 移除 dnsmasq 幽靈 interface: $_ghost_if (會害 local-service 失效, 整台 DNS 回 REFUSED)"
+    add_fixup "移除 dnsmasq 幽靈 interface: $_ghost_if"
+fi
+
 [ "$FIXUP" = "1" ] && push_notify "AutoRole fixup: $GW_TYPE $FINAL_IP | ${FIXUP_WHY:-未記錄原因}"
 
 # =====================
