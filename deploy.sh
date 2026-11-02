@@ -900,7 +900,7 @@ if [ "$MESH_ROLE" != "client" ]; then
     #   回 REFUSED(實測 2026-11-01 於 MX4200: uci network.wg1 存在但
     #   `ip link show wg1` → does not exist, nslookup 127.0.0.1 REFUSED)。
     #   ★ 為何換網段才爆: br-lan 原為 192.168.1.9 與上游同網段時,
-    #     子網比對還能從別處匹配到; 換成 192.168.87.1 後就露餡。
+    #     子網比對還能從別處匹配到; 換成 192.168.88.1 後就露餡。
     #   ⚠️ 不能只查 uci —— MX4200 的 `uci get network.wg1` 回 "interface"
     #     (設定在), 但 `ip link show wg1` 說 does not exist(從沒 ifup)。
     #     要查「實際 device 是否存在」才擋得掉。

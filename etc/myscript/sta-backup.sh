@@ -333,7 +333,7 @@ sta_rules_apply() {
         _sta_net=$(echo "$_sta_ip" | cut -d. -f1-3)
         if [ -z "$_sta_ip" ] || [ "$_sta_net" = "$_gw_net" ]; then
             log "❌ 網段衝突: 上游閘道($_gw) 與本機 LAN($_lan_self) 同屬 ${_gw_net}.0/24, 而 .sta_lan_ip 未設或仍在同網段"
-            log "   解法: 在 Sheet 的 sta_lan_ip 填一個「不同網段」的位址(例如 192.168.87.1)"
+            log "   解法: 在 Sheet 的 sta_lan_ip 填一個「不同網段」的位址(例如 192.168.88.1)"
             _cf="/etc/myscript/.sta_conflict_notified"
             _now=$(date +%s); _prev=$(cat "$_cf" 2>/dev/null)
             case "$_prev" in ''|*[!0-9]*) _prev=0 ;; esac
@@ -341,7 +341,7 @@ sta_rules_apply() {
                 echo "$_now" > "$_cf"
                 command -v queue_push >/dev/null 2>&1 && \
                     queue_push "sta-backup-conflict" "sta-lan-ip-unset" \
-                        "上游閘道 $_gw 與本機 LAN $_lan_self 同屬 ${_gw_net}.0/24 網段, 但 Sheet 的 sta_lan_ip 未設或仍在同網段。請填一個「不同網段」的位址(例如 192.168.87.1)。" \
+                        "上游閘道 $_gw 與本機 LAN $_lan_self 同屬 ${_gw_net}.0/24 網段, 但 Sheet 的 sta_lan_ip 未設或仍在同網段。請填一個「不同網段」的位址(例如 192.168.88.1)。" \
                         >/dev/null 2>&1
             fi
             return 1
@@ -364,7 +364,7 @@ sta_rules_apply() {
         #   2. ★ 靜態綁定必須刪除 —— ⚠️ 修正 2026-10-31 上午的錯誤假設:
         #      我曾寫「dnsmasq 找不到合法的同網段靜態值時會從 dhcp-range
         #      正常配發」, **實測是錯的**。dnsmasq 看到 MAC 有 dhcp-host
-        #      綁 192.168.1.10, 就堅持發那個 IP; 它不在 192.168.87.0/24
+        #      綁 192.168.1.10, 就堅持發那個 IP; 它不在 192.168.88.0/24
         #      介面網段內 -> 判定無效 -> **直接不回應, 不會回退動態池**。
         #      實測後果: 39 筆綁定全在舊網段, 所有 WiFi 裝置拿不到 IP
         #      (lease=0), 使用者端看到的就是「WiFi 取不到 IP」。
@@ -799,7 +799,7 @@ sta_off_raw() {
             # ★ 若 STA 期間換過「網段」, 還原時同樣要清 lease(2026-10-31)
             #   —— client 手上是 STA 網段的 IP, 在還原後的網段不可用。
             #   ⚠️ 同樣必須 restart 不能只 reload: reload 不會重算 dhcp-range,
-            #     conf 會卡在 STA 網段(192.168.87.100-249)而發不出 IP。
+            #     conf 會卡在 STA 網段(192.168.88.100-249)而發不出 IP。
             #   靜態綁定在切換時已刪除, 這裡不用處理 —— sync-googleconfig
             #   會依 Sheet 把正確網段的綁定補回來。
             if [ "$(echo "$_now_ip" | cut -d. -f1-3)" != "$(echo "$_prev_ip" | cut -d. -f1-3)" ]; then
