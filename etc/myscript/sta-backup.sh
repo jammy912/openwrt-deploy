@@ -11,7 +11,13 @@
 #   /etc/myscript/.sta_backup_ap      ★ 候選清單, 每行 band<TAB>ssid<TAB>key (600)
 #                                       來自 Sheet 的 sta_backup_{ssid,key,band}{1,2,3}
 #                                       依行序試, 第一個連上的就用
-#                                       band 可填 2g / 5g / auto(auto=掃描決定)
+#                                       band 可填 2g / 5g / 5g1 / 5g2 / auto
+#                                       ★ 三頻機(MX4200 有兩張 5G radio)用
+#                                         5g1 / 5g2 指定第幾張; 5g 等同 5g1。
+#                                         依 radio0→radio3 掃到的順序計數,
+#                                         不是 radio 編號 —— 編號在機隊間不一致
+#                                         (MX4200: radio0=5g; x60pro: radio0=2g)。
+#                                       auto = 掃描決定(會掃 2g / 5g / 5g2)
 #     Sheet 端每個編號欄位可再用 `|` 塞多筆, 例如:
 #       option sta_backup_ssid1 'IOT|cht-52-1F'
 #       option sta_backup_key1  'pass1|pass2'
@@ -153,12 +159,36 @@ mesh_ok() {
 
 # ---------- 取得要用的 radio ----------
 # 用法: pick_radio [band]   band 省略時用預設 2g
+# 支援的 band 值:
+#   2g        2.4GHz
+#   5g        第 1 張 5G(相容舊設定, 等同 5g1)
+#   5g1 5g2   第 n 張 5G —— 給三頻機(MX4200 有兩張 5G radio)
+#   2g1 2g2   同理(極少見, 為對稱而支援)
+#
+# ★ 為什麼用「出現順序」而不是 radio 編號(2026-11-02):
+#   radio 編號在機隊間不一致 —— MX4200 是 radio0=5g/radio1=2g,
+#   x60pro 與 RAX3000Z 是 radio0=2g/radio1=5g(完全相反)。
+#   寫死編號的程式在某些機器上必然選錯卡。這裡一律掃 radio0→radio3
+#   由 uci 的 band 欄位判斷, 再取第 n 個符合的 —— 與編號無關。
+#
+# ⚠️ 兩張 5G 的差別通常是「低頻(36-64) vs 高頻(100-165)」。若要**依頻道**
+#   選卡而非依順序, 參考 auto-role.sh 的 5G 頻道政策: 它用
+#   `iw phy <phy> channels | grep -v disabled` 取硬體實際支援的頻道清單。
+#   本函式刻意不做這件事 —— 使用者要的是「依抓到的順序」這個簡單語意。
 pick_radio() {
     _want="$1"
     [ -z "$_want" ] && _want=2g
+    # 拆出序號: 5g2 → band=5g, n=2;  5g → band=5g, n=1
+    _pr_n=1
+    case "$_want" in
+        *[0-9]g[0-9])  _pr_n="${_want##*g}"; _want="${_want%[0-9]}" ;;
+    esac
+    _pr_i=0
     for _r in radio0 radio1 radio2 radio3; do
         _b=$(uci -q get wireless.$_r.band 2>/dev/null)
-        [ "$_b" = "$_want" ] && { echo "$_r"; return 0; }
+        [ "$_b" = "$_want" ] || continue
+        _pr_i=$(( _pr_i + 1 ))
+        [ "$_pr_i" = "$_pr_n" ] && { echo "$_r"; return 0; }
     done
     return 1
 }
@@ -187,7 +217,10 @@ scan_find() {
     [ -n "$_sf_ssid" ] || return 1
     command -v iwinfo >/dev/null 2>&1 || return 1
     case "$_sf_band" in
-        auto) _sf_bands="2g 5g" ;;
+        # ★ auto 要含 5g2: 三頻機(MX4200)有兩張 5G radio, 只掃 5g 會漏掉第二張
+        #   (2026-11-02)。pick_radio 對不存在的 5g2 會 return 1, 迴圈 continue,
+        #   雙頻機不受影響。
+        auto) _sf_bands="2g 5g 5g2" ;;
         *)    _sf_bands="$_sf_band" ;;
     esac
     for _sf_b in $_sf_bands; do
@@ -936,7 +969,7 @@ show_status() {
     ap_list | awk -F'\t' 'NF>=2 && $2!="" {
         printf "    %d) band=%-5s ssid=[%s] key=%s\n", ++n, $1, $2, ($3=="" ? "(無密碼)" : "已設定(" length($3) " 字元)")
     }'
-    echo "  radio    : 2g→$(pick_radio 2g 2>/dev/null || echo '無')  5g→$(pick_radio 5g 2>/dev/null || echo '無')"
+    echo "  radio    : 2g→$(pick_radio 2g 2>/dev/null || echo '無')  5g→$(pick_radio 5g 2>/dev/null || echo '無')  5g2→$(pick_radio 5g2 2>/dev/null || echo '無')"
     echo "  state    : $(_read "$STATE_F")"
     echo "  失敗計數 : $(_cnt_get "$FAILCNT_F") / $FAIL_NEED"
     echo "  正常計數 : $(_cnt_get "$OKCNT_F") / $OK_NEED"
