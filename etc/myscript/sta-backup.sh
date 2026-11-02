@@ -296,7 +296,54 @@ sta_rules_clear() {
 #   實測 2026-10-31: Chrome 的 Google 帳號驗證(accounts.google.com /
 #   oauth2.googleapis.com)卡住, 而 FB App 正常。
 #   → 改用固定公共 DNS, 不受上游擺佈, 位址也不會與自家網段撞號。
-STA_PUBLIC_DNS="1.1.1.1 8.8.8.8"
+# ★ 2026-11-02 改讀 Sheet 的 upstream_dns1~4(.mesh_upstream_dns, 一行一組),
+#   逐行測試、第一行有任一 DNS 能解析就採用, 無效換下一行;整份都不通或
+#   檔案不存在才退回 STA_FALLBACK_DNS。
+#   ⚠️ 私有位址不排除(使用者決定 2026-11-02): 若 Sheet 填了與飯店同網段
+#      的私有 IP, 可能被飯店設備搶答(10-31 事故同型), 填值時自行留意。
+#   ★ sticky: 目前在用的那組(/tmp/.sta_dns_active)還通且仍在清單內就沿用,
+#      不每分鐘重測整串(清單若含要走 wg 的 DNS, STA 期間 wg 停掉必逾時)。
+STA_FALLBACK_DNS="1.1.1.1 8.8.8.8"
+STA_DNS_LIST=/etc/myscript/.mesh_upstream_dns
+STA_DNS_ACTIVE=/tmp/.sta_dns_active
+STA_DNS_TEST_DOMAIN="www.twse.com.tw"
+
+# $1 = 空白分隔的 DNS 清單; 任一個能解析 STA_DNS_TEST_DOMAIN 就回 0
+sta_dns_probe() {
+    for _pd in $1; do
+        nslookup -timeout=3 "$STA_DNS_TEST_DOMAIN" "$_pd" 2>/dev/null \
+            | awk '/^Address/ && !/#/ {print $NF}' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -qvE '^(0\.|127\.)' && return 0
+    done
+    return 1
+}
+
+# 輸出要用的 DNS(空白分隔, 已正規化)
+sta_dns_pick() {
+    _act=$(cat "$STA_DNS_ACTIVE" 2>/dev/null)
+    _cur=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ' | awk '{$1=$1; print}')
+    # sticky: 必須是「我們上次設的」且目前 uci 仍是它, 並且仍在清單(或就是 fallback)
+    if [ -n "$_act" ] && [ "$_act" = "$_cur" ]; then
+        _inlist=0
+        [ "$_act" = "$STA_FALLBACK_DNS" ] && _inlist=1
+        [ -s "$STA_DNS_LIST" ] && tr ',;' '  ' < "$STA_DNS_LIST" | awk '{$1=$1; print}' \
+            | grep -qxF "$_act" && _inlist=1
+        # 用的是 fallback 但清單裡有更前面的可用 → 不 sticky, 往下重選
+        if [ "$_inlist" = "1" ] && [ "$_act" != "$STA_FALLBACK_DNS" ] && sta_dns_probe "$_act"; then
+            echo "$_act"; return 0
+        fi
+    fi
+    if [ -s "$STA_DNS_LIST" ]; then
+        while IFS= read -r _line; do
+            _line=$(echo "$_line" | tr ',;' '  ' | awk '{$1=$1; print}')
+            [ -z "$_line" ] && continue
+            sta_dns_probe "$_line" && { echo "$_line"; return 0; }
+        done < "$STA_DNS_LIST"
+    fi
+    echo "$STA_FALLBACK_DNS"
+}
+
 sta_dns_takeover() {
     # 仍要求 wwan 已起來(有 dns-server 代表 DHCP 完成), 但不採用它的值
     _updns=$(ifstatus wwan 2>/dev/null | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')
@@ -310,17 +357,18 @@ sta_dns_takeover() {
     [ -f /etc/myscript/.sta_dns_prev ] || \
         { uci -q get dhcp.@dnsmasq[0].server > /etc/myscript/.sta_dns_prev 2>/dev/null \
           || : > /etc/myscript/.sta_dns_prev; }
+    _want_n=$(sta_dns_pick)
     # 冪等: 已經是目標那組就不要每分鐘重寫 flash + reload dnsmasq
     # ⚠️ _curdns 來自 `tr '\n' ' '` 尾端會多一個空格, 比對前先正規化,
     #    否則每分鐘都判定「不同」而重寫 flash(磨損)+reload dnsmasq。
-    _curdns_n=$(echo "$_curdns" | tr -s ' ' | sed 's/ *$//')
-    _want_n=$(echo "$STA_PUBLIC_DNS" | tr -s ' ' | sed 's/ *$//')
+    _curdns_n=$(echo "$_curdns" | awk '{$1=$1; print}')
+    echo "$_want_n" > "$STA_DNS_ACTIVE"
     [ "$_curdns_n" = "$_want_n" ] && return 0
     uci -q delete dhcp.@dnsmasq[0].server
-    for _d in $STA_PUBLIC_DNS; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
+    for _d in $_want_n; do uci add_list dhcp.@dnsmasq[0].server="$_d"; done
     uci commit dhcp
     /etc/init.d/dnsmasq reload >/dev/null 2>&1
-    log "DNS upstream 改用公共 DNS: $STA_PUBLIC_DNS (原: $_curdns; 上游 AP 給的是 $_updns, 刻意不採用)"
+    log "DNS upstream 改用: $_want_n (原: $_curdns; 上游 AP 給的是 $_updns, 刻意不採用)"
 }
 
 sta_rules_apply() {
@@ -867,7 +915,7 @@ sta_off_raw() {
             while read -r _d; do
                 [ -n "$_d" ] && uci add_list dhcp.@dnsmasq[0].server="$_d"
             done < /etc/myscript/.sta_dns_prev
-            rm -f /etc/myscript/.sta_dns_prev
+            rm -f /etc/myscript/.sta_dns_prev "$STA_DNS_ACTIVE"
             uci commit dhcp
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
             log "STA 拆除: 已還原 DNS upstream"
