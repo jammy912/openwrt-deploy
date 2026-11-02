@@ -1452,15 +1452,14 @@ if [ "$GW_TYPE" = "主gw" ]; then
     #       default 成立, 不涵蓋 /32。
     #     ★ 判定式: endpoint 必須經實體出口(wan/sta/br-lan)才到得了, host route
     #       指向任何 wg 介面必然是迴圈 —— 不比對特定形態, 直接用這個不變條件。
-    for _ep in $(uci -q show network 2>/dev/null \
-                 | sed -n 's/^network\.@wireguard_[^[]*\[[0-9]*\]\.endpoint_host=.\(.*\).$/\1/p' \
-                 | sort -u); do
-        # endpoint 可能是網域名(如 wg3 的 duckdns), 要先解析成 IP
-        case "$_ep" in
-            *[!0-9.]*) _epip=$(nslookup "$_ep" 2>/dev/null \
-                               | awk '/^Address/ && $NF ~ /^[0-9.]+$/ {print $NF}' | tail -1) ;;
-            *) _epip="$_ep" ;;
-        esac
+    #     ⚠️ 真兇紀錄 2026-11-02 (x60pro): 原本用 uci endpoint_host + nslookup 求 IP,
+    #       漏抓 wg_tw —— 商用 VPN 的 endpoint 網域是 DNS 輪替, 事後 nslookup 拿到的
+    #       IP 和 netifd ifup 當下釘的不同, 結果 wg_tw 整條繞進 wg2。
+    #       ★ 改讀 `wg show all endpoints`:
+    #       那是核心實際在用的 endpoint IP, 不受 DNS 輪替影響, 也涵蓋撥入端 peer。
+    for _epip in $(wg show all endpoints 2>/dev/null \
+                   | awk '$3 ~ /^[0-9.]+:[0-9]+$/ {split($3, a, ":"); print a[1]}' \
+                   | sort -u); do
         [ -n "$_epip" ] || continue
         # 只看主表裡「這個 IP 的 host route 落在 wg 介面」的情況
         _epdev=$(ip route show "$_epip" 2>/dev/null | awk 'NR==1 {for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')
