@@ -1837,13 +1837,15 @@ main() {
                 log "  📋 DBR 生效: ${RIFACE} (table ${RTABLE_ID}, fwmark ${RFWMARK}) ← ${_dom_cnt} 域名: ${_dom_list}"
 
                 # 寫 nft set
+                # timeout 24h(原 3h)：AGH 的 cache_ttl_min=1800 加 optimistic cache 最長 12h，
+                # client 可能拿到 3h 前的舊 IP，set 已經過期就會漏掉，所以要比 AGH 快取還長。
                 cat >> "$CNROUTE_NFT" << NFTEOF
 
     # === $RIFACE (table $RTABLE_ID, fwmark $RFWMARK) ===
     set ${SET_NAME} {
         type ipv4_addr
         flags interval,timeout
-        timeout 3h
+        timeout 24h
         auto-merge
     }
 NFTEOF
@@ -2401,6 +2403,13 @@ NFTEOF
         if [ $CHANGED_DBROUTE -eq 1 ]; then
             log "🔄 設定域名路由 ip rule..."
             /etc/myscript/dbroute-setup.sh
+            # 有 AGH 時 LAN DNS 被 redirect 到 AGH、不經過 dnsmasq → nftset 看不到 client 的回答。
+            # 讓 AGH 把 DBR 網域轉給 dnsmasq(網域清單跟著新的 dbroute-domains.conf)。
+            # 冪等：清單沒變就不動 AGH。沒裝 AGH 就直接返回。
+            if [ -x /etc/myscript/agh-dbr-upstream.sh ]; then
+                log "🔄 同步 AGH 的 DBR 網域上游(→ dnsmasq)..."
+                /etc/myscript/agh-dbr-upstream.sh 2>&1 | while read -r _l; do log "  $_l"; done
+            fi
             log "🔄 填充域名路由 nft set..."
             /etc/myscript/dbroute-refresh.sh
         fi

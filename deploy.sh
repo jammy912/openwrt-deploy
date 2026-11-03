@@ -1711,6 +1711,14 @@ if [ -f "$AGH_YAML" ] && [ -n "$AGH_BIN" ]; then
 
     echo "  ✅ AdGuard Home yaml 客製化完成"
 
+    # DBR 網域改由 dnsmasq 解析(上面的 upstream_dns 段整段重寫，會洗掉這行，所以要放在之後)。
+    # client DNS 被 redirect 到 AGH、不經過 dnsmasq，不這樣做 nftset 就看不到 client 的回答。
+    # AGH 此時是停止狀態，用 --no-restart 只改檔；dbroute-domains.conf 還沒產生時會跳過，
+    # 等第一次 sync-googleconfig 套用 DBR 時再補。
+    if [ -x /etc/myscript/agh-dbr-upstream.sh ]; then
+        /etc/myscript/agh-dbr-upstream.sh --no-restart | sed 's/^/  /'
+    fi
+
     # 最後才啟動 AGH
     /etc/init.d/adguardhome stop 2>/dev/null || true
     killall AdGuardHome 2>/dev/null || true
