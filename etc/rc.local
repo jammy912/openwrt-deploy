@@ -168,5 +168,13 @@ rm -f /tmp/luci-indexcache
 [ -d /www/cgi-bin ] && [ ! -e /www/cgi-bin/tv-status ] && \
     ln -s /etc/myscript/tv-status.sh /www/cgi-bin/tv-status
 
+
+# 非機隊標準服務: 有裝才補 enable(2026-11-03)
+# ★ sysupgrade 不保留 /etc/rc.d/ 的 S* symlink, 升級後服務會變成 disabled。
+#   實測 .4 升 25.12.6 後 home-watch(LG 遙控)失效, init.d 與程式都還在只是沒 enable。
+# ★ home-watch 不屬於機隊 repo, 這裡只做守衛: 沒裝的機器整行不做事。
+[ -x /etc/init.d/home-watch ] && ! /etc/init.d/home-watch enabled && \
+    { /etc/init.d/home-watch enable; /etc/init.d/home-watch start; }
+
 exit 0
 
