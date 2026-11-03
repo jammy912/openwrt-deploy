@@ -28,12 +28,6 @@ EOF
 fi
 
 mount --bind /tmp/config_ram /etc/config
-# USB 初始化 (僅 MX4200 有 USB 口)
-case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
-    linksys,mx4200*)
-        . /etc/myscript/agh-usb-init.inc
-        ;;
-esac
 
 mkdir -p /tmp/crontabs_ram
 

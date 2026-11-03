@@ -36,7 +36,7 @@
 | `wg-dns-hosts.sh` | 用 upstream DNS 解析 wg peer 的 endpoint_host 寫入 /etc/hosts(避免啟動 DNS 雞生蛋) |
 | `blockdev.sh` / `kick-wifi-client.sh` | 封鎖 / 踢 client |
 | `lock-handler.sh` | 提供 cron 全域排隊鎖、PID 鎖(多腳本共用) |
-| `usb-umount.sh` / `sync-agh-usb.sh` / `agh-usb-init.inc` | USB 掛載 / AGH work-dir 放 USB↔RAM(有 USB 機型) |
+| `usb-umount.sh` / `sync-agh-usb.sh` | USB 卸載 / AGH work-dir 同步回 USB(有 USB 機型; agh-usb-init.inc 已移除 2026-11-03) |
 
 ## 四、AGH / DNS 鏈（簡述）
 

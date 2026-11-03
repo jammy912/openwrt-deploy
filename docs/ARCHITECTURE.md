@@ -52,7 +52,7 @@
 開機
  │
  ├─ rc.local: /etc/config → 複製到 /tmp/config_ram → mount --bind（★RAM overlay）
- │            /etc/crontabs 同樣掛 RAM。有 USB 機型跑 agh-usb-init（AGH work-dir→RAM）
+ │            /etc/crontabs 同樣掛 RAM。
  │            ★ 因此手動改 uci 要 sync-ram2flash 落地（見 ram-overlay-sync-flash.md）
  │
  ├─ S20dbroute: 載入 dbroute.nft（DBR set + 打標 chain）
