@@ -651,6 +651,11 @@ main() {
         # Network: 同時包含 interface 和 wireguard_wg
         sed -n '/^config interface/,/^$/p' "$TMP_DECRYPTED.std" | sed '/^$/d' > "$TMP_NETWORK"
         sed -n '/^config wireguard_wg/,/^$/p' "$TMP_DECRYPTED.std" | sed '/^$/d' >> "$TMP_NETWORK"
+        # ★ 靜態路由(Sheet 的 Route 工作表, 2026-11-03): 只收 sg_ 開頭的 config route。
+        #   套用時也只刪 sg_ 開頭的 route 再重建 —— 本機手動建的(wg3_oci、LuCI 匿名 @route[N])不碰。
+        #   IPv4 = config route, IPv6 = config route6, 兩者都收。
+        #   ⚠️ 錨點要含空白+名稱: 避免誤收 config routerconfig。
+        awk -v q="'" '$0 ~ ("^config route6?[ \t]+" q "?sg_") {p=1; print; next} p && /^config /{p=0} p && NF{print} /^$/{p=0}' "$TMP_DECRYPTED.std" >> "$TMP_NETWORK"
 
         sed -n '/^config host/,/^$/p' "$TMP_DECRYPTED.std" | sed '/^$/d' >> "$TMP_DHCP"
         awk '/^config qosrule/,/^$/ {if (!/^config qosrule/ && NF) print}' "$TMP_DECRYPTED.std" > "$TMP_QOS_RULES"
@@ -1479,6 +1484,18 @@ main() {
                 fi
             done
         fi
+
+        # 刪除 Sheet 管理的靜態路由 route/route6(只刪 sg_ 開頭; 手動建的不碰)
+        sg_routes=$(uci show network 2>/dev/null | sed -n "s/^network\.\(sg_[^.=]*\)=route6\{0,1\}$/\1/p")
+        for section in $sg_routes; do
+            if [ $DRY_RUN -eq 1 ]; then
+                echo "🗑️  [DRY-RUN] uci delete network.$section"
+            else
+                uci delete "network.$section"
+                log "  🗑️  已刪除 Sheet 路由: $section"
+            fi
+        done
+
 
         [ $DRY_RUN -eq 1 ] && echo "💾 [DRY-RUN] uci commit network" || uci commit network
 
