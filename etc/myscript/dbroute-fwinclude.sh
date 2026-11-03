@@ -1,8 +1,8 @@
 #!/bin/sh
-# firewall include �X �C�� firewall restart/reload �ɦ۰ʸ��J dbroute nft �W�h
+# firewall include — 每次 firewall restart/reload 時自動載入 dbroute nft 規則
 NFT_FILE="/etc/myscript/dbroute.nft"
 
-# �ˬd chain �̬O�_�� mark �W�h�]���O�u�ˬd chain �s�b�^
+# 檢查 chain 裡是否有 mark 規則（不是只檢查 chain 存在）
 if nft list chain inet fw4 domain_prerouting 2>/dev/null | grep -q "meta mark set"; then
     # self-heal: firewall reload has been observed to wipe prio-100 DBR ip rules
     # while the nft chain survives. dbroute-setup is idempotent and cheap, so
@@ -12,7 +12,7 @@ if nft list chain inet fw4 domain_prerouting 2>/dev/null | grep -q "meta mark se
     exit 0
 fi
 
-# �R���i��ݯd���� chain/set�A�A���s���J����W�h
+# 刪除可能殘留的空 chain/set，再重新載入完整規則
 nft delete chain inet fw4 domain_prerouting 2>/dev/null
 for _set in $(nft list sets inet fw4 2>/dev/null | grep -o 'route_.*_v4'); do
     nft delete set inet fw4 "$_set" 2>/dev/null
@@ -22,7 +22,7 @@ if [ -f "$NFT_FILE" ]; then
     nft -f "$NFT_FILE" 2>/dev/null && logger -t dbroute "nft rules loaded (firewall include)" || logger -t dbroute "nft rules load failed (firewall include)"
     # self-heal: rebuild DBR ip rules too (see comment above)
     /etc/myscript/dbroute-setup.sh
-    # �I���G���� dnsmasq �������s���J nftset ���O�A�A refresh ��R
+    # 背景：重啟 dnsmasq 讓它重新載入 nftset 指令，再 refresh 填充
     # 2026-10-22 throttle+lock: this block restarts dnsmasq, which itself emits a
     #   network event that can re-trigger the firewall reload that runs this very
     #   include -- a self-feeding loop. Observed on x60pro: wan6 (proto dhcpv6,
