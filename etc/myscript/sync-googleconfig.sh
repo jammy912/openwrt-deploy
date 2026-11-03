@@ -550,8 +550,8 @@ main() {
 
     # 6. 檢查非法 config type (解密金鑰錯誤時會產生亂碼如 0config, 0onfig)
     #    合法前綴: policy, interface, wireguard_wg, host, qosrule, qosinterface,
-    #    crontab, dbroute, pushkey, linecmd (後面可接任意後綴如 _tw, _satellite 等)
-    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|linecmd|routerconfig|batmanmesh)")
+    #    crontab, dbroute, pushkey, linecmd, route(含 route6) (後面可接任意後綴如 _tw, _satellite 等)
+    BAD_CONFIG=$(grep '^config ' "$TMP_DECRYPTED" 2>/dev/null | grep -vE "^config (policy|interface|wireguard_wg|host|qosrule|qosinterface|crontab|dbroute|pushkey|linecmd|routerconfig|route|batmanmesh)")
     if [ -n "$BAD_CONFIG" ]; then
         BAD_COUNT=$(echo "$BAD_CONFIG" | wc -l)
         BAD_SAMPLE=$(echo "$BAD_CONFIG" | head -3 | tr '\n' '; ')
