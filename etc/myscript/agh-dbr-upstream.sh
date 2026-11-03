@@ -13,8 +13,14 @@
 #
 # 冪等：yaml 已經符合預期就直接 exit 0(只做 grep 比對)。只有需要改的時候才
 # --check-config、停 AGH、換檔、啟動 AGH。
-# 呼叫端：sync-googleconfig(DBR 變更後)、deploy.sh(AGH yaml 客製化後)。
-# 用法：agh-dbr-upstream.sh [--no-restart]   (--no-restart：只改檔，不重啟 AGH，給 deploy 用)
+# 呼叫端：sync-googleconfig(DBR 變更後)、deploy.sh(AGH yaml 客製化後)、
+#         dbroute-fwinclude.sh(firewall 事件把 set 重建之後)。
+# 用法：agh-dbr-upstream.sh [--no-restart | --flush-cache]
+#   --no-restart  ：只改檔，不重啟 AGH(給 deploy 用，那時 AGH 本來就停著)
+#   --flush-cache ：route_*_v4 set 剛被重建(清空)時用。yaml 不用改也照樣重啟執行中的 AGH，
+#                   清掉它記憶體裡的快取。原因：client 的查詢在 AGH 快取命中時不會往下問 dnsmasq，
+#                   nftset 就不會把 IP 補回空的 set，要等 AGH 快取過期(cache_ttl_min 1800、
+#                   optimistic 最長 12h)才會恢復。AGH 沒帳密可呼叫 /control/cache_clear，只能重啟。
 
 PATH=/usr/sbin:/sbin:/usr/bin:/bin
 export PATH
@@ -24,9 +30,27 @@ MARK="]127.0.0.1:53'"
 CLIENT_NAME=dnsmasq-loopback
 LOG_TAG=agh-dbr-upstream
 NO_RESTART=0
-[ "$1" = "--no-restart" ] && NO_RESTART=1
+FLUSH_CACHE=0
+case "$1" in
+    --no-restart)  NO_RESTART=1 ;;
+    --flush-cache) FLUSH_CACHE=1 ;;
+esac
 
 log() { logger -t "$LOG_TAG" "$*"; echo "$*"; }
+
+# 清 dnsmasq 快取：AGH 清空後會往下問 dnsmasq，若 dnsmasq 快取命中一樣不會觸發 nftset
+# (2026-11-03 實測：只重啟 AGH，IP 還是補不回 set)。SIGHUP 只清快取與重讀 hosts，不重啟。
+flush_dnsmasq_cache() {
+    killall -HUP dnsmasq 2>/dev/null && log "🧹 已清 dnsmasq 快取(SIGHUP)"
+}
+# 重啟執行中的 AGH 以清除 DNS 快取(沒在跑就不用：沒有快取，也不該由這裡把它叫起來)
+flush_agh_cache() {
+    pidof AdGuardHome >/dev/null 2>&1 || return 0
+    /etc/init.d/adguardhome restart >/dev/null 2>&1
+    log "🧹 已重啟 AGH 清除快取(DBR set 剛重建，$1)"
+}
+# 兩層快取都要清，dnsmasq 先清
+[ "$FLUSH_CACHE" -eq 1 ] && flush_dnsmasq_cache
 
 AGH_YAML=$(uci -q get adguardhome.config.config_file)
 [ -z "$AGH_YAML" ] && AGH_YAML=$(uci -q get adguardhome.config.config)
@@ -57,7 +81,11 @@ if [ -n "$WANT_LINE" ]; then
 else
     [ "$CUR_CNT" -gt 0 ] && NEED=1
 fi
-[ "$NEED" -eq 0 ] && exit 0
+if [ "$NEED" -eq 0 ]; then
+    # yaml 不用改；只有 --flush-cache 時重啟一次清快取(yaml 要改的情況下面本來就會重啟)
+    [ "$FLUSH_CACHE" -eq 1 ] && [ -n "$WANT_LINE" ] && flush_agh_cache "yaml 無變更"
+    exit 0
+fi
 
 # 一般上游(upstream_dns 區塊內、非 [/網域/] 開頭的項目)→ 給 dnsmasq-loopback 用
 GEN_UP=$(awk '

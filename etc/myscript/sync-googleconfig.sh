@@ -2408,7 +2408,9 @@ NFTEOF
             # 冪等：清單沒變就不動 AGH。沒裝 AGH 就直接返回。
             if [ -x /etc/myscript/agh-dbr-upstream.sh ]; then
                 log "🔄 同步 AGH 的 DBR 網域上游(→ dnsmasq)..."
-                /etc/myscript/agh-dbr-upstream.sh 2>&1 | while read -r _l; do log "  $_l"; done
+                # --flush-cache：上面已刪除並重建 route_*_v4 set(全空)，AGH 快取命中不會經過 dnsmasq，
+                # 不清掉的話 client 拿到的 IP 要等 AGH 快取過期才會補回 set。
+                /etc/myscript/agh-dbr-upstream.sh --flush-cache 2>&1 | while read -r _l; do log "  $_l"; done
             fi
             log "🔄 填充域名路由 nft set..."
             /etc/myscript/dbroute-refresh.sh

@@ -49,6 +49,10 @@ if [ -f "$NFT_FILE" ]; then
         echo "$_dbfw_now" > "$_dbfw_ts" 2>/dev/null
         (   sleep 5
             service dnsmasq restart
+            # 2026-11-03: sets were just recreated empty; AGH cache hits never reach
+            #   dnsmasq, so nftset cannot refill them until AGH cache expires.
+            #   Restart AGH (if running) to drop its cache. Same 60s throttle/lock.
+            [ -x /etc/myscript/agh-dbr-upstream.sh ] && /etc/myscript/agh-dbr-upstream.sh --flush-cache >/dev/null 2>&1
             sleep 3
             /etc/myscript/dbroute-refresh.sh
             logger -t dbroute "nft sets refreshed (firewall include)"
