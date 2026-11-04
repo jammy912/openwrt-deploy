@@ -54,6 +54,17 @@ DEBUG="${6:-0}"
 TARGET_DIRECTION=""               # 由 resolve_direction() 自動設定
 DIRECTION_TEXT=""
 
+# ⚠️ 2026-11-04 起 TDX 的 curl 跳過憑證驗證(-k)，這是使用者的決定，屬於暫解。
+#   原因：TDX 在 2026-11-02 之後換上 TWCA 新憑證，伺服器送出的中繼憑證順序顛倒
+#   (leaf → CYBER Root CA → CYBER Root CA G3 → SSL CA)。OpenWrt 的 curl(mbedTLS)
+#   和 uclient-fetch 只會往後找 issuer，驗證失敗(rc=60)，整支就推「驗證失敗」。
+#   25.12.2、25.12.6 都會發生；OpenSSL 和 Windows 會自己重排順序，所以沒事。
+#   代價：不驗證伺服器身分，DNS 汙染或路徑攔截可能拿走 client_secret(appkey)與 token。
+#   根本解：TDX 修正鏈的順序，或附上兩張中繼憑證改用 --cacert(已實測可行)。
+#   確認方式：在路由器上執行 curl -s -o /dev/null -w '%{exitcode}' https://tdx.transportdata.tw/，
+#   回 0 就代表 TDX 已修好，可以把這裡清空，恢復驗證。
+TDX_CURL_OPTS="-k"
+
 TDX_BASE="https://tdx.transportdata.tw/api/basic/v2/Bus"
 AUTH_URL="https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
 # AUTO_CITIES: 自動偵測時依序嘗試的城市 (大台北地區優先)
@@ -68,7 +79,7 @@ query_route_for_city() {
     local url="${TDX_BASE}/Route/City/${city}/${TARGET_ROUTE}"
     local temp_file="/tmp/bus_route_$$.dl"
 
-    curl -s -X GET "$url" \
+    curl -s $TDX_CURL_OPTS -X GET "$url" \
         -H "authorization: Bearer $token" \
         -H "Accept-Encoding: gzip" \
         -o "$temp_file"
@@ -215,7 +226,7 @@ get_access_token() {
 
     # --- 快取未命中: 跟 TDX 要 ---
     local response
-    response=$(curl -s -X POST "$AUTH_URL" \
+    response=$(curl -s $TDX_CURL_OPTS -X POST "$AUTH_URL" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "grant_type=client_credentials" \
         -d "client_id=$APP_ID" \
@@ -251,7 +262,7 @@ fetch_bus_data() {
 
     # Download gzip data to temp file (CITY 在 resolve_direction 後才確定)
     local data_url="${TDX_BASE}/EstimatedTimeOfArrival/City/${CITY}/${TARGET_ROUTE}"
-    curl -s -X GET "$data_url" \
+    curl -s $TDX_CURL_OPTS -X GET "$data_url" \
         -H "authorization: Bearer $token" \
         -H "Accept-Encoding: gzip" \
         -o "$temp_file"
