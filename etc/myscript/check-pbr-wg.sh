@@ -846,6 +846,10 @@ if [ -f "$DBR_CONF" ]; then
                     log_event "[REPAIR] $DR_IFACE dbroute fwmark 已由外部重建, 同步狀態"
                     push_notify "${DR_IFACE}_DBR_🟢UP"
                     db_prev_set "$DR_IFACE" "up"
+                elif [ -z "$DBR_PREV" ]; then
+                    # 開機後一直健康(rule 由 dbroute-setup 建好, 從沒轉換過): 補記狀態給
+                    # tv-status(無檔=unchecked 灰標), 不推播 — UP 推播只留給 down→up
+                    db_prev_set "$DR_IFACE" "up"
                 fi
             else
                 db_up_inc "$DR_IFACE"
@@ -886,6 +890,8 @@ if [ -f "$DBR_CONF" ]; then
                 # NO_FALLBACK：dbroute 也不移除 fwmark，保持 black-hole 不切 wan
                 log_event "[DOWN] $DR_IFACE dbroute 連 ${DOWN_CONFIRM} 輪確認失敗（NO_FALLBACK）→ 保持，不移除 domain routing"
                 log "    NO_FALLBACK: $DR_IFACE dbroute DOWN 不切 wan"
+                # 從沒記過狀態(開機後就斷): 補記 down 給 tv-status, 不推播
+                [ -z "$DBR_PREV" ] && db_prev_set "$DR_IFACE" "down"
             else
                 if [ "$DBR_HAS_RULE" = "1" ]; then
                     ip rule del fwmark "$DR_FWMARK" lookup "$DR_TABLE" 2>/dev/null
@@ -895,6 +901,9 @@ if [ -f "$DBR_CONF" ]; then
                         push_notify "${DR_IFACE}_DBR_🔴Down$(bh_hint "$DR_IFACE")"
                         db_prev_set "$DR_IFACE" "down"
                     fi
+                elif [ -z "$DBR_PREV" ]; then
+                    # rule 本來就不在(開機後就斷, 從沒建過): 補記 down 給 tv-status, 不推播
+                    db_prev_set "$DR_IFACE" "down"
                 fi
                 # 整點: 真確認 down 且介面存在才 ifdown/ifup
                 # (介面不存在通常是用戶手動 ifdown, 不該自動 ifup 違反用戶意圖)
