@@ -39,6 +39,10 @@ cron_global_lock 60 || { lock_remove "$LOCK_NAME"; exit 0; }
 # 配置
 # =====================================================
 REPO_URL="https://github.com/jammy912/openwrt-deploy/archive/main.tar.gz"
+# wget(uclient-fetch) 讀不了 github.com 單行 >4096 bytes 的 content-security-policy
+# header,會卡到逾時(2026-11 起)。curl 優先;沒 curl 或 curl 失敗時,wget 直接抓
+# 轉址目的地 codeload(header 小,內容同一份 tarball)
+REPO_URL_CODELOAD="https://codeload.github.com/jammy912/openwrt-deploy/tar.gz/refs/heads/main"
 TMP_DIR="/tmp/sync-deploy"
 EXTRACT_DIR="$TMP_DIR/openwrt-deploy-main"
 HASH_FILE="/tmp/.sync-deploy_hash"
@@ -113,10 +117,22 @@ main() {
     # 1. 下載 repo
     # -------------------------------------------------
     log "📥 下載最新版本..."
-    wget -qO "$TMP_DIR/deploy.tar.gz" "$REPO_URL" 2>/dev/null
-    if [ $? -ne 0 ]; then
-        log "❌ 下載失敗"
-        push_notify "SyncDeploy_DownloadFailed"
+    DL_RC=1
+    DL_ERR=""
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 -m 120 -o "$TMP_DIR/deploy.tar.gz" "$REPO_URL" 2>/dev/null
+        DL_RC=$?
+        [ $DL_RC -ne 0 ] && DL_ERR="curl rc=$DL_RC"
+    fi
+    if [ $DL_RC -ne 0 ]; then
+        rm -f "$TMP_DIR/deploy.tar.gz"
+        wget -qO "$TMP_DIR/deploy.tar.gz" "$REPO_URL_CODELOAD" 2>/dev/null
+        DL_RC=$?
+        [ $DL_RC -ne 0 ] && DL_ERR="${DL_ERR:+$DL_ERR, }wget rc=$DL_RC"
+    fi
+    if [ $DL_RC -ne 0 ]; then
+        log "❌ 下載失敗 ($DL_ERR)"
+        push_notify "SyncDeploy_DownloadFailed ($DL_ERR)"
         cleanup
         exit 1
     fi
