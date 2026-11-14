@@ -171,6 +171,10 @@ jnum _l1 _l2 _l3
 LOAD="[$_l1,$_l2,$_l3]"
 MEM_TOTAL= MEM_AVAIL=
 eval "$(awk '/^MemTotal:/ {printf "MEM_TOTAL=%d\n", $2*1024} /^MemAvailable:/ {printf "MEM_AVAIL=%d\n", $2*1024}' /proc/meminfo 2>/dev/null)"
+# flash(overlay)用量,bytes;沒 /overlay 或 df 失敗 → jnum 轉 null(前端隱藏)
+# 欄位從尾端數(NF-4=1K-blocks, NF-2=Available),避免裝置名過長換行時欄位位移
+FLASH_TOTAL= FLASH_AVAIL=
+[ -d /overlay ] && eval "$(df -k /overlay 2>/dev/null | awk 'NR>1 && NF>=5 {printf "FLASH_TOTAL=%.0f\nFLASH_AVAIL=%.0f\n", $(NF-4)*1024, $(NF-2)*1024; exit}')"
 CPUS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
 
 # ---- CPU 使用率 (%) = 與「上一次被呼叫時」的 /proc/stat 相減 ----
@@ -692,11 +696,12 @@ fi
 printf 'Content-Type: application/json\r\n'; hdr; printf '\r\n'
 [ "$REQUEST_METHOD" = HEAD ] && exit 0
 _ts_now=$NOW _role=$ROLE _wdev=$WAN_DEV
-jnum _ts_now UPTIME CPUS CPU_PCT CPU_WIN MEM_TOTAL MEM_AVAIL CPU_TEMP CT_COUNT CT_MAX DHCP_CLIENTS WAN_RX WAN_TX
+jnum _ts_now UPTIME CPUS CPU_PCT CPU_WIN MEM_TOTAL MEM_AVAIL FLASH_TOTAL FLASH_AVAIL CPU_TEMPCT_COUNT CT_MAX DHCP_CLIENTS WAN_RX WAN_TX
 jstr HOST _role _wdev
 printf '{"v":1,"ts":%s,"host":%s,"role":%s,"uptime":%s,"cpus":%s,"cpu_pct":%s,"cpu_pct_window_s":%s,"load":%s,' \
     "$_ts_now" "$HOST" "$_role" "$UPTIME" "$CPUS" "$CPU_PCT" "$CPU_WIN" "$LOAD"
-printf '"mem_total":%s,"mem_available":%s,"cpu_temp_c":%s,' "$MEM_TOTAL" "$MEM_AVAIL" "$CPU_TEMP"
+printf '"mem_total":%s,"mem_available":%s,"flash_total":%s,"flash_available":%s,"cpu_temp_c":%s,' \
+    "$MEM_TOTAL" "$MEM_AVAIL" "$FLASH_TOTAL" "$FLASH_AVAIL" "$CPU_TEMP"
 printf '"conntrack":{"count":%s,"max":%s},"dhcp_clients":%s,' "$CT_COUNT" "$CT_MAX" "$DHCP_CLIENTS"
 printf '"wan":%s,"wan6":%s,"wan_dev":%s,"wan_rx_bytes":%s,"wan_tx_bytes":%s,' \
     "$WAN_JSON" "$WAN6_JSON" "$_wdev" "$WAN_RX" "$WAN_TX"
